@@ -1,0 +1,64 @@
+# JuriX Backend — Render Deployment Configuration
+# https://docs.render.com/infrastructure-as-code
+
+services:
+  - type: web
+    name: jurix-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: frankfurt  # closest to Cameroon
+    plan: starter      # 512 MB RAM — upgrade to standard for 2GB
+
+    # Health check
+    healthCheckPath: /health
+
+    # Env vars — fill these in the Render dashboard or set here (non-secret only)
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+
+      # App
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+
+      # Neon PostgreSQL (set via Render dashboard — never commit secrets)
+      # Format: postgresql+asyncpg://user:password@ep-xxx.neon.tech/neondb?sslmode=require
+      - key: DATABASE_URL
+        sync: false   # fill in Render dashboard
+
+      # Upstash Redis
+      # Format: rediss://:password@xxxx.upstash.io:6379
+      - key: REDIS_URL
+        sync: false
+
+      # Gemini API
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3-flash
+      - key: GEMINI_EMBEDDING_MODEL
+        value: models/gemini-embedding-001
+
+      # LlamaParse
+      - key: LLAMA_CLOUD_API_KEY
+        sync: false
+
+      # Meilisearch (optional — comment out if not using)
+      - key: MEILISEARCH_URL
+        sync: false
+      - key: MEILISEARCH_KEY
+        sync: false
+
+      # Security
+      - key: SECRET_KEY
+        generateValue: true   # Render will auto-generate a random value
+
+      # CORS — your Vercel frontend URL(s), comma-separated
+      - key: ALLOWED_ORIGINS
+        value: https://jurix.vercel.app
+
+      # LlamaParse / LlamaCloud
+      - key: LLAMA_CLOUD_API_KEY
+        sync: false
