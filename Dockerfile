@@ -60,8 +60,8 @@ ENV PYTHONUNBUFFERED=1 \
     ML_MODELS_PATH=/app/models \
     LOG_LEVEL=INFO
 
-# Render provides PORT env var — use it directly
-# Use 1 worker on Render Starter (512 MB RAM); scale up on paid plans
+# Railway injects the PORT env var automatically
+# Use 1 worker; scale up depending on Railway plan
 CMD uvicorn app.main:app \
     --host 0.0.0.0 \
     --port ${PORT:-8000} \
