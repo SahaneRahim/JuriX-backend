@@ -4,8 +4,6 @@ alembic==1.18.4
     # via jurix-backend (pyproject.toml)
 amqp==5.3.1
     # via kombu
-annotated-doc==0.0.4
-    # via typer
 annotated-types==0.7.0
     # via pydantic
 anyio==3.7.1
@@ -22,15 +20,8 @@ bcrypt==5.0.0
     # via passlib
 billiard==4.2.4
     # via celery
-blis==1.3.3
-    # via thinc
 camel-converter==5.1.0
     # via meilisearch
-catalogue==2.0.10
-    # via
-    #   spacy
-    #   srsly
-    #   thinc
 celery==5.6.3
     # via
     #   jurix-backend (pyproject.toml)
@@ -52,7 +43,6 @@ click==8.3.2
     #   click-didyoumean
     #   click-plugins
     #   click-repl
-    #   typer
     #   uvicorn
 click-didyoumean==0.3.1
     # via celery
@@ -60,46 +50,24 @@ click-plugins==1.1.1.2
     # via celery
 click-repl==0.3.0
     # via celery
-cloudpathlib==0.23.0
-    # via weasel
 colorama==0.4.6
     # via
     #   click
     #   tqdm
     #   uvicorn
-    #   wasabi
-confection==1.3.3
-    # via
-    #   spacy
-    #   thinc
-    #   weasel
 cryptography==46.0.6
     # via
     #   google-auth
     #   pdfminer-six
     #   python-jose
-cymem==2.0.13
-    # via
-    #   preshed
-    #   spacy
-    #   thinc
 ecdsa==0.19.2
     # via python-jose
 fastapi==0.104.1
     # via jurix-backend (pyproject.toml)
 fasttext==0.9.3
     # via jurix-backend (pyproject.toml)
-filelock==3.25.2
-    # via
-    #   huggingface-hub
-    #   torch
-    #   transformers
 flower==2.0.1
     # via jurix-backend (pyproject.toml)
-fsspec==2026.3.0
-    # via
-    #   huggingface-hub
-    #   torch
 google-ai-generativelanguage==0.6.15
     # via google-generativeai
 google-api-core==2.30.2
@@ -145,14 +113,7 @@ httplib2==0.31.2
 httptools==0.7.1
     # via uvicorn
 httpx==0.25.2
-    # via
-    #   jurix-backend (pyproject.toml)
-    #   weasel
-huggingface-hub==0.36.2
-    # via
-    #   sentence-transformers
-    #   tokenizers
-    #   transformers
+    # via jurix-backend (pyproject.toml)
 humanize==4.15.0
     # via flower
 idna==3.11
@@ -160,10 +121,6 @@ idna==3.11
     #   anyio
     #   httpx
     #   requests
-jinja2==3.1.6
-    # via
-    #   spacy
-    #   torch
 joblib==1.5.3
     # via
     #   jurix-backend (pyproject.toml)
@@ -176,46 +133,21 @@ lxml==6.0.2
     # via python-docx
 mako==1.3.10
     # via alembic
-markdown-it-py==4.0.0
-    # via rich
 markupsafe==3.0.3
-    # via
-    #   jinja2
-    #   mako
-mdurl==0.1.2
-    # via markdown-it-py
+    # via mako
 meilisearch==0.31.6
     # via jurix-backend (pyproject.toml)
-mpmath==1.3.0
-    # via sympy
-murmurhash==1.0.15
-    # via
-    #   preshed
-    #   spacy
-    #   thinc
-networkx==3.6.1
-    # via torch
 numpy==1.26.4
     # via
     #   jurix-backend (pyproject.toml)
-    #   blis
     #   fasttext
     #   pgvector
     #   scikit-learn
     #   scipy
-    #   sentence-transformers
-    #   spacy
-    #   thinc
-    #   transformers
 packaging==26.0
     # via
-    #   huggingface-hub
     #   kombu
     #   pytesseract
-    #   spacy
-    #   thinc
-    #   transformers
-    #   weasel
 passlib==1.7.4
     # via jurix-backend (pyproject.toml)
 pdf2image==1.17.0
@@ -231,11 +163,6 @@ pillow==12.2.0
     #   pdf2image
     #   pdfplumber
     #   pytesseract
-    #   sentence-transformers
-preshed==3.0.13
-    # via
-    #   spacy
-    #   thinc
 prometheus-client==0.24.1
     # via flower
 prompt-toolkit==3.0.52
@@ -272,15 +199,10 @@ pydantic==2.12.5
     #   fastapi
     #   google-generativeai
     #   pydantic-settings
-    #   spacy
-    #   thinc
-    #   weasel
 pydantic-core==2.41.5
     # via pydantic
 pydantic-settings==2.13.1
     # via jurix-backend (pyproject.toml)
-pygments==2.20.0
-    # via rich
 pyjwt==2.12.1
     # via redis
 pyparsing==3.3.2
@@ -307,112 +229,52 @@ python-multipart==0.0.6
 pytz==2026.1.post1
     # via flower
 pyyaml==6.0.3
-    # via
-    #   huggingface-hub
-    #   transformers
-    #   uvicorn
+    # via uvicorn
 redis==5.3.1
     # via jurix-backend (pyproject.toml)
-regex==2026.4.4
-    # via transformers
 requests==2.33.1
     # via
     #   google-api-core
-    #   huggingface-hub
     #   meilisearch
-    #   spacy
-    #   transformers
-rich==14.3.3
-    # via typer
 rsa==4.9.1
     # via python-jose
-safetensors==0.7.0
-    # via transformers
 scikit-learn==1.8.0
-    # via
-    #   jurix-backend (pyproject.toml)
-    #   sentence-transformers
-scipy==1.17.1
-    # via
-    #   scikit-learn
-    #   sentence-transformers
-sentence-transformers==2.7.0
     # via jurix-backend (pyproject.toml)
+scipy==1.17.1
+    # via scikit-learn
 setuptools==81.0.0
-    # via
-    #   fasttext
-    #   spacy
-    #   thinc
-    #   torch
-shellingham==1.5.4
-    # via typer
+    # via fasttext
 six==1.17.0
     # via
     #   ecdsa
     #   langdetect
     #   python-dateutil
-smart-open==7.5.1
-    # via weasel
 sniffio==1.3.1
     # via
     #   anyio
     #   httpx
-spacy==3.8.14
-    # via jurix-backend (pyproject.toml)
-spacy-legacy==3.0.12
-    # via spacy
-spacy-loggers==1.0.5
-    # via spacy
 sqlalchemy==2.0.49
     # via
     #   jurix-backend (pyproject.toml)
     #   alembic
-srsly==2.5.3
-    # via
-    #   spacy
-    #   thinc
-    #   weasel
 starlette==0.27.0
     # via fastapi
-sympy==1.14.0
-    # via torch
-thinc==8.3.13
-    # via spacy
 threadpoolctl==3.6.0
     # via scikit-learn
-tokenizers==0.22.2
-    # via transformers
-torch==2.11.0
-    # via
-    #   jurix-backend (pyproject.toml)
-    #   sentence-transformers
 tornado==6.5.5
     # via flower
 tqdm==4.67.3
-    # via
-    #   google-generativeai
-    #   huggingface-hub
-    #   sentence-transformers
-    #   spacy
-    #   transformers
-transformers==4.57.6
-    # via sentence-transformers
-typer==0.24.1
-    # via
-    #   spacy
-    #   weasel
+    # via google-generativeai
 typing-extensions==4.15.0
     # via
     #   alembic
     #   fastapi
     #   google-generativeai
     #   grpcio
-    #   huggingface-hub
     #   pydantic
     #   pydantic-core
     #   python-docx
     #   sqlalchemy
-    #   torch
     #   typing-inspection
 typing-inspection==0.4.2
     # via
@@ -435,18 +297,9 @@ vine==5.1.0
     #   amqp
     #   celery
     #   kombu
-wasabi==1.1.3
-    # via
-    #   spacy
-    #   thinc
-    #   weasel
 watchfiles==1.1.1
     # via uvicorn
 wcwidth==0.6.0
     # via prompt-toolkit
-weasel==1.0.0
-    # via spacy
 websockets==16.0
     # via uvicorn
-wrapt==2.1.2
-    # via smart-open

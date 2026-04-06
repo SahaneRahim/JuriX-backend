@@ -1,5 +1,5 @@
 # JuriX Backend — Production Dockerfile
-# Python 3.11 avec support ML (scikit-learn, spaCy, fastText)
+# Python 3.11 avec support ML (scikit-learn, fastText)
 
 FROM python:3.11-slim
 
@@ -29,12 +29,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy application code
 COPY . .
 
-# Download spaCy models
-RUN python -m spacy download fr_core_news_sm --quiet || echo "fr model download failed" && \
-    python -m spacy download en_core_web_sm --quiet || echo "en model download failed"
-
 # Create required directories
-RUN mkdir -p /app/models/spacy /app/models/fasttext /app/logs /app/data
+RUN mkdir -p /app/models/fasttext /app/logs /app/data
 
 # Download fastText language identification model
 RUN if [ ! -f /app/models/fasttext/lid.176.bin ]; then \

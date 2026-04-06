@@ -1,12 +1,11 @@
 """
 Service de détection automatique de langue pour documents juridiques.
 
-Ce service utilise 3 méthodes de détection en parallèle:
+Ce service utilise 2 méthodes de détection en parallèle:
 - langdetect: Détection rapide basée sur n-grams
-- spaCy: Détection NLP basée sur reconnaissance d'entités
 - fastText: Détection ML basée sur embeddings
 
-Vote majoritaire (2/3 minimum) pour robustesse maximale.
+Vote majoritaire pour robustesse.
 Objectif: 99% précision, <1s temps de réponse.
 
 Usage:
@@ -25,9 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import fasttext
 import langdetect
-import spacy
 from langdetect import DetectorFactory
-from spacy.language import Language
 
 # Configuration langdetect pour reproductibilité
 DetectorFactory.seed = 0
@@ -44,20 +41,16 @@ class LanguageDetectionError(Exception):
 
 class LanguageDetector:
     """
-    Service de détection automatique de langue avec triple ensemble.
+    Service de détection automatique de langue avec double vérification.
 
-    Utilise 3 méthodes en parallèle pour une précision maximale:
+    Utilise 2 méthodes en parallèle pour une précision maximale:
     - langdetect (n-grams, rapide)
-    - spaCy (NLP, entités)
     - fastText (ML, embeddings)
 
-    Vote majoritaire (2/3) pour décision finale.
     Précision cible: 99%
     Temps cible: <1 seconde
 
     Attributes:
-        nlp_fr: Modèle spaCy français
-        nlp_en: Modèle spaCy anglais
         fasttext_model: Modèle fastText de détection de langue
     """
 
@@ -75,11 +68,6 @@ class LanguageDetector:
         logger.info("🚀 Initialisation du LanguageDetector...")
 
         try:
-            # Charger modèles spaCy
-            logger.info("  → Chargement des modèles spaCy...")
-            self.nlp_fr: Language = spacy.load("fr_core_news_sm")
-            self.nlp_en: Language = spacy.load("en_core_web_sm")
-            logger.info("  ✅ Modèles spaCy chargés")
 
             # Charger modèle fastText
             logger.info("  → Chargement du modèle fastText...")
@@ -93,7 +81,7 @@ class LanguageDetector:
             self.fasttext_model = fasttext.load_model(fasttext_model_path)
             logger.info("  ✅ Modèle fastText chargé")
 
-            logger.info("✅ LanguageDetector initialisé avec succès (3 modèles prêts)")
+            logger.info("✅ LanguageDetector initialisé avec succès (2 modèles prêts)")
 
         except Exception as e:
             error_msg = f"Échec du chargement des modèles: {e}"
@@ -106,8 +94,8 @@ class LanguageDetector:
         """
         Détecte la langue d'un texte avec vote majoritaire.
 
-        Exécute les 3 méthodes en parallèle pour performance optimale.
-        Applique un vote majoritaire sur les résultats.
+        Exécute les 2 méthodes en parallèle pour performance optimale.
+        Applique un vote sur les résultats.
 
         Args:
             text: Texte à analyser (recommandé: >100 caractères)
@@ -155,14 +143,13 @@ class LanguageDetector:
         # Log pour debug
         logger.debug(f"Détection de langue pour texte de {len(processed_text)} caractères")
 
-        # Exécution parallèle des 3 méthodes
+        # Exécution parallèle des 2 méthodes
         votes: List[Tuple[str, str, float]] = []  # (method_name, language, confidence)
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            # Soumettre les 3 tâches
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # Soumettre les 2 tâches
             future_to_method = {
                 executor.submit(self._detect_langdetect, processed_text): "langdetect",
-                executor.submit(self._detect_spacy, processed_text): "spacy",
                 executor.submit(self._detect_fasttext, processed_text): "fasttext",
             }
 
@@ -280,76 +267,6 @@ class LanguageDetector:
         except Exception as e:
             raise Exception(f"langdetect error: {e}") from e
 
-    def _detect_spacy(self, text: str) -> Tuple[str, float]:
-        """
-        Détection via spaCy (NLP, reconnaissance d'entités).
-
-        Stratégie: Tester avec les 2 modèles (FR et EN) et comparer
-        les scores basés sur le nombre d'entités reconnues.
-
-        Args:
-            text: Texte à analyser
-
-        Returns:
-            Tuple (language_code, confidence)
-
-        Raises:
-            Exception: Si détection échoue
-        """
-        try:
-            # Limiter la longueur pour performance spaCy
-            sample = text[:1000]
-
-            # Analyser avec modèle FR
-            doc_fr = self.nlp_fr(sample)
-            score_fr = self._calculate_spacy_score(doc_fr)
-
-            # Analyser avec modèle EN
-            doc_en = self.nlp_en(sample)
-            score_en = self._calculate_spacy_score(doc_en)
-
-            # Déterminer langue gagnante
-            total_score = score_fr + score_en
-
-            if total_score == 0:
-                # Aucune entité reconnue, fallback sur FR
-                return "fr", 0.5
-
-            if score_fr > score_en:
-                confidence = min(score_fr / total_score, 0.99)
-                return "fr", confidence
-            else:
-                confidence = min(score_en / total_score, 0.99)
-                return "en", confidence
-
-        except Exception as e:
-            raise Exception(f"spaCy error: {e}") from e
-
-    def _calculate_spacy_score(self, doc) -> float:
-        """
-        Calcule un score de qualité pour un document spaCy.
-
-        Basé sur:
-        - Nombre d'entités nommées reconnues
-        - Nombre de tokens reconnus
-
-        Args:
-            doc: Document spaCy analysé
-
-        Returns:
-            Score de qualité (float)
-        """
-        if len(doc) == 0:
-            return 0.0
-
-        # Score basé sur entités (poids fort)
-        entity_score = len(doc.ents) * 2.0
-
-        # Score basé sur tokens (poids faible)
-        token_score = len([token for token in doc if not token.is_punct]) * 0.1
-
-        return entity_score + token_score
-
     def _detect_fasttext(self, text: str) -> Tuple[str, float]:
         """
         Détection via fastText (ML, embeddings).
@@ -390,9 +307,8 @@ class LanguageDetector:
         Applique un vote majoritaire sur les résultats des méthodes.
 
         Logique:
-        - 3/3 d'accord: consensus parfait
-        - 2/3 d'accord: consensus majoritaire
-        - 1/3 ou moins: pas de consensus, prendre le score le plus élevé
+        - 2/2 d'accord: consensus parfait
+        - 1/2: désaccord, utiliser langdetect comme tiebreaker si score élevé
 
         Args:
             votes: Liste de (method_name, language, confidence)
@@ -465,22 +381,6 @@ class LanguageDetector:
             Dictionnaire avec statut de chaque composant
         """
         status = {"service": "LanguageDetector", "status": "healthy", "models": {}}
-
-        # Vérifier spaCy FR
-        try:
-            test_doc = self.nlp_fr("Test")
-            status["models"]["spacy_fr"] = "✅ OK"
-        except Exception as e:
-            status["models"]["spacy_fr"] = f"❌ Error: {e}"
-            status["status"] = "degraded"
-
-        # Vérifier spaCy EN
-        try:
-            test_doc = self.nlp_en("Test")
-            status["models"]["spacy_en"] = "✅ OK"
-        except Exception as e:
-            status["models"]["spacy_en"] = f"❌ Error: {e}"
-            status["status"] = "degraded"
 
         # Vérifier fastText
         try:
