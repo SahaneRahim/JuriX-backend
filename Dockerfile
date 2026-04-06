@@ -19,15 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy dependency files first (for Docker layer caching)
-COPY pyproject.toml poetry.lock* ./
+# Copy dependency file first (for Docker layer caching)
+COPY requirements.txt ./
 
-# Install Poetry and dependencies
+# Upgrade pip and install dependencies blazingly fast
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir poetry==1.7.1
-
-RUN poetry config virtualenvs.create false
-RUN poetry install --no-dev --no-interaction --no-ansi
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
