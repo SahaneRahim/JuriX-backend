@@ -1,11 +1,11 @@
 # JuriX Backend — Production Dockerfile
-# Python 3.11 avec support ML (scikit-learn, fastText)
+# Python 3.11 — PostgreSQL native (no Redis/Meilisearch/Celery)
 
 FROM python:3.11-slim
 
 LABEL maintainer="JuriX Team <support@jurix.cm>"
-LABEL description="JuriX v2.1 Backend API"
-LABEL version="2.1.0"
+LABEL description="JuriX v3.0 Backend API"
+LABEL version="3.0.0"
 
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -22,7 +22,7 @@ WORKDIR /app
 # Copy dependency file first (for Docker layer caching)
 COPY requirements.txt ./
 
-# Upgrade pip and install dependencies blazingly fast
+# Upgrade pip and install dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
@@ -53,8 +53,7 @@ ENV PYTHONUNBUFFERED=1 \
     ML_MODELS_PATH=/app/models \
     LOG_LEVEL=INFO
 
-# Railway injects the PORT env var automatically
-# Use 1 worker; scale up depending on Railway plan
+# Railway injects PORT automatically
 CMD uvicorn app.main:app \
     --host 0.0.0.0 \
     --port ${PORT:-8000} \
