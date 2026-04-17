@@ -24,11 +24,11 @@ from app.services.file_upload_service import FileUploadError, FileUploadService
 logger = logging.getLogger(__name__)
 
 # Create router
-router = APIRouter(prefix="/api/v1/upload", tags=["File Upload"])
+router = APIRouter(tags=["File Upload"])
 
 # Initialize service (singleton pattern)
 # In production, this should be dependency-injected
-_upload_service: FileUploadService = None
+_upload_service: FileUploadService | None = None
 
 
 def get_upload_service() -> FileUploadService:

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "jurix-backend"
-version = "2.1.0"
+version = "3.0.0"
 description = "JuriX v2.1 Backend API - Plateforme Juridique Camerounaise"
 authors = ["JuriX Team"]
 readme = "README.md"
@@ -20,18 +20,14 @@ psycopg2-binary = "^2.9.9"
 asyncpg = "^0.29.0"
 pgvector = "^0.2.3"
 
-# Async & Tasks
-celery = "^5.3.4"
-redis = "^5.0.1"
-flower = "^2.0.1"
+# (Async background processing via FastAPI BackgroundTasks - no broker needed)
 
 # Security
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}
 passlib = {extras = ["bcrypt"], version = "^1.7.4"}
 python-multipart = "^0.0.6"
 
-# Search
-meilisearch = "^0.31.0"
+# (Meilisearch replaced by PostgreSQL tsvector + pg_trgm)
 
 # Document Processing
 pypdf = "^3.17.0"
@@ -75,7 +71,7 @@ mypy = "^1.7.1"
 pylint = "^3.0.3"
 
 # Type stubs
-types-redis = "^4.6.0"
+
 
 [build-system]
 requires = ["poetry-core"]

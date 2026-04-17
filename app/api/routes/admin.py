@@ -15,7 +15,7 @@ Date: 2026-01-11
 import logging
 import platform
 from datetime import datetime
-from typing import Dict, List
+from typing import Any, Dict, List, TypedDict, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
@@ -25,7 +25,7 @@ from app.core.database import get_db, health_check_db
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
+router = APIRouter(tags=["Admin"])
 
 
 # ==================== SCHEMAS ====================
@@ -58,13 +58,23 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     created_at: datetime
+ 
+ 
+class UserDict(TypedDict):
+    """Internal dictionary type for mock storage."""
+    id: int
+    email: str
+    username: str
+    role: str
+    is_active: bool
+    created_at: datetime
 
 
 # ==================== MOCK USER STORAGE ====================
 # TODO: Replace with actual database model
 
 
-_mock_users = [
+_mock_users: List[UserDict] = [
     {
         "id": 1,
         "email": "admin@jurix.cm",
@@ -123,7 +133,17 @@ async def list_users(
     logger.info(f"📋 GET /admin/users - skip={skip}, limit={limit}")
     
     users = _mock_users[skip : skip + limit]
-    return users
+    return [
+        UserResponse(
+            id=u["id"],
+            email=u["email"],
+            username=u["username"],
+            role=u["role"],
+            is_active=u["is_active"],
+            created_at=u["created_at"]
+        ) 
+        for u in users
+    ]
 
 
 @router.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -170,9 +190,9 @@ async def create_user(
             )
     
     # Create new user
-    new_user = {
+    new_user: UserDict = {
         "id": _next_user_id,
-        "email": user.email,
+        "email": str(user.email),
         "username": user.username,
         "role": user.role,
         "is_active": user.is_active,
@@ -183,7 +203,14 @@ async def create_user(
     _next_user_id += 1
     
     logger.info(f"✅ User created: ID={new_user['id']}, email={new_user['email']}")
-    return new_user
+    return UserResponse(
+        id=new_user["id"],
+        email=new_user["email"],
+        username=new_user["username"],
+        role=new_user["role"],
+        is_active=new_user["is_active"],
+        created_at=new_user["created_at"]
+    )
 
 
 @router.put("/users/{user_id}", response_model=UserResponse)
@@ -223,11 +250,19 @@ async def update_user(
     
     # Update fields
     update_data = user_update.model_dump(exclude_unset=True)
+    user_raw = cast(Dict[str, Any], user)
     for field, value in update_data.items():
-        user[field] = value
+        user_raw[field] = value
     
     logger.info(f"✅ User {user_id} updated")
-    return user
+    return UserResponse(
+        id=user["id"],
+        email=user["email"],
+        username=user["username"],
+        role=user["role"],
+        is_active=user["is_active"],
+        created_at=user["created_at"]
+    )
 
 
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -24,7 +24,7 @@ from app.models.law import Law
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/analytics", tags=["Analytics"])
+router = APIRouter(tags=["Analytics"])
 
 
 # ==================== DASHBOARD OVERVIEW ====================

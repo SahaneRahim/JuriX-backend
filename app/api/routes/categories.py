@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 # Create router
 router = APIRouter(
-    prefix="/api/v1/categories",
     tags=["categories"],
     responses={
         400: {"description": "Bad Request - Validation error"},

@@ -45,33 +45,19 @@ async def health():
     return {"status": "healthy"}
 
 
-# Include routers
-app.include_router(language.router)
-app.include_router(classifier.router)
-app.include_router(articles.router)
-app.include_router(
-    search.router,
-    prefix="/api/v1/search",
-    tags=["search"]
-)
-app.include_router(
-    rag.router,
-    prefix="/api/v1/rag",
-    tags=["rag", "chatbot"]
-)
-app.include_router(
-    categories.router,
-    tags=["categories"]
-)
-app.include_router(
-    personas.router,
-    tags=["personas"]
-)
-app.include_router(upload.router)
-app.include_router(ocr.router)
-app.include_router(laws.router)
-app.include_router(analytics.router)
-app.include_router(admin.router)
-app.include_router(batch_upload.router)  # Batch upload with WebSocket
+# Include routers with global /api/v1 prefix
+app.include_router(language.router, prefix="/api/v1/language", tags=["language"])
+app.include_router(classifier.router, prefix="/api/v1/classifier", tags=["classifier"])
+app.include_router(search.router, prefix="/api/v1/search", tags=["search"])
+app.include_router(categories.router, prefix="/api/v1/categories", tags=["categories"])
+app.include_router(articles.router, prefix="/api/v1/articles", tags=["articles"])
+app.include_router(personas.router, prefix="/api/v1/personas", tags=["personas"])
+app.include_router(rag.router, prefix="/api/v1/rag", tags=["rag", "chatbot"])
+app.include_router(upload.router, prefix="/api/v1/upload", tags=["upload"])
+app.include_router(ocr.router, prefix="/api/v1/ocr", tags=["ocr"])
+app.include_router(laws.router, prefix="/api/v1/laws", tags=["laws"])
+app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["analytics"])
+app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
+app.include_router(batch_upload.router, prefix="/api/v1/batch-upload", tags=["batch"])
 # Trigger reload
 

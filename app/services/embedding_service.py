@@ -2,50 +2,30 @@
 Service de génération d'embeddings vectoriels pour recherche sémantique.
 
 Ce service utilise Gemini API pour générer des embeddings 3072-dim
-multilingues (FR/EN) avec cache Redis pour optimiser les performances.
+multilingues (FR/EN) avec cache PostgreSQL pour optimiser les performances.
 
 Architecture:
 - Model: models/gemini-embedding-001 (Gemini API)
 - Dimensions: 3072 (compatible pgvector)
-- Cache: Redis avec TTL 7 jours
+- Cache: Table embedding_cache PostgreSQL avec TTL 7 jours (remplace Redis)
 - Performance: <300ms single, <2s batch(10)
 
-Usage:
-    service = EmbeddingService()
-
-    # Single embedding
-    emb = service.generate_embedding("Article 1er du Code civil")
-    # np.ndarray shape (3072,)
-
-    # Batch embeddings
-    embs = service.generate_batch_embeddings([
-        "Article 1er...",
-        "Article 2..."
-    ])
-    # List[np.ndarray]
-
-    # Similarity
-    score = service.similarity(emb1, emb2)  # 0.0 to 1.0
-
-Performance cible:
-- Single: <300ms
-- Batch (10): <2s
-- Batch (32): <6s
-- Cache hit: <10ms
-
 Author: JuriX Team
-Version: 2.0.0 (Gemini API)
+Version: 3.0.0 (PostgreSQL cache - no Redis)
 """
 
 import hashlib
 import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-import redis
 import google.generativeai as genai
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -60,72 +40,39 @@ class EmbeddingService:
     """
     Service de génération d'embeddings vectoriels pour recherche sémantique.
 
-    Utilise Gemini API avec modèle gemini-embedding-001 optimisé pour:
-    - Recherche sémantique dans textes juridiques
-    - Support français et anglais
-    - Embeddings de dimension 3072 (compatible pgvector)
-    - Cache Redis pour performances optimales
-
-    Caractéristiques:
-    - Model: models/gemini-embedding-001 (Gemini)
-    - Normalisation L2 automatique (cosine similarity)
-    - Batch processing cache-aware
-    - Retry logic pour robustesse
-    - Graceful degradation si Redis indisponible
-
-    Performance:
-    - Single embedding: <300ms
-    - Batch (10 embeddings): <2s
-    - Cache hit: <10ms
+    Utilise Gemini API avec cache PostgreSQL (table embedding_cache).
+    Supporte FR/EN, dimensions 3072, normalisation L2 automatique.
 
     Attributes:
         EMBEDDING_MODEL: Nom du modèle Gemini
         EMBEDDING_DIM: Dimension des embeddings (3072)
         CACHE_TTL_SECONDS: Durée de vie cache (7 jours)
-        redis_client: Client Redis (optionnel)
         use_cache: Flag activation cache
     """
 
-    # Configuration constantes
     EMBEDDING_MODEL = settings.GEMINI_EMBEDDING_MODEL
     EMBEDDING_DIM = 3072
     CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 jours
-    MAX_TEXT_LENGTH = 10000  # Limite sécurité
+    MAX_TEXT_LENGTH = 10000
     MAX_RETRIES = 3
     RETRY_DELAY = 1  # seconds
 
     def __init__(
         self,
-        redis_url: Optional[str] = None,
         use_cache: bool = True,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
     ):
         """
         Initialise le service d'embeddings.
 
-        Configure Gemini API et initialise optionnellement la connexion 
-        Redis pour le cache.
+        Configure Gemini API et optionnellement le cache PostgreSQL.
 
         Args:
-            redis_url: URL connexion Redis (ex: "redis://localhost:6379/0").
-                      Si None, utilise settings.REDIS_URL par défaut.
-            use_cache: Active/désactive le cache Redis
+            use_cache: Active/désactive le cache PostgreSQL
             api_key: Clé API Gemini (si None, utilise settings.GEMINI_API_KEY)
 
         Raises:
             EmbeddingServiceError: Si Gemini API ne peut pas être initialisée
-
-        Example:
-            >>> # Avec cache (défaut)
-            >>> service = EmbeddingService()
-            >>> 
-            >>> # Sans cache
-            >>> service = EmbeddingService(use_cache=False)
-            >>> 
-            >>> # Redis custom
-            >>> service = EmbeddingService(
-            ...     redis_url="redis://:password@localhost:6379/1"
-            ... )
         """
         logger.info("🚀 Initialisation EmbeddingService (Gemini API)...")
 
@@ -134,144 +81,105 @@ class EmbeddingService:
             api_key = api_key or settings.GEMINI_API_KEY
             if not api_key:
                 raise EmbeddingServiceError("GEMINI_API_KEY non configurée")
-            
             genai.configure(api_key=api_key)
             logger.info(f"✅ Gemini API configurée (model: {self.EMBEDDING_MODEL})")
         except Exception as e:
             logger.error(f"❌ Échec configuration Gemini API: {e}")
-            raise EmbeddingServiceError(
-                f"Impossible de configurer Gemini API: {e}"
-            ) from e
+            raise EmbeddingServiceError(f"Impossible de configurer Gemini API: {e}") from e
 
-        # Initialisation cache Redis
+        # Cache PostgreSQL (connexion synchrone pour les tasks Celery/background)
         self.use_cache = use_cache
-        self.redis_client = None
+        self._sync_engine = None
+        self._sync_session_factory = None
 
         if use_cache:
             try:
-                redis_url = redis_url or settings.REDIS_URL
-                self.redis_client = redis.from_url(
-                    redis_url,
-                    decode_responses=False,  # Binary pour np.array
-                    socket_connect_timeout=2,
-                    socket_timeout=2
-                )
-                # Test connexion
-                self.redis_client.ping()
-                logger.info(f"✅ Cache Redis connecté: {redis_url}")
+                sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+                self._sync_engine = create_engine(sync_url, pool_pre_ping=True, pool_size=2)
+                self._sync_session_factory = sessionmaker(bind=self._sync_engine)
+                logger.info("✅ EmbeddingService cache PostgreSQL activé")
             except Exception as e:
-                logger.warning(
-                    f"⚠️  Redis non disponible, cache désactivé: {e}"
-                )
-                self.redis_client = None
+                logger.warning(f"⚠️ Cache PostgreSQL non disponible, désactivé: {e}")
                 self.use_cache = False
-        else:
-            logger.info("ℹ️  Cache Redis désactivé")
 
         logger.info(
             f"✅ EmbeddingService initialisé "
             f"(dim={self.EMBEDDING_DIM}, cache={self.use_cache}, provider=Gemini)"
         )
 
-    def generate_embedding(
-        self,
-        text: str,
-        normalize: bool = True
-    ) -> np.ndarray:
+    # ==================== PUBLIC API ====================
+
+    def generate_embedding(self, text: str, normalize: bool = True) -> np.ndarray:
         """
         Génère l'embedding pour un texte unique via Gemini API.
 
-        Vérifie d'abord le cache Redis, génère l'embedding si nécessaire,
+        Vérifie d'abord le cache PostgreSQL, génère l'embedding si nécessaire,
         puis le stocke dans le cache pour utilisation future.
 
         Args:
-            text: Texte à encoder (article de loi, question, etc.)
+            text: Texte à encoder
             normalize: Applique normalisation L2 (True recommandé pour cosine)
 
         Returns:
-            Embedding numpy array de dimension (3072,), normalisé si demandé
+            Embedding numpy array de dimension (3072,)
 
         Raises:
             ValueError: Si texte vide ou trop long (>10000 chars)
             EmbeddingServiceError: Si génération échoue
-
-        Performance:
-            - Cache hit: <10ms
-            - Cache miss: <300ms (Gemini API)
-
-        Example:
-            >>> service = EmbeddingService()
-            >>> emb = service.generate_embedding(
-            ...     "Article 1er du Code civil camerounais"
-            ... )
-            >>> emb.shape
-            (3072,)
-            >>> np.linalg.norm(emb)  # Normalized
-            1.0
         """
         assert isinstance(text, str), "text must be a string"
         assert isinstance(normalize, bool), "normalize must be a boolean"
 
         start_time = time.time()
-
-        # Validation
         self._validate_text(text)
-
-        # Prétraitement pour cache key
         cache_key = self._get_cache_key(text)
 
-        # Tentative récupération cache
-        if self.use_cache and self.redis_client:
-            cached_embedding = self._get_from_cache(cache_key)
+        # Tentative récupération cache PostgreSQL
+        if self.use_cache:
+            cached_embedding = self._get_from_pg_cache(cache_key)
             if cached_embedding is not None:
                 elapsed = (time.time() - start_time) * 1000
                 logger.debug(f"🔍 Cache HIT ({elapsed:.1f}ms): {cache_key[:20]}...")
                 return cached_embedding
 
-        # Génération embedding via Gemini API
+        # Génération embedding via Gemini API avec retry
         for attempt in range(self.MAX_RETRIES):
             try:
                 result = genai.embed_content(
                     model=self.EMBEDDING_MODEL,
                     content=text,
-                    task_type="retrieval_document"
+                    task_type="retrieval_document",
                 )
-                
-                embedding = np.array(result['embedding'], dtype=np.float32)
+                embedding = np.array(result["embedding"], dtype=np.float32)
 
-                # Validation dimension
                 if embedding.shape[0] != self.EMBEDDING_DIM:
                     raise EmbeddingServiceError(
                         f"Dimension incorrecte: {embedding.shape[0]} != {self.EMBEDDING_DIM}"
                     )
 
-                # Normalisation L2 si demandée
                 if normalize:
                     norm = np.linalg.norm(embedding)
                     if norm > 0:
                         embedding = embedding / norm
 
-                # Stockage cache
-                if self.use_cache and self.redis_client:
-                    self._store_in_cache(cache_key, embedding)
+                # Stockage dans cache PostgreSQL
+                if self.use_cache:
+                    self._store_in_pg_cache(cache_key, embedding)
 
                 elapsed = (time.time() - start_time) * 1000
-                logger.debug(
-                    f"⏱️  Embedding généré en {elapsed:.1f}ms "
-                    f"(dim={embedding.shape[0]}, norm={normalize})"
-                )
-
+                logger.debug(f"⏱️ Embedding généré en {elapsed:.1f}ms (dim={embedding.shape[0]})")
                 return embedding
 
             except Exception as e:
                 if attempt < self.MAX_RETRIES - 1:
-                    logger.warning(f"⚠️  Tentative {attempt + 1} échouée, retry: {e}")
+                    logger.warning(f"⚠️ Tentative {attempt + 1} échouée, retry: {e}")
                     time.sleep(self.RETRY_DELAY * (attempt + 1))
                 else:
                     logger.error(f"❌ Erreur génération embedding après {self.MAX_RETRIES} tentatives: {e}")
-                    raise EmbeddingServiceError(
-                        f"Échec génération embedding: {e}"
-                    ) from e
+                    raise EmbeddingServiceError(f"Échec génération embedding: {e}") from e
+
+        # Fallback in case loop exits without returning or raising
+        raise EmbeddingServiceError("Impossible de générer l'embedding (tentatives invalides).")
 
     def generate_batch_embeddings(
         self,
@@ -279,12 +187,10 @@ class EmbeddingService:
         batch_size: int = 20,
         normalize: bool = True,
         max_retries: int = 3,
-        retry_delay: float = 5.0
+        retry_delay: float = 5.0,
     ) -> List[np.ndarray]:
         """
         Génère les embeddings pour un batch de textes (cache-aware).
-
-        Pipeline: validate → check cache → generate missing → reconstitute.
 
         Args:
             texts: Liste de textes à encoder
@@ -295,15 +201,10 @@ class EmbeddingService:
 
         Returns:
             Liste d'embeddings numpy array (ordre préservé)
-
-        Raises:
-            ValueError: Si liste vide ou textes invalides
-            EmbeddingServiceError: Si génération échoue
         """
         assert texts, "La liste de textes ne peut pas être vide"
         start_time = time.time()
 
-        # Validate all texts
         for idx, text in enumerate(texts):
             try:
                 self._validate_text(text)
@@ -312,7 +213,7 @@ class EmbeddingService:
 
         logger.info(f"🔄 Génération batch: {len(texts)} textes...")
 
-        # Phase 1: Check cache
+        # Phase 1: Check cache PostgreSQL
         embeddings_dict, texts_to_generate, indices_to_generate = self._check_batch_cache(texts)
         cache_hits = len(texts) - len(texts_to_generate)
         logger.info(f"📊 Cache: {cache_hits} hits, {len(texts_to_generate)} misses")
@@ -330,10 +231,9 @@ class EmbeddingService:
 
                 self._generate_chunk_with_retry(
                     chunk_texts, chunk_indices, embeddings_dict,
-                    current_chunk, chunk_count, normalize, max_retries, retry_delay
+                    current_chunk, chunk_count, normalize, max_retries, retry_delay,
                 )
 
-                # Rate limit delay between chunks
                 if chunk_idx + batch_size < total:
                     time.sleep(0.5)
 
@@ -347,6 +247,115 @@ class EmbeddingService:
         )
         return embeddings_list
 
+    def similarity(self, emb1: np.ndarray, emb2: np.ndarray) -> float:
+        """Calcule la similarité cosine entre deux embeddings."""
+        if emb1.shape != (self.EMBEDDING_DIM,):
+            raise ValueError(f"emb1 dimension incorrecte: {emb1.shape} != ({self.EMBEDDING_DIM},)")
+        if emb2.shape != (self.EMBEDDING_DIM,):
+            raise ValueError(f"emb2 dimension incorrecte: {emb2.shape} != ({self.EMBEDDING_DIM},)")
+        return max(0.0, min(1.0, float(np.dot(emb1, emb2))))
+
+    def health_check(self) -> Dict[str, Any]:
+        """Vérifie l'état de santé du service."""
+        status_info: Dict[str, Any] = {
+            "service": "EmbeddingService",
+            "provider": "Gemini API",
+            "model": self.EMBEDDING_MODEL,
+            "dimensions": self.EMBEDDING_DIM,
+            "cache_enabled": self.use_cache,
+            "cache_backend": "PostgreSQL" if self.use_cache else "disabled",
+            "status": "healthy",
+        }
+
+        try:
+            test_emb = self.generate_embedding("test", normalize=False)
+            if test_emb.shape[0] != self.EMBEDDING_DIM:
+                status_info["status"] = "degraded"
+                status_info["api_error"] = f"Dimension incorrecte: {test_emb.shape[0]}"
+        except Exception as e:
+            status_info["status"] = "unhealthy"
+            status_info["api_error"] = str(e)
+
+        return status_info
+
+    # ==================== POSTGRESQL CACHE (private) ====================
+
+    def _get_pg_session(self):
+        """Retourne une session synchrone PostgreSQL."""
+        if self._sync_session_factory is None:
+            return None
+        return self._sync_session_factory()
+
+    def _get_from_pg_cache(self, text_hash: str) -> Optional[np.ndarray]:
+        """
+        Récupère un embedding du cache PostgreSQL (table embedding_cache).
+
+        Args:
+            text_hash: Clé de cache (hash SHA-256 du texte)
+
+        Returns:
+            Embedding numpy array ou None si absent/expiré
+        """
+        if not self.use_cache or self._sync_session_factory is None:
+            return None
+
+        try:
+            from sqlalchemy import text as sql_text
+            session = self._get_pg_session()
+            if session is None:
+                return None
+            with session:
+                result = session.execute(
+                    sql_text(
+                        "SELECT embedding_json FROM embedding_cache "
+                        "WHERE text_hash = :key AND expires_at > now()"
+                    ),
+                    {"key": text_hash},
+                )
+                row = result.fetchone()
+                if row:
+                    embedding_list = json.loads(row[0])
+                    return np.array(embedding_list, dtype=np.float32)
+        except Exception as e:
+            logger.debug(f"⚠️ Cache PG read failed ({text_hash[:16]}...): {e}")
+
+        return None
+
+    def _store_in_pg_cache(self, text_hash: str, embedding: np.ndarray) -> None:
+        """
+        Stocke un embedding dans la table embedding_cache PostgreSQL.
+
+        Args:
+            text_hash: Clé de cache
+            embedding: Embedding numpy array à stocker
+        """
+        if not self.use_cache or self._sync_session_factory is None:
+            return
+
+        try:
+            from sqlalchemy import text as sql_text
+            expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=self.CACHE_TTL_SECONDS)
+            embedding_json = json.dumps(embedding.tolist())
+
+            session = self._get_pg_session()
+            if session is None:
+                return
+            with session:
+                session.execute(
+                    sql_text(
+                        "INSERT INTO embedding_cache (text_hash, embedding_json, expires_at) "
+                        "VALUES (:key, :data, :exp) "
+                        "ON CONFLICT (text_hash) DO UPDATE "
+                        "SET embedding_json = :data, expires_at = :exp"
+                    ),
+                    {"key": text_hash, "data": embedding_json, "exp": expires_at},
+                )
+                session.commit()
+        except Exception as e:
+            logger.debug(f"⚠️ Cache PG write failed ({text_hash[:16]}...): {e}")
+
+    # ==================== BATCH CACHE HELPERS ====================
+
     def _check_batch_cache(self, texts: List[str]):
         """Check cache for all texts, return dict of hits and lists of misses."""
         embeddings_dict = {}
@@ -355,8 +364,8 @@ class EmbeddingService:
 
         for idx, text in enumerate(texts):
             cache_key = self._get_cache_key(text)
-            if self.use_cache and self.redis_client:
-                cached_emb = self._get_from_cache(cache_key)
+            if self.use_cache:
+                cached_emb = self._get_from_pg_cache(cache_key)
                 if cached_emb is not None:
                     embeddings_dict[idx] = cached_emb
                     continue
@@ -367,7 +376,7 @@ class EmbeddingService:
 
     def _generate_chunk_with_retry(
         self, chunk_texts, chunk_indices, embeddings_dict,
-        current_chunk, chunk_count, normalize, max_retries, retry_delay
+        current_chunk, chunk_count, normalize, max_retries, retry_delay,
     ):
         """Generate embeddings for a single chunk with retry logic."""
         logger.info(f"  📝 Chunk {current_chunk}/{chunk_count}: {len(chunk_texts)} texts...")
@@ -377,11 +386,9 @@ class EmbeddingService:
                 result = genai.embed_content(
                     model=self.EMBEDDING_MODEL,
                     content=chunk_texts,
-                    task_type="retrieval_document"
+                    task_type="retrieval_document",
                 )
-                new_embeddings = [
-                    np.array(emb, dtype=np.float32) for emb in result['embedding']
-                ]
+                new_embeddings = [np.array(emb, dtype=np.float32) for emb in result["embedding"]]
 
                 if normalize:
                     new_embeddings = [
@@ -389,219 +396,43 @@ class EmbeddingService:
                         for emb in new_embeddings
                     ]
 
-                # Store in dict and cache
                 for idx, text, embedding in zip(chunk_indices, chunk_texts, new_embeddings):
                     embeddings_dict[idx] = embedding
-                    if self.use_cache and self.redis_client:
-                        cache_key = self._get_cache_key(text)
-                        self._store_in_cache(cache_key, embedding)
+                    if self.use_cache:
+                        self._store_in_pg_cache(self._get_cache_key(text), embedding)
 
                 logger.info(f"  ✅ Chunk {current_chunk}/{chunk_count} completed")
-                return  # Success
+                return
 
             except Exception as e:
                 if attempt < max_retries - 1:
                     wait_time = retry_delay * (attempt + 1)
                     logger.warning(
-                        f"  ⚠️ Chunk {current_chunk} failed (attempt {attempt + 1}/{max_retries}): {e}. "
-                        f"Retrying in {wait_time}s..."
+                        f"  ⚠️ Chunk {current_chunk} failed (attempt {attempt + 1}): {e}. "
+                        f"Retry in {wait_time}s..."
                     )
                     time.sleep(wait_time)
                 else:
-                    logger.error(f"❌ Chunk {current_chunk} failed after {max_retries} attempts: {e}")
                     raise EmbeddingServiceError(
-                        f"Échec génération batch embeddings après {max_retries} tentatives: {e}"
+                        f"Échec génération batch après {max_retries} tentatives: {e}"
                     ) from e
 
-    def similarity(
-        self,
-        emb1: np.ndarray,
-        emb2: np.ndarray
-    ) -> float:
-        """
-        Calcule la similarité cosine entre deux embeddings.
-
-        Args:
-            emb1: Premier embedding (3072,)
-            emb2: Deuxième embedding (3072,)
-
-        Returns:
-            Score de similarité entre 0.0 et 1.0
-            (1.0 = identiques, 0.0 = orthogonaux)
-
-        Raises:
-            ValueError: Si dimensions incorrectes ou non-matching
-
-        Example:
-            >>> service = EmbeddingService()
-            >>> emb1 = service.generate_embedding("Article 1er")
-            >>> emb2 = service.generate_embedding("Article premier")
-            >>> score = service.similarity(emb1, emb2)
-            >>> score > 0.8  # Très similaires
-            True
-        """
-        # Validation dimensions
-        if emb1.shape != (self.EMBEDDING_DIM,):
-            raise ValueError(
-                f"emb1 dimension incorrecte: {emb1.shape} != ({self.EMBEDDING_DIM},)"
-            )
-        if emb2.shape != (self.EMBEDDING_DIM,):
-            raise ValueError(
-                f"emb2 dimension incorrecte: {emb2.shape} != ({self.EMBEDDING_DIM},)"
-            )
-
-        # Cosine similarity (dot product si normalisés)
-        similarity_score = float(np.dot(emb1, emb2))
-
-        # Clamp entre 0 et 1 (erreurs arrondis)
-        return max(0.0, min(1.0, similarity_score))
-
-    def health_check(self) -> Dict[str, Any]:
-        """
-        Vérifie l'état de santé du service.
-
-        Teste:
-        - Disponibilité de Gemini API (génération test)
-        - Connectivité Redis si cache activé
-        - Configuration actuelle
-
-        Returns:
-            Dictionnaire avec status et métadonnées
-
-        Example:
-            >>> service = EmbeddingService()
-            >>> health = service.health_check()
-            >>> health['status']
-            'healthy'
-            >>> health['dimensions']
-            3072
-        """
-        status_info = {
-            "service": "EmbeddingService",
-            "provider": "Gemini API",
-            "model": self.EMBEDDING_MODEL,
-            "dimensions": self.EMBEDDING_DIM,
-            "cache_enabled": self.use_cache,
-            "status": "healthy"
-        }
-
-        # Test Gemini API
-        try:
-            test_emb = self.generate_embedding("test", normalize=False)
-            if test_emb.shape[0] != self.EMBEDDING_DIM:
-                status_info["status"] = "degraded"
-                status_info["api_error"] = f"Dimension incorrecte: {test_emb.shape[0]}"
-        except Exception as e:
-            status_info["status"] = "unhealthy"
-            status_info["api_error"] = str(e)
-
-        # Test cache Redis
-        if self.use_cache and self.redis_client:
-            try:
-                self.redis_client.ping()
-                status_info["cache_status"] = "connected"
-            except Exception as e:
-                status_info["cache_status"] = "disconnected"
-                status_info["cache_error"] = str(e)
-        else:
-            status_info["cache_status"] = "disabled"
-
-        return status_info
-
-    # ==================== MÉTHODES PRIVÉES ====================
+    # ==================== PRIVATE HELPERS ====================
 
     def _validate_text(self, text: str) -> None:
-        """
-        Valide le texte d'entrée.
-
-        Args:
-            text: Texte à valider
-
-        Raises:
-            ValueError: Si texte vide ou trop long
-        """
+        """Valide le texte d'entrée."""
         if not text or not text.strip():
             raise ValueError("Le texte ne peut pas être vide")
-
         if len(text) > self.MAX_TEXT_LENGTH:
             raise ValueError(
                 f"Texte trop long: {len(text)} chars > {self.MAX_TEXT_LENGTH} max"
             )
 
     def _preprocess_text(self, text: str) -> str:
-        """
-        Prétraite le texte pour normalisation cache.
-
-        Args:
-            text: Texte brut
-
-        Returns:
-            Texte normalisé (strip whitespace)
-        """
+        """Prétraite le texte pour normalisation cache."""
         return text.strip()
 
     def _get_cache_key(self, text: str) -> str:
-        """
-        Génère la clé de cache pour un texte.
-
-        Utilise MD5 hash du texte normalisé pour:
-        - Clés compactes (32 chars vs texte complet)
-        - Déterminisme (même texte = même clé)
-        - Risque collision négligeable (<1M textes)
-
-        Args:
-            text: Texte à hasher
-
-        Returns:
-            Clé cache format "embedding:gemini:{md5_hash}"
-        """
+        """Génère la clé de cache SHA-256 pour un texte."""
         normalized = self._preprocess_text(text).lower()
-        text_hash = hashlib.md5(normalized.encode('utf-8')).hexdigest()
-        return f"embedding:gemini:{text_hash}"
-
-    def _get_from_cache(self, cache_key: str) -> Optional[np.ndarray]:
-        """
-        Récupère un embedding du cache Redis.
-
-        Args:
-            cache_key: Clé de cache
-
-        Returns:
-            Embedding si trouvé, None sinon
-        """
-        try:
-            cached_data = self.redis_client.get(cache_key)
-            if cached_data:
-                # Désérialisation JSON -> numpy array
-                embedding_list = json.loads(cached_data)
-                return np.array(embedding_list, dtype=np.float32)
-        except Exception as e:
-            logger.warning(f"⚠️  Erreur lecture cache {cache_key[:20]}: {e}")
-
-        return None
-
-    def _store_in_cache(
-        self,
-        cache_key: str,
-        embedding: np.ndarray
-    ) -> None:
-        """
-        Stocke un embedding dans le cache Redis.
-
-        Args:
-            cache_key: Clé de cache
-            embedding: Embedding à stocker
-        """
-        try:
-            # Sérialisation numpy -> JSON
-            embedding_list = embedding.tolist()
-            cached_data = json.dumps(embedding_list)
-
-            # Stockage avec TTL
-            self.redis_client.setex(
-                cache_key,
-                self.CACHE_TTL_SECONDS,
-                cached_data
-            )
-        except Exception as e:
-            logger.warning(f"⚠️  Erreur écriture cache {cache_key[:20]}: {e}")
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:64]

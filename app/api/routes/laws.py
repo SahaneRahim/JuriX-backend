@@ -14,24 +14,25 @@ Date: 2026-01-11
 
 import logging
 import time
-from typing import List, Optional
+from typing import List, Optional, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.database import get_db
+from app.core.database import get_db, AsyncSessionLocal
 from app.models.law import Category, Law
 from app.schemas.law import (
     LawCreate,
     LawResponse,
     LawUpdate,
 )
+from app.services.file_upload_service import get_upload_service
 from app.services.search_service import invalidate_search_cache
-from app.tasks.process_law import delete_from_meilisearch
+from app.tasks.process_law import delete_from_search_index
 
 
 class LawIngestRequest(BaseModel):
@@ -44,7 +45,7 @@ class LawIngestRequest(BaseModel):
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1", tags=["Laws"])
+router = APIRouter(tags=["Laws"])
 
 
 # ==================== DEPENDENCIES ====================
@@ -66,7 +67,7 @@ async def get_current_admin_user():
 # ==================== PUBLIC ENDPOINTS ====================
 
 
-@router.get("/laws", response_model=List[LawResponse])
+@router.get("/", response_model=List[LawResponse])
 async def get_laws(
     language: Optional[str] = Query(None, description="Filter by language (fr or en)"),
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
@@ -134,7 +135,7 @@ async def get_laws(
         )
 
 
-@router.get("/laws/{law_id}", response_model=LawResponse)
+@router.get("/{law_id}", response_model=LawResponse)
 async def get_law(
     law_id: int,
     db: AsyncSession = Depends(get_db),
@@ -190,7 +191,7 @@ async def get_law(
         )
 
 
-@router.get("/laws/{law_id}/download")
+@router.get("/{law_id}/download")
 async def download_law_file(
     law_id: int,
     db: AsyncSession = Depends(get_db),
@@ -206,7 +207,6 @@ async def download_law_file(
     if not law.file_id:
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
-    from app.services.file_upload_service import get_upload_service
     upload_service = get_upload_service()
     
     # Try to find file with extension
@@ -231,14 +231,14 @@ async def download_law_file(
              raise HTTPException(status_code=404, detail="File not found on server")
 
     return FileResponse(
-        path=file_path, 
-        filename=law.original_filename or file_path.name,
+        path=str(file_path), 
+        filename=str(cast(str, law.original_filename) or file_path.name),
         media_type="application/pdf" if file_path.suffix == ".pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         content_disposition_type="inline"
     )
 
 
-@router.get("/laws/{law_id}/pdf-data")
+@router.get("/{law_id}/pdf-data")
 async def get_law_pdf_data(
     law_id: int,
     db: AsyncSession = Depends(get_db),
@@ -278,7 +278,7 @@ async def get_law_pdf_data(
             raise HTTPException(status_code=404, detail="File not found on server")
 
     # Read file and encode to Base64
-    with open(file_path, "rb") as f:
+    with open(str(file_path), "rb") as f:
         file_bytes = f.read()
     
     base64_data = base64.b64encode(file_bytes).decode("utf-8")
@@ -290,7 +290,7 @@ async def get_law_pdf_data(
     }
 
 
-@router.post("/laws/{law_id}/pdf-stream")
+@router.post("/{law_id}/pdf-stream")
 async def get_law_pdf_stream(
     law_id: int,
     db: AsyncSession = Depends(get_db),
@@ -335,7 +335,7 @@ async def get_law_pdf_stream(
             raise HTTPException(status_code=404, detail="File not found on server")
 
     # Read file content
-    with open(file_path, "rb") as f:
+    with open(str(file_path), "rb") as f:
         file_bytes = f.read()
     
     # Return as binary stream with headers that prevent IDM interception
@@ -352,7 +352,7 @@ async def get_law_pdf_stream(
     )
 
 
-@router.get("/laws/{law_id}/pdf-info")
+@router.get("/{law_id}/pdf-info")
 async def get_law_pdf_info(
     law_id: int,
     db: AsyncSession = Depends(get_db),
@@ -405,7 +405,7 @@ async def get_law_pdf_info(
     }
 
 
-@router.get("/laws/{law_id}/page/{page_num}")
+@router.get("/{law_id}/page/{page_num}")
 async def get_law_pdf_page_image(
     law_id: int,
     page_num: int,
@@ -495,7 +495,7 @@ async def get_law_pdf_page_image(
 # ==================== INGESTION ENDPOINTS ====================
 
 
-@router.post("/admin/laws/ingest", response_model=LawResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("/admin/ingest", response_model=LawResponse, status_code=status.HTTP_202_ACCEPTED)
 async def ingest_law(
     request: LawIngestRequest,
     db: AsyncSession = Depends(get_db),
@@ -577,24 +577,26 @@ async def ingest_law(
         await db.commit()
         await db.refresh(new_law)
 
-        # Process document synchronously (Windows-compatible)
-        # Celery on Windows has billiard issues, so we use direct synchronous processing
-        logger.info(f"🔄 Processing document synchronously for Law ID={new_law.id}")
+        # Lance le traitement en arrière-plan (BackgroundTasks FastAPI)
+        # Remplace Celery - le traitement s'exécute dans l'event loop FastAPI
+        # sans bloquer la réponse HTTP
+        law_id_for_bg = cast(int, new_law.id)
+        file_id_for_bg = request.file_id
 
-        try:
-            import asyncio
+        async def _process_and_invalidate():
+            from app.tasks.process_law import process_law_async
+            try:
+                result = await process_law_async(law_id_for_bg, file_id_for_bg)
+                logger.info(f"✅ Background processing completed: {result}")
+                # Invalider le cache après traitement
+                async with AsyncSessionLocal() as cache_db:
+                    await invalidate_search_cache(cache_db)
+            except Exception as bg_err:
+                logger.error(f"❌ Background processing failed: {bg_err}", exc_info=True)
 
-            from app.tasks.process_law import process_law_sync
-
-            # Run sync version in background thread to avoid blocking
-            result = await asyncio.to_thread(process_law_sync, new_law.id, request.file_id)
-            logger.info(f"✅ Synchronous processing completed: {result}")
-            
-            # Invalidate search cache to include new law in results
-            invalidate_search_cache()
-        except Exception as sync_error:
-            logger.error(f"❌ Synchronous processing failed: {sync_error}", exc_info=True)
-            logger.info(f"ℹ️ Law ID={new_law.id} created but processing failed")
+        import asyncio as _asyncio
+        _asyncio.create_task(_process_and_invalidate())
+        logger.info(f"🚀 Background task started for Law ID={new_law.id}")
 
         return new_law
 
@@ -611,7 +613,7 @@ async def ingest_law(
 # ==================== ADMIN ENDPOINTS ====================
 
 
-@router.post("/admin/laws", response_model=LawResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/admin", response_model=LawResponse, status_code=status.HTTP_201_CREATED)
 async def create_law(
     law: LawCreate,
     db: AsyncSession = Depends(get_db),
@@ -687,7 +689,7 @@ async def create_law(
         )
 
 
-@router.put("/admin/laws/{law_id}", response_model=LawResponse)
+@router.put("/admin/{law_id}", response_model=LawResponse)
 async def update_law(
     law_id: int,
     law_update: LawUpdate,
@@ -750,7 +752,7 @@ async def update_law(
         )
 
 
-@router.delete("/admin/laws/{law_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/admin/{law_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_law(
     law_id: int,
     db: AsyncSession = Depends(get_db),
@@ -791,11 +793,11 @@ async def delete_law(
         await db.delete(law)
         await db.commit()
 
-        # Remove from Meilisearch index
-        delete_from_meilisearch(law_id)
-        
-        # Invalidate search cache to prevent stale results
-        invalidate_search_cache()
+        # Vide le search_vector PostgreSQL (remplace suppression Meilisearch)
+        delete_from_search_index(law_id)
+
+        # Invalider le cache de recherche
+        await invalidate_search_cache(db)
         
         logger.info(f"✅ Law {law_id} deleted")
         return None

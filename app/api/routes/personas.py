@@ -56,7 +56,6 @@ logger = logging.getLogger(__name__)
 
 # Create router
 router = APIRouter(
-    prefix="/api/v1/personas",
     tags=["personas"],
     responses={
         400: {"description": "Bad Request - Invalid persona or validation error"},

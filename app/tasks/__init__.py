@@ -1,15 +1,11 @@
 """
-Celery tasks package for JuriX.
+Tasks package for JuriX.
 
-Contains asynchronous tasks for:
+Contains background tasks for:
 - Document processing pipeline
-- Background jobs
-- Scheduled tasks
 
 Author: JuriX Development Team
-Date: 2026-01-11
+Date: 2026-04-17
 """
 
-from app.core.celery_app import celery_app
-
-__all__ = ["celery_app"]
+# No more Celery, tasks are executed via FastAPI BackgroundTasks

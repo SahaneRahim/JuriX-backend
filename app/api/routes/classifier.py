@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 # Router configuration
 router = APIRouter(
-    prefix="/api/v1/classifier",
     tags=["classifier"],
     responses={
         500: {"description": "Erreur interne du service de classification"}

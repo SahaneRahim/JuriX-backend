@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 # Router configuration
 router = APIRouter(
-    prefix="/api/v1/language",
     tags=["language"],
     responses={
         500: {"description": "Erreur interne du service de détection"}

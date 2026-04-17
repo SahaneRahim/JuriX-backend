@@ -28,10 +28,10 @@ from app.services.ocr_service import OCRError, OCRService
 logger = logging.getLogger(__name__)
 
 # Create router
-router = APIRouter(prefix="/api/v1/ocr", tags=["OCR"])
+router = APIRouter(tags=["OCR"])
 
 # Initialize service (singleton pattern)
-_ocr_service: OCRService = None
+_ocr_service: OCRService | None = None
 
 
 def get_ocr_service() -> OCRService:

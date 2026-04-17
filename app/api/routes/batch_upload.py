@@ -10,18 +10,21 @@ Handles:
 from fastapi import APIRouter, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
-from typing import List
+from typing import List, Optional, cast
 import asyncio
 import json
 import uuid
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 
 from app.core.database import get_db
 from app.models.law import Law
-from app.tasks.process_law import process_law_sync
+from app.tasks.process_law import process_law_async
 from app.core.config import settings
 
-router = APIRouter(prefix="/admin/batch", tags=["batch-upload"])
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["batch-upload"])
 
 # WebSocket connection manager
 class ConnectionManager:
@@ -79,7 +82,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 @router.post("/upload")
 async def batch_upload(
     files: List[UploadFile] = File(...),
-    session_id: str = None,
+    session_id: str | None = None,
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -105,8 +108,8 @@ async def batch_upload(
     
     # Validate files
     for file in files:
-        if not file.filename.endswith('.pdf'):
-            raise HTTPException(400, f"File {file.filename} is not a PDF")
+        if not file.filename or not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(400, f"File {file.filename or 'unknown'} is not a PDF")
         
         # Check file size
         file.file.seek(0, 2)  # Seek to end
@@ -205,11 +208,14 @@ async def process_batch(laws: List[dict], session_id: str, db: AsyncSession):
             result = await db.execute(select(Law).where(Law.id == law_id))
             law = result.scalar_one_or_none()
             
-            if law:
-                law.status = "processing"
-                law.processing_progress = 0
-                law.processing_started_at = datetime.utcnow()
-                await db.commit()
+            if not law:
+                logger.error(f"❌ Law ID={law_id} not found for background processing")
+                continue
+
+            setattr(law, "status", "processing")
+            setattr(law, "processing_progress", 0)
+            setattr(law, "processing_started_at", datetime.now(timezone.utc))
+            await db.commit()
             
             # Send processing start
             await manager.send_progress(session_id, {
@@ -219,17 +225,16 @@ async def process_batch(laws: List[dict], session_id: str, db: AsyncSession):
                 "status": "processing"
             })
             
-            # Call processing pipeline (synchronous)
-            # We'll need to update process_law_sync to emit progress
-            result = process_law_sync(law_id, file_id)
+            # Call processing pipeline (async, runs in event loop)
+            result = await process_law_async(law_id, file_id)
             
             # Update final status
             if result.get("status") == "completed":
-                law.status = "published"
-                law.processing_progress = 100
+                setattr(law, "status", "published")
+                setattr(law, "processing_progress", 100)
             else:
-                law.status = "refused"
-                law.processing_error = str(result.get("errors", []))
+                setattr(law, "status", "refused")
+                setattr(law, "processing_error", str(result.get("errors", [])))
             
             await db.commit()
             
@@ -243,22 +248,28 @@ async def process_batch(laws: List[dict], session_id: str, db: AsyncSession):
             })
             
         except Exception as e:
-            # Mark as refused
-            law.status = "refused"
-            law.processing_error = str(e)
-            await db.commit()
-            
+            # Mark as refused if law exists
+            try:
+                result = await db.execute(select(Law).where(Law.id == law_data.get("id")))
+                law = result.scalar_one_or_none()
+                if law:
+                    setattr(law, "status", "refused")
+                    setattr(law, "processing_error", str(e))
+                    await db.commit()
+            except:
+                pass
+                
             await manager.send_progress(session_id, {
                 "type": "processing_error",
-                "law_id": law_id,
-                "filename": law_data["filename"],
+                "law_id": law_data.get("id"),
+                "filename": law_data.get("filename"),
                 "error": str(e)
             })
 
 
 @router.get("/status")
 async def get_batch_status(
-    status: str = None,
+    status: str | None = None,
     db: AsyncSession = Depends(get_db)
 ):
     """

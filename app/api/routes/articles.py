@@ -12,7 +12,7 @@ import time
 from app.utils.text_chunker import extract_articles, ArticleExtractionError
 
 
-router = APIRouter(prefix="/api/v1/articles", tags=["articles"])
+router = APIRouter(tags=["articles"])
 
 
 class ExtractRequest(BaseModel):

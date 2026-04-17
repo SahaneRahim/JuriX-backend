@@ -16,12 +16,7 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://jurix:jurix_dev_password_change_in_prod@localhost:5432/jurix_db"
 
-    # Redis
-    REDIS_URL: str = "redis://:redis_dev_password_change_in_prod@localhost:6379/0"
-
-    # Meilisearch
-    MEILISEARCH_URL: str = "http://localhost:7700"
-    MEILISEARCH_KEY: str = "meilisearch_master_key_dev_change_in_prod"
+    # (Redis and Meilisearch have been replaced by PostgreSQL native FTS + cache)
 
     # Gemini API (LLM for RAG)
     GEMINI_API_KEY: str = ""
