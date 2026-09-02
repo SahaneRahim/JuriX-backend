@@ -5,7 +5,9 @@
 # ── Core Framework ────────────────────────────────────────────────────────────
 fastapi>=0.104.0,<1.0.0
 uvicorn[standard]>=0.24.0,<1.0.0
-pydantic>=2.5.0,<3.0.0
+# [email] fournit email-validator, requis par EmailStr (app/schemas/user.py,
+# app/api/routes/admin.py). Sans lui, l'import de app.main echoue.
+pydantic[email]>=2.5.0,<3.0.0
 pydantic-settings>=2.1.0,<3.0.0
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -37,7 +39,10 @@ scikit-learn>=1.3.2,<2.0.0
 joblib>=1.3.2,<2.0.0
 
 # ── LLM — Gemini API ─────────────────────────────────────────────────────────
-google-generativeai>=0.8.0,<1.0.0
+# SDK google-genai (nouveau). L'ancien google-generativeai n'est plus utilisé :
+# gemini_service.py et embedding_service.py importaient deux SDK incompatibles,
+# ce qui empechait l'application de demarrer.
+google-genai>=1.0.0,<2.0.0
 
 # ── Utils ─────────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0,<2.0.0

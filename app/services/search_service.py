@@ -391,11 +391,15 @@ class SearchService:
                 logger.warning("⚠️ Semantic search unavailable: EmbeddingService not loaded")
                 return []
 
-            query_embedding = self.embedding_service.generate_embedding(query)
+            # TASK_QUERY et non TASK_DOCUMENT : encoder une question comme un
+            # document dégrade la pertinence en recherche asymétrique.
+            query_embedding = self.embedding_service.generate_embedding(
+                query, task_type=self.embedding_service.TASK_QUERY
+            )
             query_embedding_str = f"[{','.join(map(str, query_embedding.tolist()))}]"
 
             from sqlalchemy import cast
-            from sqlalchemy.types import String
+            from pgvector.sqlalchemy import Vector
 
             stmt = (
                 select(
@@ -410,7 +414,10 @@ class SearchService:
                     func.max(
                         1 - func.cosine_distance(
                             Article.embedding,
-                            cast(query_embedding_str, String)
+                            # cast vers Vector, pas String : Postgres rejette
+                            # cosine_distance(vector, text) et la recherche
+                            # sémantique échouait systématiquement.
+                            cast(query_embedding_str, Vector(3072))
                         )
                     ).label("similarity")
                 )

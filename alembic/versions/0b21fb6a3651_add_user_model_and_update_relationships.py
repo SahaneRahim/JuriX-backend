@@ -106,13 +106,9 @@ def downgrade() -> None:
     op.create_unique_constraint(
         op.f("laws_reference_key"), "laws", ["reference"], postgresql_nulls_not_distinct=False
     )
-    op.alter_column(
-        "laws",
-        "suggested_categories",
-        existing_type=sa.JSON(),
-        type_=postgresql.ARRAY(sa.INTEGER()),
-        existing_nullable=True,
-    )
+    # NOTE : upgrade() ne convertit deliberement PAS suggested_categories
+    # (cf. ligne 58, "Keep suggested_categories as ARRAY type"). La conversion
+    # inverse generee automatiquement ici echouait donc sur une vraie base.
     op.drop_constraint(None, "conversations", type_="foreignkey")
     op.drop_index(op.f("ix_conversations_user_id"), table_name="conversations")
     op.drop_index(op.f("ix_conversations_session_id"), table_name="conversations")
@@ -125,17 +121,13 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_categories_id"), table_name="categories")
     op.drop_index(op.f("ix_articles_law_id"), table_name="articles")
     op.drop_index(op.f("ix_articles_id"), table_name="articles")
-    op.alter_column(
-        "articles",
-        "embedding",
-        existing_type=sa.JSON(),
-        type_=pgvector.sqlalchemy.vector.VECTOR(dim=768),
-        existing_nullable=True,
-    )
+    # Idem pour articles.embedding : upgrade() le laisse en VECTOR (ligne 45),
+    # et la dimension generee ici (768) ne correspondait meme pas au schema
+    # reel (3072, cf. migration 7a8b9c0d1e2f).
     op.drop_index(op.f("ix_users_username"), table_name="users")
     op.drop_index(op.f("ix_users_role"), table_name="users")
     op.drop_index(op.f("ix_users_id"), table_name="users")
     op.drop_index(op.f("ix_users_email"), table_name="users")
-    op.drop_table("users")
+    # drop_table("users") etait appele DEUX fois : le second echouait toujours.
     op.drop_table("users")
     # ### end Alembic commands ###

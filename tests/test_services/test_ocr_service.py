@@ -38,8 +38,11 @@ def ocr_service():
 def sample_native_pdf(tmp_path):
     """Fixture: Create a minimal native PDF with text."""
     pdf_path = tmp_path / "native.pdf"
-    # Minimal valid PDF with text
-    pdf_content = b"""%PDF-1.4
+    # Minimal valid PDF with text.
+    # Note: str puis .encode(), et non un litteral b"..." — le flux contient des
+    # caracteres accentues, interdits dans un litteral bytes (SyntaxError qui
+    # faisait echouer la collecte de TOUTE la suite de tests).
+    pdf_content = """%PDF-1.4
 1 0 obj
 << /Type /Catalog /Pages 2 0 R >>
 endobj
@@ -74,7 +77,7 @@ trailer
 << /Size 6 /Root 1 0 R >>
 startxref
 435
-%%EOF"""
+%%EOF""".encode("latin-1")
     pdf_path.write_bytes(pdf_content)
     return pdf_path
 

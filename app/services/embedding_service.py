@@ -22,7 +22,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -57,6 +58,12 @@ class EmbeddingService:
     MAX_RETRIES = 3
     RETRY_DELAY = 1  # seconds
 
+    # Types de tâche Gemini. La recherche est asymétrique : un article indexé
+    # et une question d'utilisateur ne doivent pas être encodés de la même
+    # façon, sinon la pertinence se dégrade.
+    TASK_DOCUMENT = "RETRIEVAL_DOCUMENT"
+    TASK_QUERY = "RETRIEVAL_QUERY"
+
     def __init__(
         self,
         use_cache: bool = True,
@@ -81,7 +88,11 @@ class EmbeddingService:
             api_key = api_key or settings.GEMINI_API_KEY
             if not api_key:
                 raise EmbeddingServiceError("GEMINI_API_KEY non configurée")
-            genai.configure(api_key=api_key)
+            # SDK google-genai (le meme que gemini_service.py). L'ancien
+            # google-generativeai et celui-ci ne peuvent pas cohabiter : le
+            # projet declarait l'ancien alors que gemini_service.py importe
+            # le nouveau, ce qui empechait l'application de demarrer.
+            self.client = genai.Client(api_key=api_key)
             logger.info(f"✅ Gemini API configurée (model: {self.EMBEDDING_MODEL})")
         except Exception as e:
             logger.error(f"❌ Échec configuration Gemini API: {e}")
@@ -109,7 +120,12 @@ class EmbeddingService:
 
     # ==================== PUBLIC API ====================
 
-    def generate_embedding(self, text: str, normalize: bool = True) -> np.ndarray:
+    def generate_embedding(
+        self,
+        text: str,
+        normalize: bool = True,
+        task_type: str = TASK_DOCUMENT,
+    ) -> np.ndarray:
         """
         Génère l'embedding pour un texte unique via Gemini API.
 
@@ -119,6 +135,10 @@ class EmbeddingService:
         Args:
             text: Texte à encoder
             normalize: Applique normalisation L2 (True recommandé pour cosine)
+            task_type: TASK_DOCUMENT pour indexer un article,
+                       TASK_QUERY pour encoder une question d'utilisateur.
+                       La recherche est asymétrique : utiliser le même type des
+                       deux côtés dégrade la pertinence.
 
         Returns:
             Embedding numpy array de dimension (3072,)
@@ -132,7 +152,9 @@ class EmbeddingService:
 
         start_time = time.time()
         self._validate_text(text)
-        cache_key = self._get_cache_key(text)
+        # Le type de tâche fait partie de la clé : le même texte encodé comme
+        # document ou comme question ne donne pas le même vecteur.
+        cache_key = self._get_cache_key(f"{task_type}\x00{text}")
 
         # Tentative récupération cache PostgreSQL
         if self.use_cache:
@@ -145,12 +167,12 @@ class EmbeddingService:
         # Génération embedding via Gemini API avec retry
         for attempt in range(self.MAX_RETRIES):
             try:
-                result = genai.embed_content(
+                result = self.client.models.embed_content(
                     model=self.EMBEDDING_MODEL,
-                    content=text,
-                    task_type="retrieval_document",
+                    contents=text,
+                    config=types.EmbedContentConfig(task_type=task_type),
                 )
-                embedding = np.array(result["embedding"], dtype=np.float32)
+                embedding = np.array(result.embeddings[0].values, dtype=np.float32)
 
                 if embedding.shape[0] != self.EMBEDDING_DIM:
                     raise EmbeddingServiceError(
@@ -363,7 +385,9 @@ class EmbeddingService:
         indices_to_generate = []
 
         for idx, text in enumerate(texts):
-            cache_key = self._get_cache_key(text)
+            # Même convention de clé que generate_embedding : le type de tâche
+            # fait partie du hash (le lot n'encode que des documents).
+            cache_key = self._get_cache_key(f"{self.TASK_DOCUMENT}\x00{text}")
             if self.use_cache:
                 cached_emb = self._get_from_pg_cache(cache_key)
                 if cached_emb is not None:
@@ -383,12 +407,14 @@ class EmbeddingService:
 
         for attempt in range(max_retries):
             try:
-                result = genai.embed_content(
+                result = self.client.models.embed_content(
                     model=self.EMBEDDING_MODEL,
-                    content=chunk_texts,
-                    task_type="retrieval_document",
+                    contents=chunk_texts,
+                    config=types.EmbedContentConfig(task_type=self.TASK_DOCUMENT),
                 )
-                new_embeddings = [np.array(emb, dtype=np.float32) for emb in result["embedding"]]
+                new_embeddings = [
+                    np.array(emb.values, dtype=np.float32) for emb in result.embeddings
+                ]
 
                 if normalize:
                     new_embeddings = [
@@ -399,7 +425,11 @@ class EmbeddingService:
                 for idx, text, embedding in zip(chunk_indices, chunk_texts, new_embeddings):
                     embeddings_dict[idx] = embedding
                     if self.use_cache:
-                        self._store_in_pg_cache(self._get_cache_key(text), embedding)
+                        # Même clé qu'en lecture (_check_batch_cache), sinon le
+                        # cache n'aurait jamais de hit.
+                        self._store_in_pg_cache(
+                            self._get_cache_key(f"{self.TASK_DOCUMENT}\x00{text}"), embedding
+                        )
 
                 logger.info(f"  ✅ Chunk {current_chunk}/{chunk_count} completed")
                 return

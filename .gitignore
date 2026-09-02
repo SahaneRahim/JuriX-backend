@@ -50,3 +50,4 @@ pyrefly.toml
 # OS
 .DS_Store
 Thumbs.db
+.venv/
