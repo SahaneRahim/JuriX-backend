@@ -104,6 +104,38 @@ async def list_personas(
         )
 
 
+# NOTE: declaree avant "/{persona}" — FastAPI resout dans l'ordre de
+# declaration, la route parametree capturait sinon ce chemin.
+@router.get(
+    "/health",
+    response_model=HealthCheckResponse,
+    summary="Service health check"
+)
+def health_check(
+    db: AsyncSession = Depends(get_db)
+) -> HealthCheckResponse:
+    """
+    Check PersonaService health status.
+
+    **Returns:**
+    - Service status, persona count, and timestamp
+    """
+    try:
+        service = PersonaService(db)
+        health = service.health_check()
+        return health
+    except Exception as e:
+        logger.error(f"❌ Health check failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "InternalServerError", "message": str(e)}
+        )
+
+
+# ============================================================================
+# ANALYTICS - STATISTICS ENDPOINTS
+
+
 @router.get(
     "/{persona}",
     response_model=PersonaInfo,
@@ -153,35 +185,65 @@ async def get_persona_info(
         )
 
 
+# ============================================================================
+
+# NOTE: declaree avant "/{persona}/stats" — FastAPI resout dans l'ordre de
+# declaration, la route parametree capturait sinon ce chemin.
 @router.get(
-    "/health",
-    response_model=HealthCheckResponse,
-    summary="Service health check"
+    "/feedback/stats",
+    response_model=FeedbackStats,
+    summary="Get feedback statistics"
 )
-def health_check(
+async def get_feedback_stats(
+    persona: Optional[str] = Query(None, description="Filter by persona"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     db: AsyncSession = Depends(get_db)
-) -> HealthCheckResponse:
+) -> FeedbackStats:
     """
-    Check PersonaService health status.
+    Get aggregated feedback statistics.
+
+    **Parameters:**
+    - **persona**: Optional persona filter
+    - **start_date**: Optional start date (ISO format)
+    - **end_date**: Optional end date (ISO format)
 
     **Returns:**
-    - Service status, persona count, and timestamp
+    - Total feedback count
+    - Helpful/unhelpful counts
+    - Satisfaction rate
+    - Average rating
+    - Breakdown by persona (if not filtered)
+
+    **Raises:**
+    - 400: Invalid persona or date format
     """
     try:
+        # Parse dates
+        start = date.fromisoformat(start_date) if start_date else None
+        end = date.fromisoformat(end_date) if end_date else None
+
         service = PersonaService(db)
-        health = service.health_check()
-        return health
+        stats = await service.get_feedback_stats(persona, start, end)
+        logger.info(f"📊 Feedback stats retrieved")
+        return stats
+    except InvalidPersonaError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "InvalidPersonaError", "message": str(e)}
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "ValidationError", "message": f"Invalid date format: {e}"}
+        )
     except Exception as e:
-        logger.error(f"❌ Health check failed: {e}")
+        logger.error(f"❌ Error getting feedback stats: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "InternalServerError", "message": str(e)}
         )
 
-
-# ============================================================================
-# ANALYTICS - STATISTICS ENDPOINTS
-# ============================================================================
 
 @router.get(
     "/{persona}/stats",
@@ -651,57 +713,3 @@ async def get_message_feedback(
         )
 
 
-@router.get(
-    "/feedback/stats",
-    response_model=FeedbackStats,
-    summary="Get feedback statistics"
-)
-async def get_feedback_stats(
-    persona: Optional[str] = Query(None, description="Filter by persona"),
-    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
-    db: AsyncSession = Depends(get_db)
-) -> FeedbackStats:
-    """
-    Get aggregated feedback statistics.
-
-    **Parameters:**
-    - **persona**: Optional persona filter
-    - **start_date**: Optional start date (ISO format)
-    - **end_date**: Optional end date (ISO format)
-
-    **Returns:**
-    - Total feedback count
-    - Helpful/unhelpful counts
-    - Satisfaction rate
-    - Average rating
-    - Breakdown by persona (if not filtered)
-
-    **Raises:**
-    - 400: Invalid persona or date format
-    """
-    try:
-        # Parse dates
-        start = date.fromisoformat(start_date) if start_date else None
-        end = date.fromisoformat(end_date) if end_date else None
-
-        service = PersonaService(db)
-        stats = await service.get_feedback_stats(persona, start, end)
-        logger.info(f"📊 Feedback stats retrieved")
-        return stats
-    except InvalidPersonaError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": "InvalidPersonaError", "message": str(e)}
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": "ValidationError", "message": f"Invalid date format: {e}"}
-        )
-    except Exception as e:
-        logger.error(f"❌ Error getting feedback stats: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": "InternalServerError", "message": str(e)}
-        )

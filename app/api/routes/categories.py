@@ -166,6 +166,49 @@ async def list_categories(
         )
 
 
+# NOTE: declaree avant "/{category_id}" — FastAPI resout dans l'ordre de
+# declaration, la route parametree capturait sinon ce chemin.
+@router.get(
+    "/health",
+    response_model=Dict[str, str],
+    summary="Health check"
+)
+async def health_check(
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, str]:
+    """
+    Check CategoryService health.
+
+    **Returns:**
+    - Service status and metadata
+
+    **Example Response:**
+    ```json
+    {
+        "service": "CategoryService",
+        "status": "healthy",
+        "version": "2.1.0",
+        "timestamp": "2024-01-11T12:00:00"
+    }
+    ```
+    """
+    try:
+        logger.debug("📥 GET /categories/health")
+        service = CategoryService(db)
+        health = service.health_check()
+
+        logger.debug("✅ Health check passed")
+        return health
+
+    except Exception as e:
+        logger.error(f"❌ Health check failed: {e}")
+        return {
+            "service": "CategoryService",
+            "status": "unhealthy",
+            "error": str(e)
+        }
+
+
 @router.get(
     "/{category_id}",
     response_model=CategoryResponse,
@@ -558,42 +601,3 @@ async def get_name_to_id_mapping(
 # HEALTH CHECK
 # ============================================================================
 
-@router.get(
-    "/health",
-    response_model=Dict[str, str],
-    summary="Health check"
-)
-async def health_check(
-    db: AsyncSession = Depends(get_db)
-) -> Dict[str, str]:
-    """
-    Check CategoryService health.
-
-    **Returns:**
-    - Service status and metadata
-
-    **Example Response:**
-    ```json
-    {
-        "service": "CategoryService",
-        "status": "healthy",
-        "version": "2.1.0",
-        "timestamp": "2024-01-11T12:00:00"
-    }
-    ```
-    """
-    try:
-        logger.debug("📥 GET /categories/health")
-        service = CategoryService(db)
-        health = service.health_check()
-
-        logger.debug("✅ Health check passed")
-        return health
-
-    except Exception as e:
-        logger.error(f"❌ Health check failed: {e}")
-        return {
-            "service": "CategoryService",
-            "status": "unhealthy",
-            "error": str(e)
-        }

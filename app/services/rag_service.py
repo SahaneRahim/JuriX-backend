@@ -327,7 +327,12 @@ class RAGService:
 
             # Stream generation
             generation_start = time.time()
-            system_prompt = SYSTEM_PROMPTS[request.persona]
+            # SYSTEM_PROMPTS est indexe par LANGUE ("fr"/"en"), pas par persona :
+            # SYSTEM_PROMPTS["citoyen"] levait KeyError a chaque appel, donc
+            # /rag/ask/stream n'a jamais rien renvoye d'autre qu'une erreur.
+            # get_system_prompt(persona, language) est le bon accesseur, deja
+            # utilise par le chemin non-streaming (ligne ~240).
+            system_prompt = get_system_prompt(request.persona, request.language)
 
             # TODO: Implement Gemini streaming
             if self.llm is None:
@@ -591,7 +596,10 @@ class RAGService:
                 .options(joinedload(Conversation.messages))
             )
             result = await self.db.execute(stmt)
-            conversation = result.scalar_one_or_none()
+            # .unique() obligatoire apres un joinedload sur une collection :
+            # sans lui SQLAlchemy leve InvalidRequestError, ce qui faisait
+            # echouer TOUTE requete portant un session_id deja existant.
+            conversation = result.unique().scalar_one_or_none()
 
             if conversation:
                 # Get last N messages
@@ -1078,7 +1086,7 @@ CONTENU COMPLET:
 
     def _find_article_excerpt(self, result, article_num: str) -> str:
         """Find excerpt for specific article from search result."""
-        print(f"DEBUG: _find_article_excerpt called for article {article_num}, law_id={result.law_id}")
+        logger.debug(f"DEBUG: _find_article_excerpt called for article {article_num}, law_id={result.law_id}")
         
         # PRIORITY 1: Query PostgreSQL articles table directly
         try:
@@ -1096,7 +1104,7 @@ CONTENU COMPLET:
                 elif article_num.lower() in ["premier", "première"]:
                     number_variants.extend(["1", "1er", "1ère"])
                 
-                print(f"DEBUG: Trying number variants: {number_variants}")
+                logger.debug(f"DEBUG: Trying number variants: {number_variants}")
                 
                 # Try each variant
                 for num in number_variants:
@@ -1113,12 +1121,12 @@ CONTENU COMPLET:
                     row = res.fetchone()
                     if row and row[0]:
                         content = row[0]
-                        print(f"DEBUG: FOUND article {num} content: {content[:100]}...")
+                        logger.debug(f"DEBUG: FOUND article {num} content: {content[:100]}...")
                         return content[:300] if len(content) > 300 else content
                         
-                print(f"DEBUG: Article {article_num} NOT FOUND in PostgreSQL")
+                logger.debug(f"DEBUG: Article {article_num} NOT FOUND in PostgreSQL")
         except Exception as e:
-            print(f"DEBUG: PostgreSQL query failed: {e}")
+            logger.debug(f"DEBUG: PostgreSQL query failed: {e}")
 
         # FALLBACK 1: Check matched_articles from Meilisearch
         if hasattr(result, 'matched_articles') and result.matched_articles:
@@ -1131,7 +1139,7 @@ CONTENU COMPLET:
         if hasattr(result, 'highlights'):
             content = result.highlights.get("content", "")
             if content:
-                print(f"DEBUG: Using Meilisearch highlights as fallback")
+                logger.debug(f"DEBUG: Using Meilisearch highlights as fallback")
                 return content[:300]
 
         return "Voir document complet pour détails"

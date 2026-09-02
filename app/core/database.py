@@ -16,6 +16,7 @@ Author: JuriX Team
 import logging
 from typing import AsyncGenerator
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     create_async_engine,
@@ -152,7 +153,11 @@ async def health_check_db() -> bool:
     """
     try:
         async with AsyncSessionLocal() as session:
-            await session.execute("SELECT 1")
+            # text() obligatoire : SQLAlchemy 2.0 refuse une chaine brute
+            # (ObjectNotExecutableError). L'exception etait avalee par le except
+            # ci-dessous, donc health_check_db renvoyait TOUJOURS False et
+            # GET /api/v1/admin/system declarait la base en panne en permanence.
+            await session.execute(text("SELECT 1"))
             logger.debug("✅ DB health check OK")
             return True
     except Exception as e:

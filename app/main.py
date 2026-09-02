@@ -1,14 +1,43 @@
 """Point d'entrée FastAPI."""
 
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
+from app.core.database import close_db
 from app.api.routes import language, classifier, articles, search, rag, categories, personas, upload, ocr, laws, analytics, admin, batch_upload
+
+logger = logging.getLogger(__name__)
+
+# Valeur de repli declaree dans config.py. Si elle survit hors developpement,
+# les JWT seraient signes avec une clé publiée dans le dépôt.
+_DEV_SECRET_KEY = "dev_secret_key_change_in_production_with_openssl_rand_hex_32"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Cycle de vie de l'application."""
+    if settings.ENVIRONMENT != "development" and settings.SECRET_KEY == _DEV_SECRET_KEY:
+        raise RuntimeError(
+            "SECRET_KEY est resté à sa valeur de développement alors que "
+            f"ENVIRONMENT={settings.ENVIRONMENT!r}. Générez-en une avec "
+            "`openssl rand -hex 32` et placez-la dans .env — sinon n'importe qui "
+            "peut forger un jeton d'administration."
+        )
+    logger.info(f"🚀 {settings.APP_NAME} v{settings.VERSION} ({settings.ENVIRONMENT})")
+    yield
+    # close_db() existait mais n'etait jamais appele : le pool de connexions
+    # asyncpg n'etait jamais libere a l'arret.
+    await close_db()
+
 
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.VERSION,
-    debug=settings.DEBUG
+    debug=settings.DEBUG,
+    lifespan=lifespan,
 )
 
 # CORS — allow localhost in dev, Vercel domain in prod

@@ -119,6 +119,27 @@ async def upload_file(
         )
 
 
+# NOTE: declaree avant "/{file_id}" — FastAPI resout dans l'ordre de
+# declaration, la route parametree capturait sinon ce chemin.
+@router.get(
+    "/health",
+    response_model=UploadServiceHealth,
+    summary="Service health check",
+    description="Check the health status of the file upload service.",
+)
+async def health_check() -> UploadServiceHealth:
+    """
+    Check service health.
+
+    Returns:
+        Health status including storage and scanner information
+    """
+    service = get_upload_service()
+    health = service.health_check()
+
+    return UploadServiceHealth(**health)
+
+
 @router.get(
     "/{file_id}",
     response_model=Dict,
@@ -204,23 +225,6 @@ async def delete_upload(file_id: str) -> Dict:
     return {"success": True, "file_id": file_id, "message": "File deleted successfully"}
 
 
-@router.get(
-    "/health",
-    response_model=UploadServiceHealth,
-    summary="Service health check",
-    description="Check the health status of the file upload service.",
-)
-async def health_check() -> UploadServiceHealth:
-    """
-    Check service health.
-
-    Returns:
-        Health status including storage and scanner information
-    """
-    service = get_upload_service()
-    health = service.health_check()
-
-    return UploadServiceHealth(**health)
 
 
 @router.post(

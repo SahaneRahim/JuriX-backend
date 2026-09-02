@@ -212,7 +212,14 @@ class SearchService:
             cache_key = _make_cache_key(
                 request.query, request.filters, request.limit, request.offset
             )
-            cached_data = await get_from_pg_cache(self.db, cache_key)
+            # Le cache est une optimisation, pas une dependance : si query_cache
+            # est absente ou injoignable, on doit degrader, pas renvoyer 500.
+            # La lecture n'etait pas protegee alors que l'ecriture l'etait deja.
+            try:
+                cached_data = await get_from_pg_cache(self.db, cache_key)
+            except Exception as e:
+                logger.warning(f"⚠️ Lecture du cache impossible, ignoree: {e}")
+                cached_data = None
             if cached_data:
                 elapsed_ms = int((time.time() - start_time) * 1000)
                 logger.info(f"🎯 Cache HIT ({elapsed_ms}ms)")

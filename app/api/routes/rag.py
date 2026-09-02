@@ -219,7 +219,9 @@ async def get_conversation(
             .options(joinedload(Conversation.messages))
         )
         result = await db.execute(stmt)
-        conversation = result.scalar_one_or_none()
+        # .unique() obligatoire apres joinedload sur une collection, sinon
+        # InvalidRequestError -> cet endpoint renvoyait systematiquement 500.
+        conversation = result.unique().scalar_one_or_none()
 
         if not conversation:
             raise HTTPException(

@@ -236,8 +236,17 @@ async def _trigram_articles_query(
 ) -> List[SearchResult]:
     """
     Fallback: recherche par similarité trigramme pg_trgm.
-    Tolère les fautes d'orthographe (seuil de similarité : 0.2).
+    Tolère les fautes d'orthographe.
+
+    Point de performance : `similarity(a, b) > seuil` n'est PAS accéléré par un
+    index gin_trgm_ops — seul l'opérateur `%` l'est. Le filtre utilise donc `%`
+    et `similarity()` ne sert plus qu'au tri. Le `ILIKE '%q%'` précédent forçait
+    de toute façon un balayage séquentiel : il est retiré, `%` le couvre.
+    Le seuil est fixé par pg_trgm.similarity_threshold, positionné juste avant.
     """
+    # SET LOCAL : portée limitée à la transaction courante.
+    await db.execute(text("SET LOCAL pg_trgm.similarity_threshold = 0.15"))
+
     sql = text("""
         SELECT
             a.id              AS article_id,
@@ -257,8 +266,7 @@ async def _trigram_articles_query(
         FROM articles a
         JOIN laws l ON l.id = a.law_id
         LEFT JOIN categories c ON c.id = l.category_id
-        WHERE similarity(a.content, :query) > 0.15
-           OR a.content ILIKE :ilike_query
+        WHERE a.content % :query
         ORDER BY rank DESC
         LIMIT :limit OFFSET :offset
     """)
@@ -268,7 +276,6 @@ async def _trigram_articles_query(
             sql,
             {
                 "query": query,
-                "ilike_query": f"%{query}%",
                 "limit": min(limit, MAX_FTS_RESULTS),
                 "offset": offset,
             },
