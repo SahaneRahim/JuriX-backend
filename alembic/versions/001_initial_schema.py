@@ -19,6 +19,14 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # L'extension vector doit exister AVANT la creation de articles.embedding
+    # (type VECTOR(3072) plus bas). Elle n'etait installee que par la migration
+    # 7a8b9c0d1e2f, bien plus loin dans la chaine : un `alembic upgrade head`
+    # sur une base vierge echouait donc des la premiere migration avec
+    # 'type "vector" does not exist'. IF NOT EXISTS rend l'operation idempotente
+    # et compatible avec les bases ou 7a8b9c0d1e2f a deja tourne.
+    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+
     # Categories table
     op.create_table(
         'categories',

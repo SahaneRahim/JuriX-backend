@@ -109,7 +109,12 @@ def downgrade() -> None:
     # NOTE : upgrade() ne convertit deliberement PAS suggested_categories
     # (cf. ligne 58, "Keep suggested_categories as ARRAY type"). La conversion
     # inverse generee automatiquement ici echouait donc sur une vraie base.
-    op.drop_constraint(None, "conversations", type_="foreignkey")
+    # upgrade() cree la FK sans nom (ligne 57) ; Postgres la nomme donc
+    # deterministiquement conversations_user_id_fkey. drop_constraint(None, ...)
+    # etait incompilable : "Can't emit DROP CONSTRAINT ... it has no name".
+    op.drop_constraint(
+        "conversations_user_id_fkey", "conversations", type_="foreignkey"
+    )
     op.drop_index(op.f("ix_conversations_user_id"), table_name="conversations")
     op.drop_index(op.f("ix_conversations_session_id"), table_name="conversations")
     op.drop_index(op.f("ix_conversations_id"), table_name="conversations")
