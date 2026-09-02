@@ -38,6 +38,12 @@ from app.schemas.search import (
     SearchResult,
 )
 from app.services.search_service import (
+
+# NOTE: les fixtures db_engine / db_session locales (SQLite en memoire) ont ete
+# retirees. Elles masquaient celles de conftest.py et testaient un moteur qui ne
+# supporte ni pgvector, ni tsvector, ni les fonctions PostgreSQL dont ce code
+# depend — une suite verte y aurait certifie du code cassé en production.
+# db_session vient desormais de conftest.py (PostgreSQL reel + rollback).
     IndexingError,
     MeilisearchError,
     SearchService,
@@ -49,43 +55,10 @@ from app.services.search_service import (
 # Test Configuration & Fixtures
 # ============================================================================
 
-# Use in-memory SQLite for fast tests
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 
-@pytest.fixture(scope="function")
-async def db_engine():
-    """Create a fresh database engine for each test."""
-    engine = create_async_engine(
-        TEST_DATABASE_URL,
-        echo=False,
-        future=True
-    )
-
-    # Create tables
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    yield engine
-
-    # Cleanup
-    await engine.dispose()
 
 
-@pytest.fixture(scope="function")
-async def db_session(db_engine):
-    """Create a fresh database session for each test."""
-    AsyncSessionLocal = async_sessionmaker(
-        db_engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autoflush=False,
-        autocommit=False,
-    )
-
-    async with AsyncSessionLocal() as session:
-        yield session
-        await session.rollback()
 
 
 @pytest.fixture

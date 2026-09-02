@@ -1,158 +1,263 @@
 """
-Pytest configuration and fixtures for JuriX tests.
+Configuration et fixtures pytest pour JuriX.
 
-This module provides shared fixtures for all tests including:
-- Database session management (async)
-- Test client setup
-- Mock services
-- Sample test data
+## Pourquoi PostgreSQL et non SQLite
+
+L'ancien harnais utilisait SQLite en mémoire. C'était intenable : le cœur du
+produit est du SQL PostgreSQL brut — `websearch_to_tsquery`, `ts_rank_cd`,
+`DISTINCT ON`, `= ANY()`, `similarity()`, l'extension `vector` — et les objets
+dont il dépend (colonnes `search_vector`, index GIN, triggers, tables
+`query_cache` / `embedding_cache`) n'existent QUE dans les migrations, jamais
+dans `Base.metadata`. `create_all` ne pouvait donc pas produire un schéma
+utilisable, et une suite verte sur SQLite aurait certifié du code qui renvoie
+500 en production.
+
+Le harnais applique désormais `alembic upgrade head` sur une vraie base
+PostgreSQL, une fois par session.
+
+## Mise en place
+
+    docker run -d --name jurix-pg-test -p 5433:5432 \
+      -e POSTGRES_USER=jurix -e POSTGRES_PASSWORD=jurix -e POSTGRES_DB=jurix_test \
+      pgvector/pgvector:pg16
+
+Puis, si l'URL diffère du défaut :
+
+    export TEST_DATABASE_URL=postgresql+asyncpg://jurix:jurix@localhost:5433/jurix_test
+
+Sans base joignable, les tests qui en dépendent sont **ignorés avec un message
+explicite** — jamais silencieusement verts.
+
+## Isolation
+
+Chaque test reçoit une session neuve, et les tables de données sont purgées par
+`TRUNCATE ... RESTART IDENTITY CASCADE` après chaque test.
+
+L'isolation transactionnelle (transaction externe + rollback) a été essayée et
+écartée : le code testé appelle `commit()` en interne, ce qui impose des
+SAVEPOINT, or le dialecte asyncpg les implémente via `Connection.transaction()`,
+qui refuse de s'exécuter dans une transaction ouverte manuellement. Le mode
+`rollback_only` évite les SAVEPOINT mais casse les tests qui relisent ce qu'ils
+viennent d'écrire. TRUNCATE est plus lent, mais sans surprise.
 
 Author: JuriX Team
 """
 
-import asyncio
+import os
+from datetime import date
+from typing import AsyncGenerator
+
 import pytest
 import pytest_asyncio
-from typing import AsyncGenerator, Generator
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
+from app.core.database import get_db
 from app.main import app
-from app.core.database import Base, get_db
-from app.core.config import settings
+
+# ==================== CONFIGURATION ====================
+
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+asyncpg://jurix:jurix@localhost:5433/jurix_test",
+)
+
+_PG_HINT = (
+    f"PostgreSQL injoignable sur {TEST_DATABASE_URL}.\n"
+    "  docker run -d --name jurix-pg-test -p 5433:5432 \\\n"
+    "    -e POSTGRES_USER=jurix -e POSTGRES_PASSWORD=jurix "
+    "-e POSTGRES_DB=jurix_test \\\n"
+    "    pgvector/pgvector:pg16\n"
+    "  (ou definissez TEST_DATABASE_URL)"
+)
+
+# Fixtures qui exigent une base : sert au marquage automatique en integration.
+_DB_FIXTURES = {
+    "pg_engine",
+    "db_session",
+    "async_db_session",
+    "client",
+    "admin_client",
+    "sample_law",
+    "test_user",
+    "test_admin_user",
+    "test_superadmin_user",
+    "auth_headers",
+    "admin_headers",
+}
+
+_pg_available: bool | None = None
 
 
-# Test database URL (use in-memory SQLite for tests)
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+def _check_pg() -> bool:
+    """Teste une connexion TCP + handshake PostgreSQL, une seule fois."""
+    global _pg_available
+    if _pg_available is not None:
+        return _pg_available
+    try:
+        import asyncio
+
+        import asyncpg
+
+        dsn = TEST_DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+
+        async def _probe():
+            conn = await asyncpg.connect(dsn, timeout=5)
+            await conn.close()
+
+        asyncio.run(_probe())
+        _pg_available = True
+    except Exception:
+        _pg_available = False
+    return _pg_available
 
 
-@pytest.fixture(scope="session")
-def event_loop() -> Generator:
-    """Create an instance of the default event loop for the test session."""
-    policy = asyncio.get_event_loop_policy()
-    loop = policy.new_event_loop()
-    yield loop
-    loop.close()
+# ==================== HOOKS PYTEST ====================
 
 
-@pytest_asyncio.fixture(scope="function")
-async def async_db_engine():
-    """Create async engine for tests."""
-    engine = create_async_engine(
-        TEST_DATABASE_URL,
-        echo=False,
-        future=True,
-    )
+def pytest_configure(config):
+    """Déclare les marqueurs et neutralise les dépendances externes."""
+    config.addinivalue_line("markers", "integration: nécessite une base PostgreSQL")
+    config.addinivalue_line("markers", "slow: test lent")
+    config.addinivalue_line("markers", "unit: test unitaire, sans base")
 
-    # Create tables
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Clé factice si aucune n'est configurée : GeminiService et EmbeddingService
+    # refusent de se construire sans clé, ce qui faisait echouer au *setup* des
+    # tests qui ne touchent jamais l'API. Construire un client Gemini ne declenche
+    # aucun appel reseau — les tests qui appellent reellement l'API la simulent.
+    from app.core.config import settings
 
+    if not settings.GEMINI_API_KEY:
+        settings.GEMINI_API_KEY = "test-key-not-a-real-credential"
+
+
+def pytest_collection_modifyitems(config, items):
+    """
+    Marque `integration` tout test utilisant une fixture de base, et l'ignore
+    si PostgreSQL n'est pas joignable.
+
+    Le marquage est automatique plutôt que déclaré fichier par fichier : la
+    dépendance à la base est déjà exprimée par les fixtures demandées, la
+    dupliquer dans 21 fichiers ne ferait que créer une source de divergence.
+    """
+    skip_pg = pytest.mark.skip(reason=_PG_HINT)
+    available = None
+
+    for item in items:
+        needs_db = bool(_DB_FIXTURES & set(getattr(item, "fixturenames", ())))
+        if not needs_db:
+            continue
+        item.add_marker(pytest.mark.integration)
+        if available is None:
+            available = _check_pg()
+        if not available:
+            item.add_marker(skip_pg)
+
+
+# ==================== BASE DE DONNEES ====================
+
+
+@pytest_asyncio.fixture(scope="session")
+async def pg_engine():
+    """
+    Moteur de session, schéma construit par Alembic.
+
+    `alembic upgrade head` et non `Base.metadata.create_all` : c'est le seul
+    moyen d'obtenir les extensions (vector, pg_trgm), les colonnes
+    `search_vector`, les triggers de mise à jour et les tables de cache, dont
+    aucun n'existe dans les modèles ORM.
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    previous = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+    try:
+        cfg = Config("alembic.ini")
+        command.upgrade(cfg, "head")
+    finally:
+        if previous is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous
+
+    engine = create_async_engine(TEST_DATABASE_URL, echo=False, future=True)
     yield engine
-
-    # Drop tables
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-
     await engine.dispose()
 
 
-@pytest_asyncio.fixture(scope="function")
-async def async_db_session(async_db_engine) -> AsyncGenerator[AsyncSession, None]:
-    """
-    Create async database session for tests.
+# Tables purgées entre deux tests. alembic_version en est exclue : elle porte
+# l'état des migrations, pas des données de test.
+_DATA_TABLES = (
+    "message_feedback", "messages", "conversations", "persona_interactions",
+    "persona_stats", "articles", "laws", "categories", "users",
+    "query_cache", "embedding_cache",
+)
 
-    This fixture provides a clean database session for each test,
-    with automatic rollback after the test completes.
+
+@pytest_asyncio.fixture
+async def async_db_session(pg_engine) -> AsyncGenerator[AsyncSession, None]:
     """
-    async_session = async_sessionmaker(
-        async_db_engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
+    Session isolée par test, nettoyage par TRUNCATE en fin de test.
+
+    L'isolation transactionnelle a été essayée puis écartée : le code testé
+    appelle `commit()` en interne (`store_in_pg_cache`, `update_law_search_vector`,
+    `reindex_all_laws`), ce qui impose des SAVEPOINT — or le dialecte asyncpg les
+    implémente via `Connection.transaction()`, qui refuse de s'exécuter dans une
+    transaction ouverte manuellement. Le mode `rollback_only` évite les SAVEPOINT
+    mais casse les tests qui relisent ce qu'ils viennent d'écrire.
+
+    TRUNCATE ... RESTART IDENTITY CASCADE est plus lent mais sans surprise, et
+    remet aussi les séquences à zéro — ce dont les tests qui écrivent des ids
+    explicites (les 12 catégories de référence) ont besoin.
+    """
+    session_factory = async_sessionmaker(
+        pg_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
     )
+    async with session_factory() as session:
+        try:
+            yield session
+        finally:
+            await session.rollback()
+            await session.close()
 
-    async with async_session() as session:
-        yield session
-        await session.rollback()
-
-
-@pytest_asyncio.fixture
-async def client(db_session) -> AsyncGenerator[AsyncClient, None]:
-    """
-    Create async HTTP client for API tests with test database.
-
-    This fixture provides an async HTTP client that can make requests
-    to the FastAPI application for integration testing, using the test database
-    with seeded categories.
-    """
-    # Override get_db to use test database (with seeded categories)
-    async def _override_get_db():
-        yield db_session
-
-    app.dependency_overrides[get_db] = _override_get_db
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test"
-    ) as ac:
-        yield ac
-
-    # Clean up override
-    app.dependency_overrides.clear()
-
-
-@pytest.fixture
-def override_get_db(async_db_session: AsyncSession):
-    """Override the get_db dependency to use test database."""
-    async def _override_get_db():
-        yield async_db_session
-
-    return _override_get_db
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(f"TRUNCATE {', '.join(_DATA_TABLES)} RESTART IDENTITY CASCADE")
+        )
 
 
 @pytest_asyncio.fixture
-async def db_session(async_db_session):
-    """Alias for async_db_session to support existing tests with seed data."""
+async def db_session(async_db_session: AsyncSession) -> AsyncSession:
+    """Session avec les 12 catégories de référence pré-insérées."""
     from app.models.law import Category
 
-    # Seed categories for tests that expect them
-    categories = [
-        Category(id=1, name="Droit Civil", description="Droit civil camerounais"),
-        Category(id=2, name="Droit Commercial OHADA", description="Droit commercial OHADA"),
-        Category(id=3, name="Droit Pénal", description="Droit pénal camerounais"),
-        Category(id=4, name="Droit Administratif", description="Droit administratif"),
-        Category(id=5, name="Droit du Travail", description="Code du travail"),
-        Category(id=6, name="Droit Foncier", description="Droit foncier"),
-        Category(id=7, name="Droit de la Famille", description="Droit de la famille"),
-        Category(id=8, name="Droit Fiscal", description="Droit fiscal"),
-        Category(id=9, name="Droit des Affaires", description="Droit des affaires"),
-        Category(id=10, name="Droit International", description="Droit international"),
-        Category(id=11, name="Droit Constitutionnel", description="Droit constitutionnel"),
-        Category(id=12, name="Procédure Civile", description="Procédure civile"),
+    noms = [
+        "Droit Civil", "Droit Commercial OHADA", "Droit Pénal",
+        "Droit Administratif", "Droit du Travail", "Droit Foncier",
+        "Droit de la Famille", "Droit Fiscal", "Droit des Affaires",
+        "Droit International", "Droit Constitutionnel", "Procédure Civile",
     ]
-
-    for cat in categories:
-        async_db_session.add(cat)
+    for i, nom in enumerate(noms, start=1):
+        async_db_session.add(Category(id=i, name=nom, description=nom))
     await async_db_session.commit()
-
     return async_db_session
 
 
 @pytest_asyncio.fixture
-async def sample_law(db_session):
-    """Create a sample law with category for testing."""
+async def sample_law(db_session: AsyncSession):
+    """Une loi d'exemple rattachée à une catégorie."""
     from app.models.law import Category, Law
-    from datetime import date
 
-    # Create a category first
-    category = Category(
-        name="Test Category for Law",
-        description="Category for sample law fixture"
-    )
+    category = Category(name="Test Category for Law", description="Fixture")
     db_session.add(category)
     await db_session.flush()
 
-    # Create a law
     law = Law(
         reference="TEST-001",
         title="Sample Test Law",
@@ -161,18 +266,41 @@ async def sample_law(db_session):
         publication_date=date(2024, 1, 15),
         status="published",
         category_id=category.id,
-        language="fr"
+        language="fr",
     )
     db_session.add(law)
     await db_session.commit()
     await db_session.refresh(law)
-
     return law
 
 
-# Mark configuration
-def pytest_configure(config):
-    """Register custom markers."""
-    config.addinivalue_line("markers", "integration: mark test as integration test")
-    config.addinivalue_line("markers", "slow: mark test as slow running")
-    config.addinivalue_line("markers", "unit: mark test as unit test")
+# ==================== CLIENT HTTP ====================
+
+
+@pytest_asyncio.fixture
+async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+    """Client HTTP anonyme, branché sur la base de test."""
+
+    async def _override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as ac:
+            yield ac
+    finally:
+        # .pop et non .clear() : clear() supprimerait aussi les surcharges
+        # posees par d'autres fixtures (authentification notamment).
+        app.dependency_overrides.pop(get_db, None)
+
+
+@pytest.fixture
+def override_get_db(async_db_session: AsyncSession):
+    """Surcharge de get_db réutilisable par les tests qui pilotent l'app."""
+
+    async def _override_get_db():
+        yield async_db_session
+
+    return _override_get_db

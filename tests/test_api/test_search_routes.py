@@ -21,50 +21,27 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 from fastapi import status
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.database import Base
 from app.main import app
 from app.models.law import Article, Category, Law
 
+# NOTE: les fixtures db_engine / db_session locales (SQLite en memoire) ont ete
+# retirees. Elles masquaient celles de conftest.py et testaient un moteur qui ne
+# supporte ni pgvector, ni tsvector, ni les fonctions PostgreSQL dont ce code
+# depend — une suite verte y aurait certifie du code cassé en production.
+# db_session vient desormais de conftest.py (PostgreSQL reel + rollback).
+
 # ============================================================================
 # Test Configuration & Fixtures
 # ============================================================================
 
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 
-@pytest.fixture(scope="function")
-async def db_engine():
-    """Create a fresh database engine for each test."""
-    engine = create_async_engine(
-        TEST_DATABASE_URL,
-        echo=False,
-        future=True
-    )
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    yield engine
-    await engine.dispose()
 
 
-@pytest.fixture(scope="function")
-async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
-    """Create a fresh database session for each test."""
-    AsyncSessionLocal = async_sessionmaker(
-        db_engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autoflush=False,
-        autocommit=False,
-    )
-
-    async with AsyncSessionLocal() as session:
-        yield session
-        await session.rollback()
 
 
 @pytest.fixture
@@ -196,7 +173,7 @@ def mock_search_service():
 @pytest.fixture
 async def client() -> AsyncGenerator[AsyncClient, None]:
     """Create async HTTP client for testing."""
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
 
 

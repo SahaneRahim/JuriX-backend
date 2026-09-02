@@ -19,7 +19,7 @@ Note: These tests require:
 
 import pytest
 import time
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.core.config import settings
@@ -30,7 +30,7 @@ from app.core.config import settings
 @pytest.fixture
 async def async_client():
     """Async test client."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
 
 
