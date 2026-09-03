@@ -35,18 +35,22 @@ class ExtractedArticle:
 # Pattern constants - COMPREHENSIVE support for French and English variants
 # French variants: Article 1, Article 1er, Article premier, Article première, Article deuxième, etc.
 # English variants: Section 1, Section one, Section first, Article 1, Article one, etc.
+# NOTE: le groupe capturant englobe la numerotation hierarchique complete
+# ((\d+(?:\.\d+)*)). Auparavant le '(?:\.\d+)*' etait HORS du groupe :
+# 'Article 1.1' et 'Article 1.2' etaient tous deux captures comme '1' et
+# fusionnaient avec l'article 1 — une erreur de citation sur une base juridique.
 ARTICLE_PATTERNS = [
     # === FRENCH PATTERNS ===
     # Article + number (1, 2, 3...) OR ordinals (1er, 1ère, 2ème, 3ème...) OR words (premier, première, deuxième...)
     r'(?:^|\n)\s*Article\s+(?:' +
-        r'(\d+)(?:er|ère|ème)?(?:\.\d+)*' +  # Article 1, Article 1er, Article 2ème, Article 1.1
+        r'(\d+(?:\.\d+)*)(?:er|ère|ème)?' +  # Article 1, Article 1er, Article 2ème, Article 1.1
         r'|' +
         r'(premier|première|deuxième|second|seconde|troisième|quatrième|cinquième|sixième|septième|huitième|neuvième|dixième)' +  # Article premier, Article deuxième...
     r')\s*[.:\-–]?\s*',
     
     # Art. (abbreviation) + number OR ordinals
     r'(?:^|\n)\s*Art\.?\s+(?:' +
-        r'(\d+)(?:er|ère|ème)?(?:\.\d+)*' +  # Art. 1, Art. 1er, Art. 2ème
+        r'(\d+(?:\.\d+)*)(?:er|ère|ème)?' +  # Art. 1, Art. 1er, Art. 2ème
         r'|' +
         r'(premier|première|deuxième|second|seconde|troisième|quatrième|cinquième|sixième|septième|huitième|neuvième|dixième)' +  # Art. premier
     r')\s*[.:\-–]?\s*',
@@ -54,20 +58,20 @@ ARTICLE_PATTERNS = [
     # === ENGLISH PATTERNS ===
     # Section + number OR words (one, first, second, third...)
     r'(?:^|\n)\s*Section\s+(?:' +
-        r'(\d+)(?:\.\d+)*' +  # Section 1, Section 1.1
+        r'(\d+(?:\.\d+)*)' +  # Section 1, Section 1.1
         r'|' +
         r'(one|first|two|second|three|third|four|fourth|five|fifth|six|sixth|seven|seventh|eight|eighth|nine|ninth|ten|tenth)' +  # Section one, Section first
     r')\s*[.:\-–]?\s*',
     
     # Article (English style) + number OR words
     r'(?:^|\n)\s*Article\s+(?:' +
-        r'(\d+)(?:\.\d+)*' +  # Article 1 (English)
+        r'(\d+(?:\.\d+)*)' +  # Article 1 (English)
         r'|' +
         r'(one|first|two|second|three|third|four|fourth|five|fifth|six|sixth|seven|seventh|eight|eighth|nine|ninth|ten|tenth)' +  # Article one (English)
     r')\s*[.:\-–]?\s*',
     
     # Sec. (abbreviation, English) + number
-    r'(?:^|\n)\s*Sec\.?\s+(\d+)(?:\.\d+)*\s*[.:\-–]?\s*',
+    r'(?:^|\n)\s*Sec\.?\s+(\d+(?:\.\d+)*)\s*[.:\-–]?\s*',
 
     # === NUMEROTATION CODIFIEE (Code Général des Impôts, CGI) ===
     # "Article L 94 septies.-", "Article L 94", "Art. M 12 bis"
@@ -104,16 +108,23 @@ LEGAL_BASIS_END_PATTERNS = [
 TITLE_PATTERN = r'(?:^|\n)\s*Article\s+\d+\s*[.:]?\s*([^\n]+?)(?:\n|$)'
 
 # Section patterns - TITRE and CHAPITRE that appear between articles
+#
+# ATTENTION : l'alternative de chiffres romains utilisait 'V?I{0,3}', qui peut
+# matcher la CHAINE VIDE. 'TITRE\s+' suffisait alors a declencher une detection
+# de section : un article intitule 'Titre niveau 1' etait pris pour un en-tete,
+# et son contenu coupe a zero caractere puis ecarte comme 'trop court'.
+# Autrement dit, tout article dont le titre commence par Titre/Chapitre etait
+# silencieusement PERDU. Remplace par [IVXLC]{1,7}, qui ne peut pas etre vide.
 # These define the section/chapter for subsequent articles
 SECTION_PATTERNS = [
     # TITRE PREMIER - DE L'ÉTAT, TITRE I, TITRE 1, etc.
-    r'(?:^|\n)\s*(TITRE\s+(?:PREMIER|PREMI[ÈE]RE|DEUXI[ÈE]ME|TROISI[ÈE]ME|QUATRI[ÈE]ME|CINQUI[ÈE]ME|SIXI[ÈE]ME|SEPTI[ÈE]ME|HUITI[ÈE]ME|NEUVI[ÈE]ME|DIXI[ÈE]ME|I{1,3}V?|IV|V?I{0,3}|\d+)\s*[.:\-–]?\s*[^\n]*)',
+    r'(?:^|\n)\s*(TITRE\s+(?:PREMIER|PREMI[ÈE]RE|DEUXI[ÈE]ME|TROISI[ÈE]ME|QUATRI[ÈE]ME|CINQUI[ÈE]ME|SIXI[ÈE]ME|SEPTI[ÈE]ME|HUITI[ÈE]ME|NEUVI[ÈE]ME|DIXI[ÈE]ME|[IVXLC]{1,7}|\d+)\s*[.:\-–]?\s*[^\n]*)',
     # CHAPITRE PREMIER, CHAPITRE I, CHAPITRE 1, etc.
-    r'(?:^|\n)\s*(CHAPITRE\s+(?:PREMIER|PREMI[ÈE]RE|DEUXI[ÈE]ME|TROISI[ÈE]ME|QUATRI[ÈE]ME|CINQUI[ÈE]ME|SIXI[ÈE]ME|SEPTI[ÈE]ME|HUITI[ÈE]ME|NEUVI[ÈE]ME|DIXI[ÈE]ME|I{1,3}V?|IV|V?I{0,3}|\d+)\s*[.:\-–]?\s*[^\n]*)',
+    r'(?:^|\n)\s*(CHAPITRE\s+(?:PREMIER|PREMI[ÈE]RE|DEUXI[ÈE]ME|TROISI[ÈE]ME|QUATRI[ÈE]ME|CINQUI[ÈE]ME|SIXI[ÈE]ME|SEPTI[ÈE]ME|HUITI[ÈE]ME|NEUVI[ÈE]ME|DIXI[ÈE]ME|[IVXLC]{1,7}|\d+)\s*[.:\-–]?\s*[^\n]*)',
     # PART ONE, PART I, PART 1 (English)
-    r'(?:^|\n)\s*(PART\s+(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|I{1,3}V?|IV|V?I{0,3}|\d+)\s*[.:\-–]?\s*[^\n]*)',
+    r'(?:^|\n)\s*(PART\s+(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|[IVXLC]{1,7}|\d+)\s*[.:\-–]?\s*[^\n]*)',
     # CHAPTER ONE, CHAPTER I, CHAPTER 1 (English)
-    r'(?:^|\n)\s*(CHAPTER\s+(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|I{1,3}V?|IV|V?I{0,3}|\d+)\s*[.:\-–]?\s*[^\n]*)',
+    r'(?:^|\n)\s*(CHAPTER\s+(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|[IVXLC]{1,7}|\d+)\s*[.:\-–]?\s*[^\n]*)',
 ]
 
 
@@ -333,11 +344,18 @@ def _extract_article_chunks(
         clean_content = page_marker_pattern.sub('', content).strip()
         normalized_number = normalize_article_number(number)
         parent_id = _get_parent_id(normalized_number)
+
+        # _extract_title existait mais n'etait appelee nulle part : le titre
+        # etait passe en dur a None, donc AUCUN article n'avait jamais de titre.
+        # C'est une perte directe pour les citations affichees a l'utilisateur
+        # et pour le contexte envoye au modele.
+        title = _extract_title(clean_content)
+        clean_content = _clean_article_content(clean_content, False, title)
         char_count = len(clean_content)
 
         if char_count >= min_article_length:
             chunks.append(_make_chunk(
-                normalized_number, None, clean_content,
+                normalized_number, title, clean_content,
                 position, section, current_page, parent_id,
             ))
             position += 1

@@ -77,7 +77,9 @@ class TestBasicExtraction:
         articles = extract_articles(text)
 
         assert len(articles) == 3
-        assert articles[0]['number'] == 'premier'
+        # normalize_article_number convertit 'premier' -> '1'. C'est voulu :
+        # une reference stable ('Article 1') est citable, pas 'Article premier'.
+        assert articles[0]['number'] == '1'
         assert articles[1]['number'] == '2'
         assert articles[2]['number'] == '3'
 
@@ -149,22 +151,48 @@ class TestValidation:
         with pytest.raises(ValueError, match="ne peut pas être vide"):
             extract_articles("   \n\n   \t\t   ")
 
-    def test_text_too_short_raises_error(self):
-        """Test that short text raises ValueError."""
-        short_text = "Article 1. Test."
+    def test_short_text_is_accepted(self):
+        """
+        Un texte court n'est plus rejete.
 
-        with pytest.raises(ValueError, match="trop court"):
-            extract_articles(short_text)
+        Le seuil de 200 caracteres a ete retire volontairement du chunker pour
+        accepter les documents courts — la majorite du corpus prc.cm est faite
+        de decrets d'une a deux pages. Seul le texte vide reste une erreur.
+        """
+        articles = extract_articles("Article 1. Test.", strict=False, min_article_length=1)
+        assert isinstance(articles, list)
 
-    def test_no_articles_raises_error(self):
-        """Test that text without articles raises error."""
+    def test_empty_text_raises_value_error(self):
+        """Le texte vide reste refuse."""
+        with pytest.raises(ValueError):
+            extract_articles("   ")
+
+    def test_text_without_articles_falls_back_to_paragraphs(self):
+        """
+        Un texte sans marqueur d'article n'est plus une erreur.
+
+        Le chunker retombe sur un decoupage par paragraphes (PARA_n). C'est
+        indispensable pour le corpus reel : beaucoup de documents scannes
+        n'exposent aucun "Article N" exploitable apres OCR.
+        """
         text = "This is a long text without any article markers. " * 20
+        chunks = extract_articles(text, strict=False)
+        assert chunks, "le repli doit produire au moins un chunk"
+        # Selon la structure du texte, le repli produit soit des paragraphes
+        # (PARA_n) soit un unique bloc FULL_TEXT. Les deux sont acceptables :
+        # ce qui compte est qu'aucun contenu ne soit perdu.
+        assert all(
+            str(c["number"]).startswith(("PARA_", "FULL_TEXT")) for c in chunks
+        ), [c["number"] for c in chunks]
+        assert sum(c["char_count"] for c in chunks) > 0
 
-        with pytest.raises(ArticleExtractionError, match="Aucun pattern"):
-            extract_articles(text)
+    def test_less_than_3_articles_is_accepted(self):
+        """
+        Moins de 3 articles n'est plus une erreur.
 
-    def test_less_than_3_articles_raises_error(self):
-        """Test that <3 articles raises error in strict mode."""
+        Le minimum de 3 articles a ete retire : la majorite des decrets du corpus
+        n'en comptent que 2 ou 3, et les lois de ratification un seul.
+        """
         text = """
         Article 1. Premier article
         Contenu du premier article avec assez de texte pour dépasser 200 caractères minimum requis.
@@ -173,8 +201,8 @@ class TestValidation:
         Contenu du deuxième article avec assez de texte pour validation et dépasser le seuil.
         """
 
-        with pytest.raises(ArticleExtractionError, match="Minimum 3 articles"):
-            extract_articles(text, strict=True)
+        articles = extract_articles(text, strict=True)
+        assert len(articles) == 2
 
     def test_less_than_3_articles_warning_non_strict(self):
         """Test that <3 articles returns result in non-strict mode."""
