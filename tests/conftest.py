@@ -47,6 +47,20 @@ import os
 from datetime import date
 from typing import AsyncGenerator
 
+# ---------------------------------------------------------------------------
+# AVANT tout import de app.* : settings est instancie au chargement de
+# app.core.config, et le moteur SYNCHRONE partage lit settings.DATABASE_URL a
+# l'import de app.core.database. Sans cette surcharge posee ici, ce moteur
+# pointerait la base de DEVELOPPEMENT (port 5432) pendant toute la suite, et
+# les tests du pipeline y ecriraient pour de bon. pytest_configure serait trop
+# tard : les imports ont deja eu lieu.
+# ---------------------------------------------------------------------------
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+asyncpg://jurix:jurix@localhost:5433/jurix_test",
+)
+os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -61,11 +75,6 @@ from app.core.database import get_db
 from app.main import app
 
 # ==================== CONFIGURATION ====================
-
-TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+asyncpg://jurix:jurix@localhost:5433/jurix_test",
-)
 
 _PG_HINT = (
     f"PostgreSQL injoignable sur {TEST_DATABASE_URL}.\n"
@@ -161,6 +170,38 @@ def pytest_collection_modifyitems(config, items):
 
 
 # ==================== BASE DE DONNEES ====================
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _bind_sync_engine_to_test_db():
+    """
+    Rebranche le moteur synchrone partage sur la base de TEST.
+
+    Ceinture et bretelles : la surcharge de DATABASE_URL en tete de fichier
+    suffit normalement, mais elle depend de l'ordre des imports. Un moteur
+    synchrone pointe sur la base de developpement ferait ecrire les tests du
+    pipeline dans de vraies donnees ; le rebranchement est explicite et
+    verifiable.
+    """
+    from sqlalchemy import create_engine
+
+    from app.core import database
+
+    sync_url = TEST_DATABASE_URL.replace("+asyncpg", "")
+    if str(database.sync_engine.url) == sync_url:
+        yield
+        return
+
+    engine = create_engine(sync_url, pool_pre_ping=True, future=True)
+    previous = database.sync_engine
+    database.sync_engine = engine
+    database.SyncSessionLocal.configure(bind=engine)
+    try:
+        yield
+    finally:
+        engine.dispose()
+        database.sync_engine = previous
+        database.SyncSessionLocal.configure(bind=previous)
 
 
 @pytest.fixture(scope="session")

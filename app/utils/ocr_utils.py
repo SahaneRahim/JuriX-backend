@@ -1,4 +1,4 @@
-﻿"""
+"""
 Utility functions for OCR operations.
 
 Provides helpers for:
