@@ -5,7 +5,10 @@ Each persona gets tailored system prompt for appropriate tone and complexity.
 Provides utilities for building context strings and formatting conversation history.
 """
 
+import logging
 from typing import List
+
+logger = logging.getLogger(__name__)
 
 
 # System prompts by language and persona
@@ -230,61 +233,121 @@ Instructions:
 """
 
 
-def build_context_string(search_results: List) -> str:
+# Budget de contexte. ~24 000 caracteres valent environ 6 000 jetons : de quoi
+# tenir plusieurs articles entiers tout en laissant la place a la question, a
+# l'historique et aux 1 000 jetons de reponse.
+CONTEXT_MAX_CHARS = 24_000
+CONTEXT_MAX_CHARS_PER_CHUNK = 6_000
+CONTEXT_TRUNCATION_MARK = "\n[…]"
+
+
+def _truncate_on_boundary(content: str, limit: int) -> str:
     """
-    Format search results into context string.
+    Tronque a la derniere frontiere naturelle avant `limit`.
 
-    Args:
-        search_results: List of SearchResult from SearchService
-
-    Returns:
-        Formatted context for prompt
+    Paragraphe de preference, phrase a defaut : couper au milieu d'un alinea
+    juridique produit un fragment que le modele cite de travers.
     """
-    context_parts = []
+    if len(content) <= limit:
+        return content
 
-    for i, result in enumerate(search_results[:5], 1):  # Top 5
-        # Get highlights content
-        highlights_content = result.highlights.get('content', '')
-        if not highlights_content:
-            # Fallback to full content if no highlights - no truncation for better Gemini context
-            highlights_content = getattr(result, 'content', '')
+    window = content[:limit]
+    for separator in ("\n\n", "\n", ". "):
+        cut = window.rfind(separator)
+        # Ne pas remonter trop haut : mieux vaut une coupe nette tardive qu'un
+        # extrait ampute de moitie.
+        if cut > limit * 0.5:
+            return window[:cut].rstrip() + CONTEXT_TRUNCATION_MARK
 
-        context_parts.append(f"""
-Document {i}: {result.reference} - {result.title}
-Pertinence: {result.relevance_score:.2f}
-Catégorie: {result.category_name or 'Non spécifiée'}
-
-Contenu:
-{highlights_content}
-
-Articles pertinents:
-{format_matched_articles(result.matched_articles[:3] if hasattr(result, 'matched_articles') else [])}
-""")
-
-    return "\n---\n".join(context_parts)
+    return window.rstrip() + CONTEXT_TRUNCATION_MARK
 
 
-def format_matched_articles(articles: List) -> str:
+def format_chunk_block(chunk, index: int) -> str:
     """
-    Format matched articles for context.
+    Formate un chunk (un article) en un bloc de contexte.
 
-    Args:
-        articles: List of matched articles
-
-    Returns:
-        Formatted articles string
+    L'en-tete porte tout ce qui permet une citation exacte : reference de la
+    loi, numero d'article, titre, section et page.
     """
-    if not articles:
-        return "Aucun article spécifique identifié"
+    header = f"[{index}] {chunk.reference} — {chunk.law_title}"
 
-    formatted = []
-    for a in articles:
-        article_text = f"- Article {a.number}"
-        if hasattr(a, 'snippet') and a.snippet:
-            article_text += f": {a.snippet[:200]}..."
-        formatted.append(article_text)
+    lines = [header]
 
-    return "\n".join(formatted)
+    if chunk.number:
+        article_line = f"Article {chunk.number}"
+        if chunk.article_title:
+            article_line += f" — {chunk.article_title}"
+        lines.append(article_line)
+
+    meta = []
+    if chunk.section:
+        meta.append(f"Section : {chunk.section}")
+    if chunk.page_number:
+        meta.append(f"Page {chunk.page_number}")
+    if chunk.category_name:
+        meta.append(chunk.category_name)
+    meta.append(f"Pertinence : {chunk.relevance_score:.2f}")
+    lines.append("   |   ".join(meta))
+
+    return "\n".join(lines)
+
+
+def build_context_string(chunks: List) -> str:
+    """
+    Assemble le contexte a partir des CHUNKS remontes par la recherche.
+
+    Un bloc par article, avec son CONTENU INTEGRAL. Le contexte se limitait
+    auparavant a `highlights['content']`, c'est-a-dire aux 400 premiers
+    caracteres du texte de la LOI : le modele ne voyait jamais un article
+    entier, et devait citer des articles dont il n'avait pas lu le texte.
+
+    Le budget global est respecte en tronquant sur une frontiere de paragraphe.
+    Le premier chunk est toujours inclus, meme s'il excede a lui seul le
+    budget : un contexte tronque vaut mieux qu'un contexte vide.
+    """
+    if not chunks:
+        return ""
+
+    blocks = []
+    used = 0
+    dropped = 0
+    languages = set()
+
+    for index, chunk in enumerate(chunks, 1):
+        content = chunk.content or chunk.excerpt or ""
+        content = _truncate_on_boundary(content, CONTEXT_MAX_CHARS_PER_CHUNK)
+
+        remaining = CONTEXT_MAX_CHARS - used
+        if index > 1 and len(content) > remaining:
+            if remaining < 500:
+                dropped = len(chunks) - index + 1
+                break
+            content = _truncate_on_boundary(content, remaining)
+
+        blocks.append(f"{format_chunk_block(chunk, index)}\n\n{content}")
+        used += len(content)
+        if chunk.language:
+            languages.add(chunk.language)
+
+    if dropped:
+        logger.info(f"📏 Contexte plafonne : {dropped} chunk(s) ecarte(s)")
+
+    context = "\n\n---\n\n".join(blocks)
+
+    if len(languages) > 1:
+        context += (
+            "\n\n(Certains extraits sont dans une autre langue que la question : "
+            "traduis-les dans ta réponse.)"
+        )
+
+    return context
+
+
+# format_matched_articles a ete supprimee. Elle lisait `a.snippet`, attribut qui
+# n'existe pas sur ArticleMatch — le champ s'appelle content_snippet : la
+# branche ne s'est jamais declenchee et le modele ne recevait que des numeros
+# d'articles nus. Le texte des articles figure desormais dans les blocs
+# eux-memes.
 
 
 # Conversation history template

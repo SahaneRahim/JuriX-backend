@@ -82,6 +82,10 @@ class Citation(BaseModel):
     law_reference: str = Field(..., description="Law reference (e.g., LOI-2024-001)")
     law_title: str = Field(..., description="Law title")
     article_number: Optional[str] = Field(None, description="Article number if specific")
+    # Identifiant de ligne, et non un numero extrait du texte de la reponse :
+    # le front peut ouvrir directement l'article cite. Optionnel, une citation
+    # peut porter sur un document sans article extrait.
+    article_id: Optional[int] = Field(None, description="ID de l'article cité, si résolu")
     excerpt: str = Field(..., max_length=300, description="Relevant excerpt")
     relevance_score: float = Field(..., ge=0.0, le=1.0, description="Relevance score")
 

@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.models.conversation import Conversation, Message
 from app.schemas.rag import RAGRequest, RAGResponse, Citation
-from app.schemas.search import SearchResult
+from app.schemas.search import ChunkResult, SearchResult
 from app.services.rag_service import RAGService, RAGServiceError
 
 
@@ -72,30 +72,53 @@ def sample_rag_request():
 
 @pytest.fixture
 def mock_search_results():
-    """Mock search results from SearchService."""
+    """
+    Chunks renvoyes par SearchService.
+
+    Le RAG consomme desormais des ChunkResult : un article, avec son numero,
+    sa section, sa page et son CONTENU INTEGRAL. La doublure precedente ne
+    portait qu'un extrait dans `highlights`, ce qui laissait croire que le
+    modele recevait un texte alors qu'il ne voyait que 400 caracteres.
+    """
     return [
-        SearchResult(
+        ChunkResult(
+            article_id=161,
             law_id=1,
+            number="161",
+            article_title="Responsabilité des dirigeants",
+            section="TITRE III — DES DIRIGEANTS",
+            page_number=47,
+            content=(
+                "Les dirigeants sociaux sont responsables, individuellement ou "
+                "solidairement selon le cas, envers la société ou envers les tiers, "
+                "des fautes commises dans l'exercice de leurs fonctions."
+            ),
+            excerpt="Article 161: Les dirigeants sont responsables...",
             reference="LOI-2024-001",
-            title="Code OHADA",
+            law_title="Code OHADA",
             type="loi",
+            language="fr",
             status="published",
+            category_name="Droit commercial",
             relevance_score=0.92,
-            category_name="Droit commercial",
-            highlights={"content": "Article 161: Les dirigeants sont responsables..."},
-            matched_articles=[]
+            source="fts",
         ),
-        SearchResult(
+        ChunkResult(
+            article_id=5,
             law_id=2,
+            number="5",
+            article_title="Obligations des dirigeants",
+            content="Les dirigeants sont tenus d'une obligation de loyauté envers la société.",
+            excerpt="Article 5: Obligations des dirigeants...",
             reference="LOI-2023-015",
-            title="Code des sociétés",
+            law_title="Code des sociétés",
             type="loi",
+            language="fr",
             status="published",
-            relevance_score=0.87,
             category_name="Droit commercial",
-            highlights={"content": "Article 5: Obligations des dirigeants..."},
-            matched_articles=[]
-        )
+            relevance_score=0.87,
+            source="fts",
+        ),
     ]
 
 
@@ -126,7 +149,8 @@ class TestCoreFunctionality:
         """Test complete RAG pipeline from question to answer."""
         # Mock search results
         mock_search_response = MagicMock()
-        mock_search_response.results = mock_search_results
+        mock_search_response.results = []
+        mock_search_response.chunks = mock_search_results
         mock_search_response.search_time_ms = 150
         rag_service.search_service.search.return_value = mock_search_response
 
@@ -171,6 +195,7 @@ class TestCoreFunctionality:
         # Mock empty search results
         mock_search_response = MagicMock()
         mock_search_response.results = []
+        mock_search_response.chunks = []
         mock_search_response.search_time_ms = 100
         rag_service.search_service.search.return_value = mock_search_response
 
@@ -201,7 +226,8 @@ class TestCoreFunctionality:
         """Test streaming response yields chunks."""
         # Mock search results
         mock_search_response = MagicMock()
-        mock_search_response.results = mock_search_results
+        mock_search_response.results = []
+        mock_search_response.chunks = mock_search_results
         mock_search_response.search_time_ms = 150
         rag_service.search_service.search.return_value = mock_search_response
 
@@ -244,7 +270,8 @@ class TestCoreFunctionality:
 
         # Mock search results
         mock_search_response = MagicMock()
-        mock_search_response.results = mock_search_results
+        mock_search_response.results = []
+        mock_search_response.chunks = mock_search_results
         rag_service.search_service.search.return_value = mock_search_response
 
         # Mock no existing conversation
@@ -276,7 +303,8 @@ class TestCoreFunctionality:
         """Test that interaction is saved to database."""
         # Mock search results
         mock_search_response = MagicMock()
-        mock_search_response.results = mock_search_results
+        mock_search_response.results = []
+        mock_search_response.chunks = mock_search_results
         rag_service.search_service.search.return_value = mock_search_response
 
         # Mock no existing conversation
@@ -308,21 +336,20 @@ class TestContextRetrieval:
     ):
         """Test that context retrieval uses hybrid search mode."""
         mock_search_response = MagicMock()
-        mock_search_response.results = mock_search_results
+        mock_search_response.chunks = mock_search_results
+        mock_search_response.results = []
         rag_service.search_service.search.return_value = mock_search_response
 
-        # Call retrieve
-        results = await rag_service._retrieve_context("Test question", "fr")
+        chunks = await rag_service._retrieve_chunks("Test question", "fr")
 
-        # Verify hybrid search called
         call_args = rag_service.search_service.search.call_args
         search_request = call_args[0][0]
-        # Le RAG interroge en mode "text" et non "hybrid" : c'est un choix
-        # assume du service (rag_service.py, "hybrid requires embeddings"), les
-        # articles n'ayant pas tous de vecteur. A revoir quand l'ensemble du
-        # corpus sera vectorise.
-        assert search_request.mode == "text"
-        assert search_request.limit == 5
+        # Mode hybride : il etait epingle sur "text" tant que la recherche
+        # semantique ne rendait rien d'exploitable (niveau loi, sans texte).
+        assert search_request.mode == "hybrid"
+        assert search_request.limit == RAGService.TOP_K_CHUNKS
+        # Ce sont bien les chunks qui sont consommes, pas les resultats loi.
+        assert chunks == mock_search_results
 
     @pytest.mark.asyncio
     async def test_retrieve_context_respects_language_filter(
@@ -332,10 +359,11 @@ class TestContextRetrieval:
     ):
         """Test that language filter is applied."""
         mock_search_response = MagicMock()
-        mock_search_response.results = mock_search_results
+        mock_search_response.chunks = mock_search_results
+        mock_search_response.results = []
         rag_service.search_service.search.return_value = mock_search_response
 
-        await rag_service._retrieve_context("Test", "en")
+        await rag_service._retrieve_chunks("Test", "en")
 
         call_args = rag_service.search_service.search.call_args
         search_request = call_args[0][0]
@@ -361,6 +389,11 @@ class TestCitationExtraction:
         # Should find 2 citations
         assert len(citations) >= 1
         assert all(isinstance(c, Citation) for c in citations)
+        # La citation pointe une LIGNE d'article, pas seulement un numero
+        # extrait du texte de la reponse : le front peut l'ouvrir directement.
+        assert citations[0].article_id == 161
+        # L'extrait vient du chunk envoye au modele, sans requete supplementaire.
+        assert "responsables" in citations[0].excerpt
 
     def test_extract_citations_validates_against_results(
         self,

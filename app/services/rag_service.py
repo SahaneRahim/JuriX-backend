@@ -16,7 +16,7 @@ import re
 import time
 import uuid
 from datetime import datetime
-from typing import AsyncIterator, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +24,7 @@ from sqlalchemy.orm import joinedload
 
 from app.models.conversation import Conversation, Message
 from app.schemas.rag import Citation, RAGRequest, RAGResponse
-from app.schemas.search import SearchFilters, SearchRequest
+from app.schemas.search import ChunkResult, SearchFilters, SearchRequest
 from app.services.gemini_service import get_gemini_service, GeminiServiceError
 from app.services.prompts import (
     CONTEXT_TEMPLATE,
@@ -34,9 +34,35 @@ from app.services.prompts import (
     format_conversation_history,
     get_system_prompt,
 )
+from app.services.postgres_search_service import escape_like
 from app.services.search_service import SearchService
 
 logger = logging.getLogger(__name__)
+
+
+# Formes ordinales rencontrees dans le corpus, ramenees a leur rang.
+_ORDINAL_WORDS = {
+    "PREMIER": "1", "PREMIERE": "1", "PREMIÈRE": "1", "1ER": "1", "1ÈRE": "1",
+    "FIRST": "1", "DEUXIEME": "2", "DEUXIÈME": "2", "SECOND": "2", "SECONDE": "2",
+    "TROISIEME": "3", "TROISIÈME": "3",
+}
+
+
+def _normalize_article_number(number: str) -> str:
+    """
+    Normalise un numero d'article pour comparaison.
+
+    Les numeros circulent sous des formes multiples — "1", "1er", "PREMIER",
+    "Article 1" — et etaient compares tantot par egalite de chaines, tantot par
+    inclusion. L'inclusion faisait correspondre "1" a "10", "11", "100" : la
+    mauvaise citation etait alors rattachee a la reponse.
+    """
+    if not number:
+        return ""
+    cleaned = str(number).strip().upper()
+    cleaned = re.sub(r"^(ARTICLE|ART\.?|SECTION)\s+", "", cleaned)
+    cleaned = cleaned.strip(" .:-")
+    return _ORDINAL_WORDS.get(cleaned, cleaned)
 
 
 class RAGServiceError(Exception):
@@ -61,6 +87,10 @@ class RAGService:
 
     MAX_HISTORY_MESSAGES = 5
     TOP_K_DOCUMENTS = 5
+    # Nombre de CHUNKS envoyes au modele. Un chunk est un article, pas un
+    # document : huit articles entiers representent un contexte plus precis, et
+    # souvent plus court, que cinq lois resumees a 400 caracteres chacune.
+    TOP_K_CHUNKS = 8
     # Couvre du / de la / de l' / des / de, et la numerotation composee
     # (161, 1er, 94-2, L 94 septies). L'ancienne version ne connaissait que
     # "de la " : "article 161 du Code OHADA", la formulation la plus courante
@@ -197,25 +227,28 @@ class RAGService:
         Returns:
             Tuple of (search_results, early_response_or_None)
         """
-        priority_results = []
+        priority_chunks: List[ChunkResult] = []
+        not_found = None
         if request.law_id:
-            priority_results = await self._get_priority_document_context(
+            # Le marqueur "article absent" est renvoye A PART et non porte par
+            # un faux resultat : sonder hasattr(results[0], 'article_not_found')
+            # obligeait tout le reste du code a manipuler un objet qui n'etait
+            # pas un resultat de recherche.
+            priority_chunks, not_found = await self._get_priority_document_context(
                 request.law_id, request.question
             )
-            logger.info(f"📌 Priority doc {request.law_id}: {len(priority_results)} results")
+            logger.info(f"📌 Priority doc {request.law_id}: {len(priority_chunks)} chunks")
 
-        # General search
-        search_results = await self._retrieve_context(request.question, request.language)
-
-        # Check if article was not found in priority document
-        if priority_results and hasattr(priority_results[0], 'article_not_found') and priority_results[0].article_not_found:
-            result = priority_results[0]
+        if not_found:
             message = (
-                f"Ce document ne contient pas d'article {result.requested_article}. "
-                f"Le document \"{result.title}\" contient {result.total_articles} article(s). "
+                f"Ce document ne contient pas d'article {not_found['requested_article']}. "
+                f"Le document \"{not_found['law_title']}\" contient "
+                f"{not_found['total_articles']} article(s). "
             )
-            if result.total_articles > 0:
-                message += f"Veuillez demander un article entre 1 et {result.total_articles}."
+            if not_found["total_articles"] > 0:
+                message += (
+                    f"Veuillez demander un article entre 1 et {not_found['total_articles']}."
+                )
             else:
                 message += "Ce document ne contient aucun article extrait."
 
@@ -227,12 +260,19 @@ class RAGService:
                 persona=request.persona
             )
 
+        # General search
+        search_results = await self._retrieve_chunks(request.question, request.language)
+
         # Merge: priority first, then general (deduplicated)
-        if priority_results:
-            seen_ids = {r.law_id for r in priority_results}
-            filtered = [r for r in search_results if r.law_id not in seen_ids]
-            search_results = priority_results + filtered[:3]
-            logger.info(f"📚 Merged: {len(priority_results)} priority + {len(filtered[:3])} general")
+        if priority_chunks:
+            # Dedoublonnage sur la cle de chunk et non sur law_id : deux
+            # articles differents d'une meme loi doivent tous deux survivre.
+            seen = {c.fusion_key for c in priority_chunks}
+            filtered = [c for c in search_results if c.fusion_key not in seen]
+            search_results = priority_chunks + filtered[:self.TOP_K_CHUNKS]
+            logger.info(
+                f"📚 Merged: {len(priority_chunks)} priority + {len(filtered[:self.TOP_K_CHUNKS])} general"
+            )
 
         return search_results, None
 
@@ -306,7 +346,7 @@ class RAGService:
         try:
             # Retrieval (same as ask)
             retrieval_start = time.time()
-            search_results = await self._retrieve_context(
+            search_results = await self._retrieve_chunks(
                 request.question,
                 request.language
             )
@@ -392,127 +432,171 @@ class RAGService:
                 "error": str(e)
             })
 
-    async def _retrieve_context(
+    async def _retrieve_chunks(
         self,
         question: str,
         language: str
-    ) -> List:
+    ) -> List[ChunkResult]:
         """
-        Retrieve relevant documents using SearchService.
+        Recupere les articles pertinents via SearchService.
 
-        Uses text search for reliability (hybrid requires embeddings).
-        Searches all languages to maximize results.
-        Extracts keywords from natural language questions for better search.
+        Mode hybride : il etait epingle sur "text" parce que le corpus n'etait
+        pas vectorise et que la recherche semantique ne renvoyait rien
+        d'exploitable. Elle rend desormais des articles entiers, et l'hybride
+        tolere un cote semantique vide.
+
+        Aucun filtre de langue : un texte camerounais peut n'exister qu'en
+        anglais, le modele traduit dans la reponse.
         """
-        # Extract keywords from question for better la recherche plein texte results
         search_query = self.extract_keywords(question)
         logger.info(f"🔍 RAG Search: original='{question[:50]}...' keywords='{search_query}'")
-        
+
         search_response = await self.search_service.search(
             SearchRequest(
                 query=search_query,
-                mode="text",  # Use text search (hybrid requires embeddings)
-                filters=SearchFilters(status="published"),  # No language filter
-                limit=self.TOP_K_DOCUMENTS
+                mode="hybrid",
+                filters=SearchFilters(status="published"),
+                limit=self.TOP_K_CHUNKS
             )
         )
 
+        chunks = search_response.chunks
         logger.info(
-            f"📚 Retrieved {len(search_response.results)} documents "
+            f"📚 Retrieved {len(chunks)} chunks "
             f"in {search_response.search_time_ms}ms"
         )
-        
-        # Debug: Log first result if any
-        if search_response.results:
-            first = search_response.results[0]
-            logger.info(f"📄 First result: {first.reference} - {first.title}")
+
+        if chunks:
+            first = chunks[0]
+            logger.info(
+                f"📄 First chunk: {first.reference} art. {first.number} - {first.law_title}"
+            )
         else:
             logger.warning(f"⚠️ No search results for query: {question[:100]}")
 
-        return search_response.results
+        return chunks
 
-    async def _get_priority_document_context(self, law_id: int, question: str) -> List:
+    async def _get_priority_document_context(
+        self, law_id: int, question: str
+    ) -> Tuple[List[ChunkResult], Optional[Dict[str, Any]]]:
         """
-        Fetch context from the active document being viewed.
-        
-        When a user is viewing a specific document and asks a question,
-        prioritize content from that document to provide focused answers.
-        
-        If a specific article is requested but not found, returns a special
-        result indicating the article doesn't exist in this document.
-        
-        Args:
-            law_id: ID of the law being viewed
-            question: User's question (used to find relevant articles)
-            
+        Contexte issu du document actuellement consulte.
+
+        Quand l'utilisateur lit un document et pose une question, ses articles
+        priment sur la recherche generale.
+
         Returns:
-            List of search-like results from the priority document
-            May include special 'article_not_found' marker
+            (chunks, marqueur_article_absent). Le second element vaut None dans
+            le cas nominal ; il porte sinon de quoi composer la reponse
+            "cet article n'existe pas dans ce document".
         """
         assert isinstance(law_id, int) and law_id > 0, "law_id must be a positive integer"
         assert isinstance(question, str) and len(question) > 0, "question must be a non-empty string"
 
         from app.models.law import Law, Article
-        
+
         try:
-            # Get the law with its articles
             query = select(Law).where(Law.id == law_id)
             result = await self.db.execute(query)
             law = result.scalar_one_or_none()
-            
+
             if not law:
                 logger.warning(f"⚠️ Priority law_id {law_id} not found")
-                return []
-            
-            # Get articles for this law
-            article_query = select(Article).where(Article.law_id == law_id).order_by(Article.order)
+                return [], None
+
+            article_query = (
+                select(Article).where(Article.law_id == law_id).order_by(Article.order)
+            )
             article_result = await self.db.execute(article_query)
-            articles = article_result.scalars().all()
+            articles = list(article_result.scalars().all())
             total_articles = len(articles)
-            
-            # Check if question asks about a specific article
+
             article_num = self._extract_article_number(question)
-            
+
             if article_num:
-                logger.info(f"📌 Looking for article {article_num} in doc (has {total_articles} articles)")
-                
-                # If another document is mentioned, let general search handle it
+                logger.info(
+                    f"📌 Looking for article {article_num} in doc (has {total_articles} articles)"
+                )
+
+                # Un autre document est nomme : laisser la recherche generale faire
                 if self._references_other_document(question, law.title):
-                    return []
-                
-                # Look for the article in the current document
-                if articles:
-                    for article in articles:
-                        if article.number and (
-                            str(article.number) == str(article_num) or
-                            article_num.lower() in str(article.number).lower()
-                        ):
-                            logger.info(f"✅ Found article {article.number} in priority doc")
-                            return [self._build_priority_result(
-                                law, article.content or "", total_articles
-                            )]
-                
-                # Article not found in this document!
-                logger.info(f"❌ Article {article_num} NOT found in doc (has {total_articles} articles)")
-                return [self._build_priority_result(
-                    law, "", total_articles,
-                    article_not_found=True, requested_article=article_num
-                )]
-            
-            # No specific article requested - use law content and first few articles
-            combined_content = law.content or ""
-            if articles:
-                for article in articles[:3]:
-                    if article.content:
-                        combined_content += f"\n\nArticle {article.number}:\n{article.content}"
-            
-            if combined_content:
-                return [self._build_priority_result(law, combined_content, total_articles)]
-                
+                    return [], None
+
+                wanted = _normalize_article_number(article_num)
+                for article in articles:
+                    if article.number and _normalize_article_number(article.number) == wanted:
+                        logger.info(f"✅ Found article {article.number} in priority doc")
+                        return [self._chunk_from_article(law, article, "priority")], None
+
+                logger.info(
+                    f"❌ Article {article_num} NOT found in doc (has {total_articles} articles)"
+                )
+                return [], {
+                    "requested_article": article_num,
+                    "law_title": law.title,
+                    "total_articles": total_articles,
+                }
+
+            # Pas d'article precis : les premiers articles du document, chacun
+            # comme un chunk distinct. Ils etaient auparavant concatenes dans un
+            # seul bloc de texte, ce qui rendait toute citation impossible.
+            chunks = [
+                self._chunk_from_article(law, article, "priority")
+                for article in articles[:3]
+                if article.content
+            ]
+            if chunks:
+                return chunks, None
+
+            # Document sans article extrait : le texte integral, sans identite
+            # d'article.
+            if law.content:
+                return [ChunkResult(
+                    article_id=None,
+                    law_id=law.id,
+                    content=law.content,
+                    excerpt=law.content[:400],
+                    reference=law.reference or "",
+                    law_title=law.title,
+                    type=law.type or "loi",
+                    language=law.language,
+                    status=law.status or "published",
+                    category_id=law.category_id,
+                    category_name="Document actif",
+                    publication_date=law.publication_date,
+                    relevance_score=1.0,
+                    source="priority",
+                )], None
+
         except Exception as e:
             logger.error(f"⚠️ Error fetching priority document: {e}")
-        
-        return []
+
+        return [], None
+
+    @staticmethod
+    def _chunk_from_article(law, article, source: str) -> ChunkResult:
+        """Construit un ChunkResult a partir des lignes ORM Law + Article."""
+        content = article.content or ""
+        return ChunkResult(
+            article_id=article.id,
+            law_id=law.id,
+            number=str(article.number) if article.number else None,
+            article_title=article.title,
+            section=article.section,
+            page_number=article.page_number,
+            content=content,
+            excerpt=content[:400],
+            reference=law.reference or "",
+            law_title=law.title,
+            type=law.type or "loi",
+            language=law.language,
+            status=law.status or "published",
+            category_id=law.category_id,
+            category_name="Document actif" if source == "priority" else None,
+            publication_date=law.publication_date,
+            relevance_score=1.0,
+            source=source,
+        )
 
     def _references_other_document(self, question: str, current_title: str) -> bool:
         """
@@ -536,55 +620,6 @@ class RAGService:
                 logger.info(f"📌 Another document mentioned, skipping priority")
                 return True
         return False
-
-    def _build_priority_result(
-        self, law, content: str, total_articles: int,
-        article_not_found: bool = False, requested_article: str = ""
-    ):
-        """
-        Build a PriorityResult dataclass instance from law data.
-
-        Args:
-            law: Law ORM object
-            content: Article or combined content text
-            total_articles: Total number of articles in this law
-            article_not_found: Whether the requested article was missing
-            requested_article: The article number that was requested
-
-        Returns:
-            PriorityResult dataclass instance
-        """
-        from dataclasses import dataclass
-
-        @dataclass
-        class PriorityResult:
-            law_id: int
-            title: str
-            reference: str
-            content: str
-            source_language: str
-            category_name: str = "Document actif"
-            relevance_score: float = 1.0
-            highlights: dict = None
-            matched_articles: list = None
-            article_not_found: bool = False
-            requested_article: str = ""
-            total_articles: int = 0
-
-            def __post_init__(self):
-                self.highlights = {"content": self.content if self.content else ""}
-                self.matched_articles = []
-
-        return PriorityResult(
-            law_id=law.id,
-            title=law.title,
-            reference=law.reference or "",
-            content=content,
-            source_language=law.language or "fr",
-            total_articles=total_articles,
-            article_not_found=article_not_found,
-            requested_article=requested_article,
-        )
 
     async def _load_or_create_conversation(
         self,
@@ -637,131 +672,98 @@ class RAGService:
         logger.info(f"🆕 New conversation: {conversation.session_id}")
         return conversation, []
 
-    async def _fallback_search(self, question: str, history: List = None) -> List:
+    async def _fallback_search(self, question: str, history: List = None) -> List[ChunkResult]:
         """
-        Multilingual fallback search when la recherche plein texte returns no results.
-        
-        Logic:
-        1. Detect prompt language (FR/EN)
-        2. Extract document context from conversation history
-        3. Search in same-language documents first
-        4. If not found, search in other-language documents
-        5. Translation handled by Gemini in response generation
+        Repli multilingue quand la recherche plein texte ne rend rien.
+
+        1. Detecte la langue de la question (FR/EN)
+        2. Extrait le contexte documentaire de l'historique
+        3. Cherche d'abord dans les documents de la meme langue, puis dans l'autre
+        4. La traduction est laissee au modele
+
+        Tourne sur la session async de la requete. Cette methode ouvrait son
+        propre moteur synchrone — dans une coroutine — a chaque appel, sans
+        jamais le fermer.
         """
         assert isinstance(question, str) and len(question) > 0, "question must be a non-empty string"
         assert history is None or isinstance(history, list), "history must be a list or None"
 
-        import re
-        
-        # Detect prompt language based on keywords
         prompt_lang = self._detect_language(question)
         logger.info(f"🌐 Detected prompt language: {prompt_lang}")
-        
-        # Extract article/section number from question
+
         article_num = self._extract_article_number(question)
         if not article_num:
             return []
-        
-        # Extract document context from conversation history
+
         doc_context = self._extract_document_context(question, history)
-        logger.info(f"📌 Multilingual search: article {article_num}, context: {doc_context or 'none'}")
-        
+        logger.info(
+            f"📌 Multilingual search: article {article_num}, context: {doc_context or 'none'}"
+        )
+
         try:
-            from sqlalchemy import text, create_engine
-            from app.core.config import settings
-            from dataclasses import dataclass
-            
-            engine = create_engine(settings.DATABASE_URL.replace('+asyncpg', ''))
-            
-            @dataclass
-            class FallbackResult:
-                law_id: int
-                title: str
-                reference: str
-                content: str
-                source_language: str
-                category_name: str = "Loi"
-                relevance_score: float = 1.0
-                highlights: dict = None
-                matched_articles: list = None
-                
-                def __post_init__(self):
-                    self.highlights = {"content": self.content}
-                    self.matched_articles = []
-            
-            with engine.connect() as conn:
-                # Define search order based on prompt language
-                if prompt_lang == "fr":
-                    search_order = [("fr", "Article"), ("en", "Section")]
-                else:
-                    search_order = [("en", "Section"), ("fr", "Article")]
-                
-                # Use document context or default to constitution
-                search_pattern = f"%{doc_context}%" if doc_context else "%constitution%"
-                
-                for lang, term_type in search_order:
-                    # Search for laws in this language
-                    sql = text("""
-                        SELECT l.id, l.title, l.reference, l.language,
-                               a.number, a.content as article_content
-                        FROM laws l
-                        LEFT JOIN articles a ON a.law_id = l.id AND a.number = :article_num
-                        WHERE (l.language = :lang OR l.language IS NULL)
-                          AND (LOWER(l.title) LIKE :pattern 
-                               OR LOWER(l.reference) LIKE :pattern)
-                        LIMIT 1
-                    """)
-                    
-                    result = conn.execute(sql, {
-                        "lang": lang, 
-                        "article_num": article_num,
-                        "pattern": search_pattern
-                    })
-                    row = result.fetchone()
-                    
-                    if row and row[5]:  # Found law with article content
-                        law_id, title, reference, law_lang, number, article_content = row
-                        logger.info(f"📄 Found in {lang.upper()}: {title} - Article/Section {number}")
-                        
-                        return [FallbackResult(
-                            law_id=law_id,
-                            title=title,
-                            reference=reference,
-                            content=article_content,
-                            source_language=lang or prompt_lang
-                        )]
-                    elif row:  # Found law but no article - try direct article search
-                        law_id = row[0]
-                        # Try ILIKE pattern for article number
-                        sql2 = text("""
-                            SELECT number, content FROM articles 
-                            WHERE law_id = :law_id 
-                              AND (number = :num OR number ILIKE :pattern)
-                            LIMIT 1
-                        """)
-                        result2 = conn.execute(sql2, {
-                            "law_id": law_id, 
-                            "num": article_num,
-                            "pattern": f"%{article_num}%"
-                        })
-                        row2 = result2.fetchone()
-                        if row2:
-                            logger.info(f"📄 Found article {row2[0]} in {lang.upper()}: {row[1]}")
-                            return [FallbackResult(
-                                law_id=law_id,
-                                title=row[1],
-                                reference=row[2],
-                                content=row2[1],
-                                source_language=lang or prompt_lang
-                            )]
-                
-                logger.warning(f"⚠️ Article/Section {article_num} not found in any language")
-                
+            search_order = ["fr", "en"] if prompt_lang == "fr" else ["en", "fr"]
+            # Metacaracteres echappes : un % ou un _ dans le contexte
+            # elargissait le motif au lieu d'etre cherche litteralement.
+            raw_pattern = doc_context if doc_context else "constitution"
+            search_pattern = f"%{escape_like(raw_pattern.lower())}%"
+
+            sql = text("""
+                SELECT l.id, l.title, l.reference, l.language, l.type,
+                       l.category_id, l.status, l.publication_date,
+                       a.id AS article_id, a.number, a.title AS article_title,
+                       a.section, a.page_number, a.content AS article_content
+                FROM laws l
+                JOIN articles a ON a.law_id = l.id
+                WHERE (l.language = :lang OR l.language IS NULL)
+                  AND (LOWER(l.title) LIKE :pattern ESCAPE '\\'
+                       OR LOWER(l.reference) LIKE :pattern ESCAPE '\\')
+                  AND (a.number = :num OR a.number ILIKE :num_pattern ESCAPE '\\')
+                ORDER BY a.order
+                LIMIT 1
+            """)
+
+            for lang in search_order:
+                result = await self.db.execute(sql, {
+                    "lang": lang,
+                    "pattern": search_pattern,
+                    "num": article_num,
+                    "num_pattern": f"%{escape_like(article_num)}%",
+                })
+                row = result.fetchone()
+                if not row:
+                    continue
+
+                logger.info(
+                    f"📄 Found in {lang.upper()}: {row.title} - article {row.number}"
+                )
+                content = row.article_content or ""
+                return [ChunkResult(
+                    article_id=row.article_id,
+                    law_id=row.id,
+                    number=str(row.number) if row.number else None,
+                    article_title=row.article_title,
+                    section=row.section,
+                    page_number=row.page_number,
+                    content=content,
+                    excerpt=content[:400],
+                    reference=row.reference or "",
+                    law_title=row.title,
+                    type=row.type or "loi",
+                    language=row.language or lang,
+                    status=row.status or "published",
+                    category_id=row.category_id,
+                    publication_date=row.publication_date,
+                    relevance_score=1.0,
+                    source="fallback",
+                )]
+
+            logger.warning(f"⚠️ Article/Section {article_num} not found in any language")
+
         except Exception as e:
             logger.warning(f"⚠️ Multilingual search failed: {e}")
-        
+
         return []
-    
+
     def _detect_language(self, text: str) -> str:
         """Detect if text is primarily French or English."""
         french_words = ["de", "la", "le", "les", "du", "des", "au", "aux", "un", "une", 
@@ -866,21 +868,21 @@ class RAGService:
         3. Conversation history
         4. User question
         """
-        # Build context
-        context_str = build_context_string(search_results)
+        # L'article explicitement demande est remonte en tete du contexte.
+        # Une methode dediee allait auparavant le RECHERCHER EN BASE, avec son
+        # propre moteur synchrone, parce que le contexte ne contenait que des
+        # extraits de 400 caracteres. Le contexte porte desormais le texte
+        # integral : un simple reordonnancement suffit.
+        chunks = self._pin_requested_article(question, search_results)
+
+        context_str = build_context_string(chunks)
         context_section = CONTEXT_TEMPLATE.format(context_docs=context_str)
 
-        # Check if question mentions a specific article and get its content
-        article_section = self._get_article_content_for_prompt(question, search_results)
-        
         # Build history
         history_str = format_conversation_history(history) if history else ""
 
         # Combine
         parts = [context_section]
-        
-        if article_section:
-            parts.append(f"\n{article_section}\n")
 
         if history_str:
             parts.append(f"\n{history_str}\n")
@@ -889,274 +891,145 @@ class RAGService:
 
         return "\n".join(parts)
     
-    def _get_article_content_for_prompt(self, question: str, search_results: List) -> str:
+    def _pin_requested_article(
+        self, question: str, chunks: List[ChunkResult]
+    ) -> List[ChunkResult]:
         """
-        Detect if question asks about a specific article/section and fetch its content.
-        Supports both French and English questions.
-        Full article content is sent to ensure complete context for LLM.
-        """
-        assert isinstance(question, str) and len(question) > 0, "question must be a non-empty string"
-        assert isinstance(search_results, list), "search_results must be a list"
+        Remonte en tete le chunk correspondant a l'article demande.
 
-        # Use shared method for article number extraction
+        Sans acces a la base : le contexte contient deja le texte integral des
+        articles retenus, il ne reste qu'a mettre le bon en premier.
+        """
         article_num = self._extract_article_number(question)
-        if not article_num:
-            return ""
-        
-        prompt_lang = self._detect_language(question)
-        logger.info(f"📑 Detected article/section {article_num} in {prompt_lang.upper()} question")
-        
-        # Get FULL article content from PostgreSQL (no truncation)
-        try:
-            from sqlalchemy import create_engine, text
-            from app.core.config import settings
-            
-            # FIRST: Check if FallbackResult already has the article content
-            for result in search_results[:3]:
-                result_content = getattr(result, 'content', None)
-                # If result has content and appears to be article content (not truncated law content)
-                if result_content and len(result_content) < 5000:
-                    source_lang = getattr(result, 'source_language', None)
-                    translation_note = ""
-                    if source_lang and source_lang != prompt_lang:
-                        if prompt_lang == "fr":
-                            translation_note = "\n\n⚠️ Ce contenu est extrait de la version anglaise. Merci de traduire en français dans ta réponse."
-                        else:
-                            translation_note = "\n\n⚠️ This content is from the French version. Please translate to English in your response."
-                    
-                    logger.info(f"📄 Using article content from FallbackResult ({len(result_content)} chars)")
-                    return f"""
-=== ARTICLE/SECTION SPÉCIFIQUE DEMANDÉ ===
-Document: {result.title} ({getattr(result, 'reference', '')})
-Article/Section {article_num}:
+        if not article_num or not chunks:
+            return chunks
 
-CONTENU COMPLET:
-{result_content}{translation_note}
-==========================================
-"""
-            
-            # SECOND: Try to find in database
-            engine = create_engine(settings.DATABASE_URL.replace('+asyncpg', ''))
-            with engine.connect() as conn:
-                for result in search_results[:3]:
-                    sql = text("""
-                        SELECT number, title, content FROM articles 
-                        WHERE law_id = :law_id AND (number = :number OR number ILIKE :pattern)
-                        LIMIT 1
-                    """)
-                    res = conn.execute(sql, {
-                        "law_id": result.law_id,
-                        "number": article_num,
-                        "pattern": f"%{article_num}%"
-                    })
-                    row = res.fetchone()
-                    if row:
-                        number, title, content = row
-                        source_lang = getattr(result, 'source_language', None)
-                        translation_note = ""
-                        if source_lang and source_lang != prompt_lang:
-                            if prompt_lang == "fr":
-                                translation_note = "\n\n⚠️ Ce contenu est extrait de la version anglaise. Merci de traduire en français dans ta réponse."
-                            else:
-                                translation_note = "\n\n⚠️ This content is from the French version. Please translate to English in your response."
-                        
-                        logger.info(f"📄 Found article/section {number} in DB ({len(content)} chars)")
-                        return f"""
-=== ARTICLE/SECTION SPÉCIFIQUE DEMANDÉ ===
-Document: {result.title} ({result.reference})
-Article/Section {number}: {title or ''}
+        wanted = _normalize_article_number(article_num)
+        for index, chunk in enumerate(chunks):
+            if chunk.number and _normalize_article_number(chunk.number) == wanted:
+                if index == 0:
+                    return chunks
+                logger.info(f"📌 Article {chunk.number} remonte en tete du contexte")
+                return [chunk] + chunks[:index] + chunks[index + 1:]
 
-CONTENU COMPLET:
-{content}{translation_note}
-==========================================
-"""
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to get article for prompt: {e}")
-        
-        return ""
+        return chunks
 
     def _extract_citations(
         self,
         answer: str,
-        search_results: List
+        chunks: List[ChunkResult]
     ) -> List[Citation]:
         """
-        Extract and validate citations from answer.
+        Extrait et valide les citations presentes dans la reponse.
 
-        Looks for patterns like:
-        - "Article 161 de la Loi OHADA"
-        - "article 5 du Code civil"
+        Cherche "Article 161 du Code OHADA", "article 5 de la Loi...", etc.
 
-        Validates against search_results to ensure cited docs exist.
+        La validation se fait sur les chunks REELLEMENT places dans le prompt :
+        couple (loi, numero d'article normalise). Elle se contentait de
+        verifier que le nom cite apparaissait dans le titre de la loi, sans
+        jamais confronter le NUMERO d'article a ce que le contexte contenait.
+        L'extrait et l'identifiant d'article proviennent du chunk : aucun
+        aller-retour en base, la ou trois moteurs synchrones etaient ouverts
+        pour aller rechercher un texte deja present.
         """
-        citations = []
-        seen = set()  # Dedup
+        citations: List[Citation] = []
+        seen = set()
 
-        # Regex extraction
         matches = re.finditer(self.CITATION_REGEX, answer, re.IGNORECASE)
 
         for match in matches:
             # Groupes : 1 = prefixe de code (L/R/D, optionnel), 2 = numero,
-            # 3 = texte cite. Le prefixe est recolle au numero pour que
-            # "article L 94 septies" reste citable tel quel.
+            # 3 = texte cite.
             prefix = (match.group(1) or "").strip()
             article_num = f"{prefix} {match.group(2)}".strip()
-            law_mention = match.group(3).strip()
+            law_mention = match.group(3).strip().lower()
+            wanted = _normalize_article_number(match.group(2))
 
-            # Find matching document in search results
-            for result in search_results:
-                # Match by law title or reference
-                if (law_mention.lower() in result.title.lower() or
-                    law_mention.lower() in result.reference.lower()):
+            for chunk in chunks:
+                if chunk.number and _normalize_article_number(chunk.number) != wanted:
+                    continue
 
-                    key = (result.law_id, article_num)
-                    if key not in seen:
-                        # Extract relevant excerpt
-                        excerpt = self._find_article_excerpt(
-                            result, article_num
-                        )
+                # Le nom cite doit correspondre a la loi du chunk. Conserve
+                # comme depart quand plusieurs lois exposent le meme numero.
+                mentions_law = (
+                    law_mention in (chunk.law_title or "").lower()
+                    or law_mention in (chunk.reference or "").lower()
+                )
+                if not mentions_law and chunk.number is None:
+                    continue
 
-                        citations.append(Citation(
-                            law_id=result.law_id,
-                            law_reference=result.reference,
-                            law_title=result.title,
-                            article_number=article_num,
-                            excerpt=excerpt,
-                            relevance_score=result.relevance_score
-                        ))
-                        seen.add(key)
-                        break
+                key = (chunk.law_id, wanted)
+                if key in seen:
+                    break
+
+                excerpt = (chunk.content or chunk.excerpt or "")[:300]
+                citations.append(Citation(
+                    law_id=chunk.law_id,
+                    law_reference=chunk.reference,
+                    law_title=chunk.law_title,
+                    article_number=chunk.number or article_num,
+                    article_id=chunk.article_id,
+                    excerpt=excerpt or "Voir document complet pour détails",
+                    relevance_score=chunk.relevance_score,
+                ))
+                seen.add(key)
+                break
 
         logger.info(f"📎 Extracted {len(citations)} citations")
         return citations
-    
-    def _create_sources_from_results(self, search_results: List, question: str) -> List[Citation]:
-        """
-        Create source citations from search results with intelligent filtering.
-        1. Identifies relevant laws by matching question words to law titles.
-        2. Prioritizes laws matching the question's language.
-        3. Falls back to Top 1 result if no specific law is identified.
-        """
-        sources = []
-        article_num = self._extract_article_number(question)
-        question_lower = question.lower()
-        
-        # 1. candidate selection
-        candidates = []
-        
-        # Check for title matches
-        matched_results = []
-        for res in search_results[:3]:
-            # Extract significant words from title (skip short words)
-            title_words = {w for w in re.findall(r'\w+', res.title.lower()) if len(w) > 3}
-            q_words = {w for w in re.findall(r'\w+', question_lower) if len(w) > 3}
-            
-            # Check overlap "Constitution", "Charte", etc.
-            if title_words.intersection(q_words):
-                matched_results.append(res)
-                
-        if matched_results:
-            # 2. Filter by Language (Deduplication)
-            q_lang = self._detect_language(question)
-            same_lang_matches = [
-                res for res in matched_results 
-                if (getattr(res, 'language', 'fr') or 'fr').lower().startswith(q_lang)
-            ]
-            
-            # Use same-language matches if available, otherwise all matches
-            # Take Top 1 to ensure "only the law used" is cited
-            candidates = same_lang_matches[:1] if same_lang_matches else matched_results[:1]
-            logger.info(f"🔍 Filtered sources by title match: {[c.title for c in candidates]}")
-        else:
-            # 3. No match found - Use Top 1 result (most relevant)
-            candidates = search_results[:1]
-            logger.info("🔍 No title match, using top result")
 
-        # Create citation
-        for result in candidates:
+    def _create_sources_from_results(
+        self, chunks: List[ChunkResult], question: str
+    ) -> List[Citation]:
+        """
+        Fabrique des sources quand la reponse ne cite explicitement rien.
+
+        1. Retient les lois dont le titre recoupe les mots de la question
+        2. Privilegie la langue de la question
+        3. A defaut, prend le premier chunk (le plus pertinent)
+        """
+        if not chunks:
+            return []
+
+        question_lower = question.lower()
+        q_words = {w for w in re.findall(r"\w+", question_lower) if len(w) > 3}
+
+        matched = [
+            c for c in chunks[:3]
+            if {w for w in re.findall(r"\w+", (c.law_title or "").lower()) if len(w) > 3}
+            & q_words
+        ]
+
+        if matched:
+            q_lang = self._detect_language(question)
+            same_lang = [
+                c for c in matched if (c.language or "fr").lower().startswith(q_lang)
+            ]
+            candidates = (same_lang or matched)[:1]
+            logger.info(f"🔍 Filtered sources by title match: {[c.law_title for c in candidates]}")
+        else:
+            candidates = chunks[:1]
+            logger.info("🔍 No title match, using top chunk")
+
+        sources: List[Citation] = []
+        for chunk in candidates:
             try:
-                excerpt = ""
-                if article_num:
-                    excerpt = self._find_article_excerpt(result, article_num)
-                
-                if not excerpt and hasattr(result, 'highlights') and result.highlights:
-                    excerpt = result.highlights.get('content', '')[:300]
-                
-                if not excerpt and hasattr(result, 'content'):
-                    excerpt = result.content[:300] if result.content else ""
-                
+                # L'extrait vient du chunk envoye au modele, jamais d'une
+                # requete supplementaire.
+                excerpt = (chunk.content or chunk.excerpt or "")[:300]
                 sources.append(Citation(
-                    law_id=result.law_id,
-                    law_reference=getattr(result, 'reference', ''),
-                    law_title=result.title,
-                    article_number=article_num,
-                    excerpt=excerpt[:300] if excerpt else "Contenu du document",
-                    relevance_score=getattr(result, 'relevance_score', 0.8)
+                    law_id=chunk.law_id,
+                    law_reference=chunk.reference,
+                    law_title=chunk.law_title,
+                    article_number=chunk.number,
+                    article_id=chunk.article_id,
+                    excerpt=excerpt or "Contenu du document",
+                    relevance_score=chunk.relevance_score,
                 ))
             except Exception as e:
-                logger.warning(f"⚠️ Error creating source from result: {e}")
-        
+                logger.warning(f"⚠️ Error creating source from chunk: {e}")
+
         return sources
-
-    def _find_article_excerpt(self, result, article_num: str) -> str:
-        """Find excerpt for specific article from search result."""
-        logger.debug(f"DEBUG: _find_article_excerpt called for article {article_num}, law_id={result.law_id}")
-        
-        # PRIORITY 1: Query PostgreSQL articles table directly
-        try:
-            from sqlalchemy import create_engine, text
-            from app.core.config import settings
-            
-            engine = create_engine(settings.DATABASE_URL.replace('+asyncpg', ''))
-            with engine.connect() as conn:
-                # Try multiple number formats
-                number_variants = [article_num]
-                
-                # Handle "premier"/"première" for article 1
-                if article_num == "1":
-                    number_variants.extend(["premier", "première", "1er", "1ère"])
-                elif article_num.lower() in ["premier", "première"]:
-                    number_variants.extend(["1", "1er", "1ère"])
-                
-                logger.debug(f"DEBUG: Trying number variants: {number_variants}")
-                
-                # Try each variant
-                for num in number_variants:
-                    sql = text("""
-                        SELECT content FROM articles 
-                        WHERE law_id = :law_id AND (number = :number OR number ILIKE :pattern)
-                        LIMIT 1
-                    """)
-                    res = conn.execute(sql, {
-                        "law_id": result.law_id, 
-                        "number": num,
-                        "pattern": f"%{num}%"
-                    })
-                    row = res.fetchone()
-                    if row and row[0]:
-                        content = row[0]
-                        logger.debug(f"DEBUG: FOUND article {num} content: {content[:100]}...")
-                        return content[:300] if len(content) > 300 else content
-                        
-                logger.debug(f"DEBUG: Article {article_num} NOT FOUND in PostgreSQL")
-        except Exception as e:
-            logger.debug(f"DEBUG: PostgreSQL query failed: {e}")
-
-        # FALLBACK 1: Check matched_articles from la recherche plein texte
-        if hasattr(result, 'matched_articles') and result.matched_articles:
-            for article in result.matched_articles:
-                if hasattr(article, 'number') and article.number == article_num:
-                    if hasattr(article, 'snippet'):
-                        return article.snippet[:300]
-
-        # FALLBACK 2: Use highlights from la recherche plein texte
-        if hasattr(result, 'highlights'):
-            content = result.highlights.get("content", "")
-            if content:
-                logger.debug(f"DEBUG: Extraits de recherche en repli")
-                return content[:300]
-
-        return "Voir document complet pour détails"
 
     def _calculate_confidence(
         self,
@@ -1188,9 +1061,14 @@ CONTENU COMPLET:
             avg_relevance = sum(c.relevance_score for c in citations) / len(citations)
             score += avg_relevance * 0.3
         elif search_results:
-            # No citations but have results
-            avg_relevance = sum(r.relevance_score for r in search_results[:3]) / min(3, len(search_results))
-            score += avg_relevance * 0.2
+            # No citations but have results.
+            # Le diviseur est borne : un objet qui se dit non vide mais dont
+            # len() vaut 0 (une doublure, par exemple) provoquait une
+            # ZeroDivisionError remontee en erreur de service.
+            top = list(search_results[:3])
+            if top:
+                avg_relevance = sum(r.relevance_score for r in top) / len(top)
+                score += avg_relevance * 0.2
 
         # Factor 3: Answer length (0-0.2)
         answer_len = len(answer.split())
