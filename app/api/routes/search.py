@@ -15,6 +15,7 @@ import time
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -58,7 +59,7 @@ async def search(
     Point d'entrée principal pour la recherche.
 
     Effectue une recherche selon le mode spécifié:
-    - **text**: Recherche textuelle full-text (Meilisearch, <50ms)
+    - **text**: Recherche plein texte PostgreSQL (tsvector + GIN, <50ms)
     - **semantic**: Recherche sémantique par similarité (pgvector, <200ms)
     - **hybrid**: Combinaison optimale via RRF fusion (40/60, <200ms)
 
@@ -149,7 +150,7 @@ async def search(
         ) from e
 
     except SearchServiceError as e:
-        # Erreurs service (Meilisearch down, pgvector error, etc.)
+        # Erreurs service (FTS PostgreSQL, pgvector, etc.)
         logger.error(f"❌ Search service error: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -168,142 +169,68 @@ async def search(
 async def suggest(
     q: str,
     limit: int = 5,
-    search_service: SearchService = Depends(get_search_service)
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
-    Autocomplétion rapide pour suggestions de recherche.
-    
-    Utilise uniquement Meilisearch (mode text) pour des réponses ultra-rapides (<50ms).
-    Retourne titres et références de lois correspondant à la requête.
-    
-    Args:
-        q: Query de recherche (min 2 caractères)
-        limit: Nombre de suggestions (défaut: 5, max: 10)
-        
-    Returns:
-        Liste de suggestions avec titre, référence et ID
-        
-    Example:
-        GET /api/v1/search/suggest?q=const&limit=5
-        
-        Response:
-        {
-            "suggestions": [
-                {"id": 1, "title": "Constitution du Cameroun", "reference": "CONST-1996"},
-                {"id": 42, "title": "Loi constitutionnelle", "reference": "LOI-2008-001"}
-            ],
-            "query": "const",
-            "search_time_ms": 12
-        }
-    """
-    assert isinstance(q, str), "Query must be a string"
-    assert isinstance(limit, int) and limit > 0, "Limit must be a positive integer"
+    Autocomplétion sur les titres et références de lois.
 
+    Réécrit en PostgreSQL : la version précédente interrogeait
+    `search_service.meilisearch_client`, attribut supprimé lors du passage à
+    PostgreSQL natif. L'AttributeError était avalée par un `except`, si bien que
+    l'endpoint renvoyait **200 avec une liste vide** — cassé en silence.
+
+    Point de performance : l'opérateur `%` est accéléré par les index
+    gin_trgm_ops (migration c2d3e4f5a6b7) ; `similarity(a,b) > seuil` ne l'est
+    pas. Le filtre utilise donc `%` et `ILIKE 'q%'`, et `similarity()` ne sert
+    qu'au tri. Les correspondances par préfixe passent devant les approximatives
+    pour que « const » propose « Constitution… » avant une correspondance floue.
+
+    Pas de mise en cache : une écriture dans query_cache à chaque frappe serait
+    de l'amplification d'écriture pour une requête déjà sous les 20 ms.
+    """
+    if not isinstance(limit, int) or limit <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="limit doit être un entier positif",
+        )
+
+    q = (q or "").strip()
     if len(q) < 2:
         return {"suggestions": [], "query": q, "search_time_ms": 0}
-    
-    limit = min(limit, 10)  # Max 10 suggestions
-    
+
+    limit = min(limit, 10)
+    start_time = time.time()
+
+    sql = text("""
+        SELECT id, title, reference,
+               GREATEST(similarity(title, :q), similarity(reference, :q)) AS score,
+               (title ILIKE :prefix OR reference ILIKE :prefix) AS is_prefix
+        FROM laws
+        WHERE status = 'published'
+          AND (title ILIKE :prefix OR reference ILIKE :prefix
+               OR title % :q OR reference % :q)
+        ORDER BY is_prefix DESC, score DESC, title ASC
+        LIMIT :limit
+    """)
+
     try:
-        start_time = time.time()
-        
-        # Recherche Meilisearch directe (ultra-rapide)
-        index = search_service.meilisearch_client.index(SearchService.MEILISEARCH_INDEX)
-        
-        results = index.search(
-            q,
-            {
-                "limit": limit,
-                "attributesToRetrieve": ["id", "title", "reference"],
-                "attributesToHighlight": ["title"],
-                "highlightPreTag": "<mark>",
-                "highlightPostTag": "</mark>"
-            }
+        result = await db.execute(
+            sql, {"q": q, "prefix": f"{q}%", "limit": limit}
         )
-        
-        search_time_ms = int((time.time() - start_time) * 1000)
-        
         suggestions = [
-            {
-                "id": hit.get("id"),
-                "title": hit.get("_formatted", {}).get("title", hit.get("title", "")),
-                "reference": hit.get("reference", "")
-            }
-            for hit in results.get("hits", [])
+            {"id": row.id, "title": row.title, "reference": row.reference}
+            for row in result.fetchall()
         ]
-        
-        logger.debug(f"📋 Suggest: {len(suggestions)} results for '{q}' in {search_time_ms}ms")
-        
-        return {
-            "suggestions": suggestions,
-            "query": q,
-            "search_time_ms": search_time_ms
-        }
-        
     except Exception as e:
-        logger.warning(f"⚠️ Suggest error: {e}")
-        return {"suggestions": [], "query": q, "search_time_ms": 0, "error": str(e)}
+        logger.error(f"❌ Autocomplétion en échec pour '{q[:40]}': {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de l'autocomplétion",
+        )
 
-
-def _parse_article_reference(query: str) -> tuple:
-    """
-    Parse article number and document hint from a query string.
-
-    Supports French (article, art.) and English (section) patterns.
-    Normalizes 'premier', '1er', 'first' etc. to '1'.
-
-    Args:
-        query: Lowercased query string
-
-    Returns:
-        (article_num: str | None, doc_hint: str | None)
-    """
-    import re
-
-    patterns = [
-        # "article 5 de la constitution"
-        r"article\s+(premier|1er|1ère|\d+)\s+(?:de\s+)?(?:la\s+|le\s+|l[''']|du\s+|des\s+)?(.+)",
-        # "art. 12 de la loi"
-        r"art\.?\s*(\d+)\s+(?:de\s+)?(?:la\s+|le\s+|l[''']|du\s+)?(.+)",
-        # English: "section 5"
-        r"section\s+(\d+|one|first)\s+(?:of\s+)?(?:the\s+)?(.+)",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, query, re.IGNORECASE)
-        if match:
-            article_num = match.group(1).strip()
-            doc_hint = match.group(2).strip() if match.group(2) else ""
-
-            # Normalize
-            if article_num.lower() in ("premier", "1er", "1ère", "first", "one"):
-                article_num = "1"
-            return article_num, doc_hint
-
-    return None, None
-
-
-def _estimate_page_number(article) -> int:
-    """
-    Estimate the PDF page number where an article appears.
-
-    Uses stored page_number if available; otherwise estimates from
-    the article number (roughly 2 articles per page).
-
-    Args:
-        article: Article ORM object with .page_number and .number
-
-    Returns:
-        Estimated page number (>= 2)
-    """
-    if article.page_number is not None:
-        return article.page_number
-
-    try:
-        art_num = int(article.number.replace("er", "").replace("ère", "").strip())
-        return max(2, 1 + (art_num // 2))
-    except ValueError:
-        return 2  # Default to page 2
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    logger.debug(f"📋 Suggest : {len(suggestions)} résultats pour '{q}' en {elapsed_ms}ms")
+    return {"suggestions": suggestions, "query": q, "search_time_ms": elapsed_ms}
 
 
 @router.get("/article", status_code=status.HTTP_200_OK)
@@ -421,11 +348,11 @@ async def reindex_all(
     background_tasks: BackgroundTasks, search_service: SearchService = Depends(get_search_service)
 ) -> ReindexResponse:
     """
-    Réindexe toutes les lois publiées dans Meilisearch (admin uniquement).
+    Reconstruit les tsvector de toutes les lois publiées (admin uniquement).
 
     **Opération longue** (~5s pour 100 lois):
     - Récupère toutes les lois publiées depuis DB
-    - Supprime ancien index Meilisearch
+    - Recalcule laws.search_vector et articles.search_vector
     - Recrée index avec configuration optimale
     - Indexe documents en batch (1000 par batch)
 
@@ -438,7 +365,7 @@ async def reindex_all(
 
     **Quand utiliser**:
     - Après changements massifs de contenu
-    - Après mise à jour configuration Meilisearch
+    - Après un changement de configuration de la recherche plein texte
     - Résolution corruption index
     - Tests/développement
 
@@ -506,163 +433,131 @@ async def reindex_all(
     "/stats",
     response_model=SearchStats,
     status_code=status.HTTP_200_OK,
-    # TODO: Add admin authentication dependency
-    # dependencies=[Depends(require_admin)]
 )
-async def get_search_stats(
-    search_service: SearchService = Depends(get_search_service),
-) -> SearchStats:
+async def search_stats(db: AsyncSession = Depends(get_db)) -> SearchStats:
     """
-    Récupère les statistiques de recherche (admin uniquement).
+    Statistiques d'indexation (administrateurs).
 
-    **Métriques fournies**:
-    - Nombre total de documents indexés
-    - Répartition par langue (fr/en)
-    - Répartition par catégorie
-    - Répartition par statut
-    - État de santé index Meilisearch
-    - État cache Redis
+    Réécrit en PostgreSQL : la version précédente interrogeait
+    `search_service.meilisearch_client` puis `redis_client`, deux attributs
+    supprimés — l'endpoint renvoyait **systématiquement 500**. Les chiffres
+    « par langue » et « par catégorie » étaient par ailleurs codés en dur à zéro.
 
-    **Cas d'usage**:
-    - Monitoring santé système recherche
-    - Analytics utilisation
-    - Debugging problèmes indexation
-    - Validation après réindexation
-
-    Args:
-        search_service: Service injection
-
-    Returns:
-        SearchStats avec métriques système
-
-    Raises:
-        HTTPException 500: Si récupération stats échoue
-
-    Example:
-        ```
-        GET /api/v1/search/stats
-        Authorization: Bearer <admin_token>
-        ```
-
-        Response:
-        ```json
-        {
-            "total_documents": 156,
-            "by_language": {"fr": 142, "en": 14},
-            "by_category": {"Droit Civil": 45, "Droit Pénal": 38, ...},
-            "by_status": {"published": 156, "draft": 0},
-            "index_health": "healthy",
-            "cache_status": "connected"
-        }
-        ```
+    `indexed_documents` et `articles_with_embeddings` sont les deux nombres qui
+    disent si la chaîne d'ingestion a réellement abouti.
     """
     try:
-        logger.info("📊 Fetching search stats (admin operation)...")
+        totals = (await db.execute(text("""
+            SELECT
+                (SELECT count(*) FROM laws)                                  AS total_documents,
+                (SELECT count(*) FROM laws WHERE search_vector IS NOT NULL)  AS indexed_documents,
+                (SELECT count(*) FROM articles)                              AS total_articles,
+                (SELECT count(*) FROM articles WHERE embedding IS NOT NULL)  AS articles_with_embeddings,
+                (SELECT count(*) FROM query_cache WHERE expires_at > now())  AS cache_entries
+        """))).one()
 
-        # TODO: Implémenter récupération stats depuis Meilisearch + DB
-        # Pour l'instant retourne mock data
+        by_language = {
+            row.k: row.n
+            for row in (await db.execute(text(
+                "SELECT coalesce(language,'inconnue') AS k, count(*) AS n "
+                "FROM laws GROUP BY 1 ORDER BY 2 DESC"
+            ))).fetchall()
+        }
+        by_status = {
+            row.k: row.n
+            for row in (await db.execute(text(
+                "SELECT coalesce(status,'inconnu') AS k, count(*) AS n "
+                "FROM laws GROUP BY 1 ORDER BY 2 DESC"
+            ))).fetchall()
+        }
+        by_category = {
+            row.k: row.n
+            for row in (await db.execute(text(
+                "SELECT coalesce(c.name,'Sans catégorie') AS k, count(l.id) AS n "
+                "FROM laws l LEFT JOIN categories c ON c.id = l.category_id "
+                "GROUP BY 1 ORDER BY 2 DESC"
+            ))).fetchall()
+        }
 
-        # Récupération stats Meilisearch
-        index = search_service.meilisearch_client.index(SearchService.MEILISEARCH_INDEX)
+        if totals.total_documents == 0:
+            index_health = "empty"
+        elif totals.indexed_documents == totals.total_documents:
+            index_health = "healthy"
+        else:
+            index_health = "degraded"
 
-        try:
-            index_stats = index.get_stats()
-            total_docs = index_stats.get("numberOfDocuments", 0)
-        except Exception:
-            total_docs = 0
-
-        # Mock stats (TODO: Vraies stats depuis DB)
-        stats = SearchStats(
-            total_documents=total_docs,
-            by_language={"fr": 0, "en": 0},  # TODO: Query DB
-            by_category={},  # TODO: Query DB
-            by_status={"published": total_docs},
-            index_health="healthy" if total_docs > 0 else "empty",
-            cache_status=("connected" if search_service.redis_client else "disabled"),
+        return SearchStats(
+            total_documents=totals.total_documents,
+            indexed_documents=totals.indexed_documents,
+            total_articles=totals.total_articles,
+            articles_with_embeddings=totals.articles_with_embeddings,
+            by_language=by_language,
+            by_category=by_category,
+            by_status=by_status,
+            index_health=index_health,
+            cache_entries=totals.cache_entries,
+            cache_status="active" if totals.cache_entries else "empty",
         )
 
-        logger.info(f"✅ Stats retrieved: {total_docs} documents indexed")
-
-        return stats
-
     except Exception as e:
-        logger.error(f"❌ Failed to get stats: {e}", exc_info=True)
+        logger.error(f"❌ Calcul des statistiques en échec : {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erreur lors de la récupération des statistiques",
-        ) from e
-
-
-# ==================== HEALTH CHECK ====================
+        )
 
 
 @router.get("/health", status_code=status.HTTP_200_OK)
-async def health_check(search_service: SearchService = Depends(get_search_service)) -> dict:
+async def search_health(db: AsyncSession = Depends(get_db)) -> dict:
     """
-    Vérifie l'état de santé du service de recherche.
+    État de santé de la recherche.
 
-    Teste:
-    - Connexion Meilisearch
-    - Existence index
-    - Connexion Redis (si cache activé)
-    - Disponibilité EmbeddingService
+    Réécrit : la version précédente testait `meilisearch_client` puis
+    `redis_client`. La seconde vérification était **hors de tout `try`**, si bien
+    que l'endpoint renvoyait toujours 500.
 
-    Returns:
-        Statut de santé avec détails composants
-
-    Example:
-        ```
-        GET /api/v1/search/health
-        ```
-
-        Response:
-        ```json
-        {
-            "status": "healthy",
-            "meilisearch": "connected",
-            "redis": "connected",
-            "embedding_service": "ready"
-        }
-        ```
+    Chaque sonde est isolée : une sonde en échec dégrade le rapport, elle ne le
+    fait pas échouer.
     """
-    health_status = {
+    report = {
         "status": "healthy",
-        "meilisearch": "unknown",
-        "redis": "unknown",
+        "database": "unknown",
+        "fts_index": "unknown",
+        "cache": "unknown",
         "embedding_service": "unknown",
     }
 
-    # Test Meilisearch
     try:
-        search_service.meilisearch_client.health()
-        health_status["meilisearch"] = "connected"
+        await db.execute(text("SELECT 1"))
+        report["database"] = "connected"
     except Exception as e:
-        health_status["meilisearch"] = f"error: {str(e)}"
-        health_status["status"] = "degraded"
+        report["database"] = f"error: {type(e).__name__}"
+        report["status"] = "degraded"
 
-    # Test Redis
-    if search_service.redis_client:
-        try:
-            search_service.redis_client.ping()
-            health_status["redis"] = "connected"
-        except Exception as e:
-            health_status["redis"] = f"error: {str(e)}"
-            health_status["status"] = "degraded"
-    else:
-        health_status["redis"] = "disabled"
+    try:
+        present = (await db.execute(text(
+            "SELECT to_regclass('idx_articles_search_vector') IS NOT NULL"
+        ))).scalar()
+        report["fts_index"] = "ready" if present else "missing"
+        if not present:
+            report["status"] = "degraded"
+    except Exception as e:
+        report["fts_index"] = f"error: {type(e).__name__}"
+        report["status"] = "degraded"
 
-    # Test EmbeddingService
-    if search_service.embedding_service is not None:
-        try:
-            emb_health = search_service.embedding_service.health_check()
-            health_status["embedding_service"] = emb_health["status"]
-            if emb_health["status"] != "healthy":
-                health_status["status"] = "degraded"
-        except Exception as e:
-            health_status["embedding_service"] = f"error: {str(e)}"
-            health_status["status"] = "degraded"
-    else:
-        health_status["embedding_service"] = "unavailable (text search only)"
-        health_status["status"] = "degraded"
+    try:
+        await db.execute(text("SELECT count(*) FROM query_cache"))
+        report["cache"] = "active"
+    except Exception:
+        report["cache"] = "unavailable"
 
-    return health_status
+    try:
+        from app.services.search_service import _embedding_service_instance
+
+        report["embedding_service"] = (
+            "ready" if _embedding_service_instance is not None else "unavailable"
+        )
+    except Exception:
+        report["embedding_service"] = "unavailable"
+
+    return report

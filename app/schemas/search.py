@@ -307,65 +307,59 @@ class SearchResponse(BaseModel):
 
 class SearchStats(BaseModel):
     """
-    Statistics about search index (admin only).
+    Statistiques de l'index de recherche (reserve aux administrateurs).
 
-    Provides insights into indexed documents,
-    distribution by language/category/status,
-    and system health.
+    Reecrit pour PostgreSQL : les champs decrivaient Meilisearch et Redis,
+    supprimes de l'architecture. Les quatre champs ajoutes (indexed_documents,
+    total_articles, articles_with_embeddings, cache_entries) sont ceux qui
+    disent reellement si la chaine d'ingestion a fonctionne.
     """
 
-    total_documents: int = Field(
-        0,
-        ge=0,
-        description="Total documents indexed in Meilisearch"
+    total_documents: int = Field(0, ge=0, description="Nombre total de lois")
+    indexed_documents: int = Field(
+        0, ge=0, description="Lois dont le search_vector est renseigné"
+    )
+    total_articles: int = Field(0, ge=0, description="Nombre total d'articles")
+    articles_with_embeddings: int = Field(
+        0, ge=0, description="Articles disposant d'un vecteur d'embedding"
     )
     by_language: Dict[str, int] = Field(
-        default_factory=dict,
-        description="Document count by language"
+        default_factory=dict, description="Répartition par langue"
     )
     by_category: Dict[str, int] = Field(
-        default_factory=dict,
-        description="Document count by category"
+        default_factory=dict, description="Répartition par catégorie"
     )
     by_status: Dict[str, int] = Field(
-        default_factory=dict,
-        description="Document count by status"
+        default_factory=dict, description="Répartition par statut"
     )
     index_health: str = Field(
         "unknown",
-        description="Index health status"
+        description="empty | healthy (tout est indexé) | degraded (indexation partielle)",
+    )
+    cache_entries: int = Field(
+        0, ge=0, description="Entrées non expirées dans query_cache"
     )
     cache_status: str = Field(
-        "unknown",
-        description="Cache connection status"
+        "unknown", description="active | empty | unavailable"
     )
 
-    class Config:
-        json_schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
-                "total_documents": 156,
-                "by_language": {
-                    "fr": 142,
-                    "en": 14
-                },
-                "by_category": {
-                    "Droit Civil": 45,
-                    "Droit Pénal": 38,
-                    "Droit Commercial": 32
-                },
-                "by_status": {
-                    "published": 156,
-                    "draft": 0
-                },
+                "total_documents": 2143,
+                "indexed_documents": 2143,
+                "total_articles": 18742,
+                "articles_with_embeddings": 18742,
+                "by_language": {"fr": 2100, "en": 43},
+                "by_category": {"Finances publiques": 512, "Sans catégorie": 88},
+                "by_status": {"published": 2050, "refused": 61, "processing": 32},
                 "index_health": "healthy",
-                "cache_status": "connected"
+                "cache_entries": 14,
+                "cache_status": "active",
             }
         }
+    }
 
-
-# ============================================================================
-# Reindex Response Schema
-# ============================================================================
 
 class ReindexResponse(BaseModel):
     """Response for reindex operations."""
