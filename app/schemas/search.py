@@ -5,6 +5,7 @@ Provides request/response models for hybrid search (text + semantic + RRF):
 - SearchFilters: Filter parameters for search queries
 - SearchRequest: Main search request with query, mode, filters
 - ArticleMatch: Matched article with snippet and relevance
+- ChunkResult: Un article (chunk) tel qu'il sort de la recherche — l'unite du RAG
 - SearchResult: Single search result with highlights
 - SearchResponse: Complete search response with metadata
 - SearchStats: Admin statistics for search operations
@@ -190,6 +191,68 @@ class ArticleMatch(BaseModel):
     )
 
 
+class ChunkResult(BaseModel):
+    """
+    Un chunk — c'est-a-dire un article — tel qu'il sort de la recherche.
+
+    C'est l'unite que consomme le RAG. La recherche travaillait au niveau loi :
+    les articles etaient ecrases a un par loi (DISTINCT ON), et sur le chemin
+    semantique l'article gagnant etait jete par un GROUP BY. Le modele ne
+    recevait donc jamais qu'un prefixe de 400 caracteres de texte de loi.
+
+    SearchResult reste l'unite document-niveau exposee au front ; elle est
+    desormais DERIVEE de ces chunks (voir SearchService._chunks_to_search_results).
+
+    Les metadonnees de la loi sont denormalisees ici a dessein : un chunk doit
+    se suffire a lui-meme pour etre cite sans second aller-retour en base.
+    """
+
+    # Identite du chunk
+    article_id: Optional[int] = Field(
+        None,
+        description="ID de l'article. None pour une ligne de repli niveau-loi."
+    )
+    law_id: int = Field(..., description="ID de la loi")
+    number: Optional[str] = Field(None, description="Numero d'article (ex: '1er', '42')")
+    article_title: Optional[str] = Field(None, description="Titre de l'article")
+    section: Optional[str] = Field(None, description="En-tete de section (TITRE/CHAPITRE)")
+    page_number: Optional[int] = Field(None, description="Page du PDF (1-indexee)")
+    content: str = Field("", description="Contenu integral de l'article")
+    excerpt: str = Field("", description="Extrait mis en evidence (balises <mark>)")
+
+    # Metadonnees de la loi, denormalisees
+    reference: str = Field(..., description="Reference de la loi")
+    law_title: str = Field(..., description="Titre de la loi")
+    type: str = Field("loi", description="Type de texte")
+    language: Optional[str] = Field(None, description="Code langue (fr/en)")
+    status: str = Field("published", description="Statut de la loi")
+    category_id: Optional[int] = Field(None, description="ID de categorie")
+    category_name: Optional[str] = Field(None, description="Nom de categorie")
+    publication_date: Optional[date] = Field(None, description="Date de publication")
+
+    relevance_score: float = Field(0.0, ge=0.0, le=1.0, description="Score de pertinence")
+    source: str = Field(
+        "fts",
+        description="Origine: fts | trigram | semantic | law_fts | priority | fallback"
+    )
+
+    @property
+    def fusion_key(self) -> tuple:
+        """
+        Cle de fusion RRF.
+
+        Prefixee par le type : une ligne de repli niveau-loi porte l'id de la
+        loi, qui peut coincider avec l'id d'un article sans aucun rapport. La
+        fusion les confondait.
+        """
+        if self.article_id is not None:
+            return ("a", self.article_id)
+        return ("l", self.law_id)
+
+    class Config:
+        from_attributes = True
+
+
 class SearchResult(BaseModel):
     """
     Single search result with law information and highlights.
@@ -266,6 +329,13 @@ class SearchResponse(BaseModel):
     direct_navigation: bool = Field(
         False,
         description="If true, client should redirect directly to the document"
+    )
+    # Champ ADDITIF, en dernier et avec un defaut : les reponses deja en cache
+    # sous l'ancienne forme se deserialisent encore, et le front qui ne le
+    # connait pas l'ignore. C'est ce que consomme le RAG.
+    chunks: List[ChunkResult] = Field(
+        default_factory=list,
+        description="Resultats au niveau chunk (article), ordonnes par pertinence"
     )
 
     class Config:

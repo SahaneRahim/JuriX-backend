@@ -16,7 +16,7 @@ import logging
 from functools import lru_cache
 
 from app.services.document_classifier import DocumentClassifier
-from app.services.embedding_service import EmbeddingService
+from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.language_detector import LanguageDetector
 from app.services.search_service import SearchService
 
@@ -100,27 +100,11 @@ def clear_classifier_cache():
     logger.info("🗑️  Cache DocumentClassifier effacé")
 
 
-@lru_cache()
-def get_embedding_service() -> EmbeddingService:
-    """
-    Factory pour EmbeddingService (singleton).
-
-    Utilise @lru_cache pour créer une seule instance partagée
-    entre toutes les requêtes. Évite le rechargement du modèle
-    sentence-transformers (~120MB) à chaque requête.
-
-    Returns:
-        Instance singleton de EmbeddingService
-
-    Raises:
-        EmbeddingServiceError: Si le modèle ne peut pas être chargé
-
-    Example:
-        >>> from fastapi import Depends
-        >>> service = Depends(get_embedding_service)
-    """
-    logger.info("📦 Création du singleton EmbeddingService")
-    return EmbeddingService()
+# La fabrique vit dans app/services/embedding_service.py et est simplement
+# re-exportee ici : il y avait deux singletons concurrents, celui-ci et le
+# _embedding_service_instance prive de SearchService. Elle ne peut pas remonter
+# dans ce module — dependencies.py importe SearchService, qui importe
+# EmbeddingService : le cycle serait immediat.
 
 
 def clear_embedding_service_cache():

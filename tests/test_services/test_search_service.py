@@ -32,11 +32,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.core.database import Base
 from app.models.law import Article, Category, Law
 from app.schemas.search import (
+    ChunkResult,
     SearchFilters,
     SearchRequest,
     SearchResponse,
     SearchResult,
 )
+from app.services.embedding_service import EmbeddingService
 from app.services.search_service import (
 
 # NOTE: les fixtures db_engine / db_session locales (SQLite en memoire) ont ete
@@ -68,19 +70,32 @@ from app.services.search_service import (
 # vraie base fournie par conftest.
 
 
+def _unit_vector(seed: int) -> np.ndarray:
+    """
+    Vecteur unitaire de la dimension configuree.
+
+    Loi normale puis normalisation, et non np.random.rand : un tirage uniforme
+    ne produit que des composantes positives, donc une distance cosinus toujours
+    dans [0, 1]. C'est precisement ce qui masquait le score negatif possible
+    avec de vrais embeddings.
+    """
+    rng = np.random.default_rng(seed)
+    vec = rng.normal(size=EmbeddingService.EMBEDDING_DIM).astype(np.float32)
+    return vec / np.linalg.norm(vec)
+
+
 @pytest.fixture
 def mock_embedding_service():
-    """
-    Doublure d'EmbeddingService.
-
-    3072 dimensions et non 768 : c'est la taille reelle produite par
-    gemini-embedding-001 et le type declare sur articles.embedding.
-    """
+    """Doublure d'EmbeddingService, dimension lue sur le service reel."""
     mock_service = MagicMock()
-    mock_service.generate_embedding.return_value = np.random.rand(3072).astype(np.float32)
+    mock_service.generate_embedding.return_value = _unit_vector(0)
+    mock_service.generate_embedding_async = AsyncMock(return_value=_unit_vector(0))
     mock_service.TASK_DOCUMENT = "RETRIEVAL_DOCUMENT"
     mock_service.TASK_QUERY = "RETRIEVAL_QUERY"
-    mock_service.health_check.return_value = {"status": "healthy", "dimensions": 3072}
+    mock_service.health_check.return_value = {
+        "status": "healthy",
+        "dimensions": EmbeddingService.EMBEDDING_DIM,
+    }
     return mock_service
 
 
@@ -161,16 +176,22 @@ async def sample_data(db_session):
             id=1,
             law_id=1,
             number="1",
+            title="Responsabilité des dirigeants",
+            section="TITRE I - DISPOSITIONS GÉNÉRALES",
+            page_number=3,
             content="Article 1er sur la responsabilité.",
-            embedding=np.random.rand(3072).tolist(),
+            embedding=_unit_vector(1).tolist(),
             order=1
         ),
         Article(
             id=2,
             law_id=1,
             number="2",
-            content="Article 2 sur les dirigeants.",
-            embedding=np.random.rand(3072).tolist(),
+            title="Obligations des dirigeants",
+            section="TITRE I - DISPOSITIONS GÉNÉRALES",
+            page_number=4,
+            content="Article 2 sur les dirigeants et leur responsabilité.",
+            embedding=_unit_vector(2).tolist(),
             order=2
         ),
         Article(
@@ -178,7 +199,7 @@ async def sample_data(db_session):
             law_id=2,
             number="1",
             content="Article 1er sur les infractions.",
-            embedding=np.random.rand(3072).tolist(),
+            embedding=_unit_vector(3).tolist(),
             order=1
         ),
     ]
@@ -397,41 +418,25 @@ class TestHybridSearch:
     @pytest.mark.asyncio
     async def test_hybrid_search_rrf_fusion(self, search_service, sample_data):
         """Test RRF fusion combines rankings correctly."""
-        # Create mock results from both modes
-        text_result = SearchResult(
-            law_id=1,
-            reference="LOI-001",
-            title="Test Law 1",
-            type="loi",
-            language="fr",
-            status="published",
-            category_id=1,
-            category_name="Test",
-            publication_date=None,
-            relevance_score=0.9,
-            matched_articles=[],
-            highlights={}
+        # La fusion travaille sur des ChunkResult, plus sur des SearchResult :
+        # elle se fait au niveau article.
+        text_chunk = ChunkResult(
+            article_id=1, law_id=1, number="1",
+            reference="LOI-001", law_title="Test Law 1",
+            content="Contenu article 1", excerpt="Contenu article 1",
+            relevance_score=0.9, source="fts",
         )
 
-        semantic_result = SearchResult(
-            law_id=2,
-            reference="LOI-002",
-            title="Test Law 2",
-            type="loi",
-            language="fr",
-            status="published",
-            category_id=1,
-            category_name="Test",
-            publication_date=None,
-            relevance_score=0.8,
-            matched_articles=[],
-            highlights={}
+        semantic_chunk = ChunkResult(
+            article_id=2, law_id=2, number="1",
+            reference="LOI-002", law_title="Test Law 2",
+            content="Contenu article 2", excerpt="Contenu article 2",
+            relevance_score=0.8, source="semantic",
         )
 
-        # Test RRF fusion directly
         fused = search_service._rrf_fusion(
-            [text_result],
-            [semantic_result],
+            [text_chunk],
+            [semantic_chunk],
             k=60,
             text_weight=0.4,
             semantic_weight=0.6
@@ -441,22 +446,61 @@ class TestHybridSearch:
         assert len(fused) == 2  # Both results present
 
     @pytest.mark.asyncio
+    async def test_rrf_fusion_keys_on_article_not_law(self, search_service):
+        """Deux articles d'une meme loi ne doivent pas fusionner en un seul."""
+        text_chunk = ChunkResult(
+            article_id=10, law_id=7, number="10",
+            reference="LOI-007", law_title="Code",
+            content="Article 10", excerpt="Article 10",
+            relevance_score=0.9, source="fts",
+        )
+        semantic_chunk = ChunkResult(
+            article_id=11, law_id=7, number="11",
+            reference="LOI-007", law_title="Code",
+            content="Article 11", excerpt="Article 11",
+            relevance_score=0.8, source="semantic",
+        )
+
+        fused = search_service._rrf_fusion([text_chunk], [semantic_chunk])
+
+        # La fusion sur law_id n'en gardait qu'un : le second article, trouve
+        # par le vecteur, disparaissait purement et simplement.
+        assert len(fused) == 2
+        assert {c.article_id for c in fused} == {10, 11}
+
+    @pytest.mark.asyncio
+    async def test_rrf_law_fallback_does_not_collide_with_article(self, search_service):
+        """Une ligne niveau-loi ne doit pas ecraser l'article de meme id."""
+        article_chunk = ChunkResult(
+            article_id=5, law_id=99, number="5",
+            reference="LOI-099", law_title="Code",
+            content="Article 5", excerpt="Article 5",
+            relevance_score=0.9, source="fts",
+        )
+        law_chunk = ChunkResult(
+            article_id=None, law_id=5,
+            reference="LOI-005", law_title="Autre code",
+            content="Texte integral", excerpt="Texte integral",
+            relevance_score=0.7, source="law_fts",
+        )
+
+        fused = search_service._rrf_fusion([article_chunk], [law_chunk])
+
+        assert len(fused) == 2
+
+    @pytest.mark.asyncio
     async def test_hybrid_search_normalization(self, search_service):
         """Test score normalization to [0, 1] range."""
         results = [
-            SearchResult(
-                law_id=1, reference="LOI-001", title="Test 1",
-                type="loi", language="fr", status="published",
-                category_id=1, category_name="Test",
-                publication_date=None, relevance_score=0.5,
-                matched_articles=[], highlights={}
+            ChunkResult(
+                article_id=1, law_id=1, number="1",
+                reference="LOI-001", law_title="Test 1",
+                content="c1", excerpt="c1", relevance_score=0.5,
             ),
-            SearchResult(
-                law_id=2, reference="LOI-002", title="Test 2",
-                type="loi", language="fr", status="published",
-                category_id=1, category_name="Test",
-                publication_date=None, relevance_score=0.9,
-                matched_articles=[], highlights={}
+            ChunkResult(
+                article_id=2, law_id=2, number="1",
+                reference="LOI-002", law_title="Test 2",
+                content="c2", excerpt="c2", relevance_score=0.9,
             ),
         ]
 

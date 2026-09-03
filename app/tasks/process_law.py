@@ -24,11 +24,10 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-from sqlalchemy import create_engine, select, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import AsyncSessionLocal
+from app.core.database import AsyncSessionLocal, SyncSessionLocal
 from app.models.law import Article, Law
 from app.utils.text_chunker import extract_articles, ArticleExtractionError
 
@@ -204,6 +203,18 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None):
     embeddings_count = _generate_article_embeddings(law_id)
     logger.info(f"🔢 Embeddings generated: {embeddings_count}")
 
+    # Une loi decoupee en articles mais sans le moindre vecteur reste
+    # introuvable par la recherche semantique. Le pipeline n'echoue pas pour
+    # autant — la recherche plein texte fonctionne — mais l'anomalie est
+    # tracee sur la ligne au lieu de disparaitre dans les journaux.
+    embeddings_error = None
+    if articles_count > 0 and embeddings_count == 0:
+        embeddings_error = (
+            f"Aucun embedding genere pour {articles_count} articles : "
+            f"recherche semantique indisponible sur ce document"
+        )
+        logger.error(f"❌ {embeddings_error}")
+
     # Metadata
     _update_law_metadata(
         law_id,
@@ -212,6 +223,7 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None):
         category=category_result["category"],
         category_confidence=category_result["confidence"],
         title=extracted_title,
+        processing_error=embeddings_error,
     )
 
     return {
@@ -336,14 +348,7 @@ def _extract_docx_text(file_path) -> tuple:
 
 def _load_law(law_id: int) -> Law:
     """Charge une loi depuis la base de données (synchrone)."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from app.core.config import settings
-
-    sync_engine = create_engine(settings.DATABASE_URL.replace("+asyncpg", ""))
-    Session = sessionmaker(bind=sync_engine)
-
-    with Session() as session:
+    with SyncSessionLocal() as session:
         law = session.query(Law).filter(Law.id == law_id).first()
         if law:
             _ = law.articles  # Eager load
@@ -391,10 +396,6 @@ def _split_and_save_articles(law_id: int, text: str) -> int:
     Returns:
         Nombre d'articles extraits et sauvegardés
     """
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from app.core.config import settings
-
     logger.info(f"📑 Extracting articles from law {law_id}")
 
     try:
@@ -405,10 +406,7 @@ def _split_and_save_articles(law_id: int, text: str) -> int:
 
         logger.info(f"📋 Found {len(extracted)} articles")
 
-        sync_engine = create_engine(settings.DATABASE_URL.replace("+asyncpg", ""))
-        Session = sessionmaker(bind=sync_engine)
-
-        with Session() as session:
+        with SyncSessionLocal() as session:
             session.query(Article).filter(Article.law_id == law_id).delete()
 
             for article_data in extracted:
@@ -447,21 +445,15 @@ def _generate_article_embeddings(law_id: int) -> int:
     """
     assert isinstance(law_id, int) and law_id > 0
 
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from app.core.config import settings
     from app.services.embedding_service import EmbeddingService, EmbeddingServiceError
 
     logger.info(f"🔢 Generating embeddings for law {law_id} chunks...")
 
     try:
         embedding_service = EmbeddingService(use_cache=True)
+        max_len = EmbeddingService.MAX_TEXT_LENGTH
 
-        engine = create_engine(settings.DATABASE_URL.replace("+asyncpg", ""), pool_pre_ping=True)
-        Session = sessionmaker(bind=engine)
-        session = Session()
-
-        try:
+        with SyncSessionLocal() as session:
             articles = session.query(Article).filter_by(law_id=law_id).all()
             if not articles:
                 logger.warning(f"⚠️ No articles found for law {law_id}")
@@ -469,8 +461,22 @@ def _generate_article_embeddings(law_id: int) -> int:
 
             logger.info(f"📄 Found {len(articles)} chunks to process")
 
-            texts = [article.content for article in articles]
-            article_ids = [article.id for article in articles]
+            # Troncature AVANT l'appel. generate_batch_embeddings valide tous
+            # les textes d'abord et leve des qu'UN seul depasse la limite :
+            # un article trop long annulait donc les embeddings de la loi
+            # ENTIERE, l'exception etait avalee plus bas et la loi publiee
+            # sans un seul vecteur. Mieux vaut un article tronque que zero
+            # article indexe.
+            texts = []
+            for article in articles:
+                content = article.content or ""
+                if len(content) > max_len:
+                    logger.warning(
+                        f"⚠️ Article {article.number} tronqué pour l'embedding "
+                        f"({len(content)} > {max_len} caractères)"
+                    )
+                    content = content[:max_len]
+                texts.append(content)
 
             logger.info(f"🚀 Generating {len(texts)} embeddings via Gemini API...")
             embeddings = embedding_service.generate_batch_embeddings(texts=texts, normalize=True)
@@ -487,9 +493,6 @@ def _generate_article_embeddings(law_id: int) -> int:
             logger.info(f"✅ Generated {success_count}/{len(articles)} embeddings for law {law_id}")
             return success_count
 
-        finally:
-            session.close()
-
     except EmbeddingServiceError as e:
         logger.error(f"❌ Embedding service error: {e}")
         return 0
@@ -505,22 +508,17 @@ def _update_law_metadata(
     category: str,
     category_confidence: float,
     title: str = None,
+    processing_error: str = None,
 ) -> None:
     """Met à jour les métadonnées de la loi en base de données (synchrone)."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from app.core.config import settings
-
-    sync_engine = create_engine(settings.DATABASE_URL.replace("+asyncpg", ""))
-    Session = sessionmaker(bind=sync_engine)
-
-    with Session() as session:
+    with SyncSessionLocal() as session:
         law = session.query(Law).filter(Law.id == law_id).first()
         if law:
             law.language = language
             law.detected_language = language
             law.language_confidence = language_confidence
             law.status = "published"
+            law.processing_error = processing_error
             if title:
                 law.title = title
                 logger.info(f"📝 Updated title to: {title}")
@@ -566,14 +564,7 @@ def _extract_title_from_text(text: str) -> str:
 
 def _update_law_content(law_id: int, content: str) -> None:
     """Met à jour le contenu de la loi en base de données (synchrone)."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from app.core.config import settings
-
-    sync_engine = create_engine(settings.DATABASE_URL.replace("+asyncpg", ""))
-    Session = sessionmaker(bind=sync_engine)
-
-    with Session() as session:
+    with SyncSessionLocal() as session:
         law = session.query(Law).filter(Law.id == law_id).first()
         if law:
             law.content = content
@@ -613,16 +604,12 @@ def delete_from_search_index(law_id: int) -> bool:
         True if successful, False otherwise
     """
     try:
-        from sqlalchemy import create_engine
-        from app.core.config import settings
-
-        engine = create_engine(settings.DATABASE_URL.replace("+asyncpg", ""))
-        with engine.connect() as conn:
-            conn.execute(
+        with SyncSessionLocal() as session:
+            session.execute(
                 text("UPDATE laws SET search_vector = NULL WHERE id = :law_id"),
                 {"law_id": law_id},
             )
-            conn.commit()
+            session.commit()
         logger.info(f"🗑️ Deindexed law {law_id} from PG FTS")
         return True
     except Exception as e:
@@ -657,12 +644,8 @@ def process_law_sync(law_id: int, file_id: str = None) -> Dict[str, Any]:
 
     # Mettre à jour les tsvectors synchroniquement
     try:
-        from sqlalchemy import create_engine
-        from app.core.config import settings
-
-        engine = create_engine(settings.DATABASE_URL.replace("+asyncpg", ""))
-        with engine.connect() as conn:
-            conn.execute(
+        with SyncSessionLocal() as session:
+            session.execute(
                 text("""
                     UPDATE laws SET search_vector =
                         to_tsvector('french', coalesce(title,'') || ' ' || coalesce(content,''))
@@ -671,7 +654,7 @@ def process_law_sync(law_id: int, file_id: str = None) -> Dict[str, Any]:
                 """),
                 {"law_id": law_id},
             )
-            conn.execute(
+            session.execute(
                 text("""
                     UPDATE articles SET search_vector =
                         to_tsvector('french', coalesce(content,''))
@@ -681,7 +664,7 @@ def process_law_sync(law_id: int, file_id: str = None) -> Dict[str, Any]:
                 """),
                 {"law_id": law_id},
             )
-            conn.commit()
+            session.commit()
         logger.info(f"✅ FTS tsvectors updated for law {law_id}")
     except Exception as e:
         logger.warning(f"⚠️ FTS update failed (non-fatal): {e}")

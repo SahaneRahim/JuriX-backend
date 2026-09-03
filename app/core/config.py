@@ -21,7 +21,12 @@ class Settings(BaseSettings):
     # Gemini API (LLM for RAG)
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-3-flash"
-    GEMINI_EMBEDDING_MODEL: str = "models/gemini-embedding-001"  # native 3072-dim embeddings
+    GEMINI_EMBEDDING_MODEL: str = "models/gemini-embedding-001"
+    # Dimension demandee a l'API (output_dimensionality). Le modele sort 3072
+    # nativement, mais pgvector n'indexe pas au-dela de 2000 : a 1536 l'index
+    # HNSW redevient possible. Doit rester egal a la dimension declaree sur
+    # Article.embedding et a celle de la migration e4f5a6b7c8d9.
+    EMBEDDING_DIM: int = 1536
 
     # LlamaParse (PDF extraction OCR)
     LLAMA_CLOUD_API_KEY: str = ""

@@ -7,8 +7,8 @@ Utilise le pattern AsyncSession pour toutes les opérations DB.
 Usage dans routes FastAPI:
     @router.get("/laws")
     async def list_laws(db: AsyncSession = Depends(get_db)):
-        service = LawService(db)
-        return await service.list_laws()
+        result = await db.execute(select(Law))
+        return result.scalars().all()
 
 Author: JuriX Team
 """
@@ -16,13 +16,13 @@ Author: JuriX Team
 import logging
 from typing import AsyncGenerator
 
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     create_async_engine,
     async_sessionmaker,
 )
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.core.config import settings
 
@@ -55,6 +55,37 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
+# ---------------------------------------------------------------------------
+# Moteur SYNCHRONE partage
+# ---------------------------------------------------------------------------
+# Le pipeline de traitement (app/tasks/process_law.py) et le cache
+# d'embeddings tournent dans un thread d'executor, hors boucle d'evenements :
+# ils ont besoin d'un moteur synchrone. Onze appels a create_engine() etaient
+# dissemines dans le code, un par fonction ou par instance, aucun n'appelait
+# jamais dispose() : chaque loi traitee laissait un pool de connexions ouvert
+# jusqu'a l'arret du processus.
+#
+# Les consommateurs doivent utiliser SyncSessionLocal(), JAMAIS sync_engine
+# directement : c'est ce qui permet de rebrancher toute l'application sur une
+# autre base avec sessionmaker.configure(bind=...), ce dont les tests dependent.
+SYNC_DATABASE_URL = settings.DATABASE_URL.replace("+asyncpg", "")
+
+sync_engine = create_engine(
+    SYNC_DATABASE_URL,
+    pool_size=5,
+    max_overflow=5,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    future=True,
+)
+
+SyncSessionLocal = sessionmaker(
+    bind=sync_engine,
+    expire_on_commit=False,
+    autoflush=False,
+)
+
+
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
     Dependency pour obtenir une session DB asynchrone.
@@ -68,8 +99,8 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     Example:
         >>> @router.get("/laws")
         >>> async def list_laws(db: AsyncSession = Depends(get_db)):
-        ...     service = LawService(db)
-        ...     return await service.list_laws()
+        ...     result = await db.execute(select(Law))
+        ...     return result.scalars().all()
     """
     async with AsyncSessionLocal() as session:
         try:
@@ -136,7 +167,14 @@ async def close_db() -> None:
         ...     await close_db()
     """
     await engine.dispose()
+    close_sync_db()
     logger.info("✅ Moteur de base de données fermé")
+
+
+def close_sync_db() -> None:
+    """Ferme le moteur synchrone partage. Appele par close_db()."""
+    sync_engine.dispose()
+    logger.info("✅ Moteur synchrone fermé")
 
 
 async def health_check_db() -> bool:

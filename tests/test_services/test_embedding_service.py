@@ -35,9 +35,18 @@ from app.services.embedding_service import EmbeddingService, EmbeddingServiceErr
 # meme texte donnent le meme vecteur et deux textes differents des vecteurs
 # differents. C'est exactement ce que les tests de similarite supposent.
 
-def _fake_embedding(text: str, dim: int = 3072) -> List[float]:
+def _fake_embedding(text: str, dim: int = None) -> List[float]:
+    """
+    Vecteur deterministe, NON normalise et d'amplitude quelconque.
+
+    Non normalise a dessein : l'API ne renvoie un vecteur unitaire que pour la
+    dimension native. En dessous, la troncature Matryoshka sort avec une norme
+    arbitraire, et c'est au service de renormaliser. Une doublure qui renverrait
+    deja des vecteurs unitaires ne prouverait rien.
+    """
+    dim = dim if dim is not None else EmbeddingService.EMBEDDING_DIM
     rng = np.random.default_rng(abs(hash(text)) % (2**32))
-    return rng.random(dim).tolist()
+    return (rng.random(dim) * 7.0).tolist()
 
 
 @pytest.fixture(autouse=True)
@@ -55,13 +64,18 @@ def _stub_gemini(monkeypatch):
     class _Models:
         def embed_content(self, model=None, contents=None, config=None):
             items = contents if isinstance(contents, list) else [contents]
-            return _Result([_Emb(_fake_embedding(c)) for c in items])
+            # La doublure HONORE output_dimensionality : c'est ce que le service
+            # doit demander depuis la bascule en 1536.
+            dim = getattr(config, "output_dimensionality", None)
+            _Models.last_config = config
+            return _Result([_Emb(_fake_embedding(c, dim)) for c in items])
 
     class _Client:
         def __init__(self, *a, **k):
             self.models = _Models()
 
     monkeypatch.setattr("app.services.embedding_service.genai.Client", _Client)
+    return _Models
 
 
 # ==================== FIXTURES ====================
@@ -127,11 +141,11 @@ class TestBasicFunctionality:
         assert all(emb.dtype == np.float32 for emb in embeddings)
 
     def test_embedding_dimensions(self, service, sample_french_text):
-        """Test que les embeddings ont exactement 3072 dimensions."""
+        """Test que les embeddings ont exactement EmbeddingService.EMBEDDING_DIM dimensions."""
         embedding = service.generate_embedding(sample_french_text)
 
-        assert embedding.shape == (3072,), (
-            f"Dimension incorrecte: {embedding.shape} != (3072,)"
+        assert embedding.shape == (EmbeddingService.EMBEDDING_DIM,), (
+            f"Dimension incorrecte: {embedding.shape} != (EmbeddingService.EMBEDDING_DIM,)"
         )
 
     def test_embedding_normalized(self, service, sample_french_text):
@@ -181,7 +195,7 @@ class TestCaching:
 
         # Vérifications
         assert embedding is not None
-        assert embedding.shape == (3072,)
+        assert embedding.shape == (EmbeddingService.EMBEDDING_DIM,)
         assert elapsed < 1.0, f"Génération trop lente: {elapsed:.3f}s > 1.0s"
 
     def test_cache_disabled(self, service):
@@ -207,7 +221,7 @@ class TestMultilingualSupport:
 
         # Vérifications
         assert embedding is not None
-        assert embedding.shape == (3072,)
+        assert embedding.shape == (EmbeddingService.EMBEDDING_DIM,)
 
         # Le texte contient des mots français juridiques
         assert "camerounais" in sample_french_text.lower()
@@ -218,7 +232,7 @@ class TestMultilingualSupport:
 
         # Vérifications
         assert embedding is not None
-        assert embedding.shape == (3072,)
+        assert embedding.shape == (EmbeddingService.EMBEDDING_DIM,)
 
         # Le texte contient des mots anglais juridiques
         assert "cameroonian" in sample_english_text.lower()
@@ -255,7 +269,7 @@ class TestEdgeCases:
 
         # Devrait fonctionner normalement
         assert embedding is not None
-        assert embedding.shape == (3072,)
+        assert embedding.shape == (EmbeddingService.EMBEDDING_DIM,)
 
     def test_batch_with_duplicates(self, service):
         """Test batch avec textes dupliqués."""
@@ -293,7 +307,7 @@ class TestEdgeCases:
 
         # Vérifications
         assert len(results) == 10
-        assert all(emb.shape == (3072,) for emb in results)
+        assert all(emb.shape == (EmbeddingService.EMBEDDING_DIM,) for emb in results)
 
         # Pas de corruption de données
         for i, emb in enumerate(results):
@@ -355,7 +369,7 @@ class TestHealthCheck:
         assert health["service"] == "EmbeddingService"
         assert health["status"] in ["healthy", "degraded", "unhealthy"]
         assert health["model"] == EmbeddingService.EMBEDDING_MODEL
-        assert health["dimensions"] == 3072
+        assert health["dimensions"] == EmbeddingService.EMBEDDING_DIM
         # "device" appartenait au modele sentence-transformers charge en local.
         # Le service passe par l'API Gemini : ce qui compte est le fournisseur.
         assert health["provider"] == "Gemini API"
@@ -422,7 +436,7 @@ class TestSimilarity:
 
     def test_similarity_wrong_dimensions(self, service):
         """Test que les mauvaises dimensions lèvent une erreur."""
-        emb1 = np.random.rand(3072).astype(np.float32)
+        emb1 = np.random.rand(EmbeddingService.EMBEDDING_DIM).astype(np.float32)
         emb2_wrong = np.random.rand(512).astype(np.float32)  # Mauvaise dim
 
         with pytest.raises(ValueError, match="dimension incorrecte"):

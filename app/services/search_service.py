@@ -32,6 +32,7 @@ from app.core.config import settings
 from app.models.law import Article, Category, Law
 from app.schemas.search import (
     ArticleMatch,
+    ChunkResult,
     ReindexResponse,
     SearchFilters,
     SearchRequest,
@@ -39,7 +40,7 @@ from app.schemas.search import (
     SearchResult,
     SearchStats,
 )
-from app.services.embedding_service import EmbeddingService
+from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.postgres_search_service import (
     get_from_pg_cache,
     store_in_pg_cache,
@@ -72,7 +73,9 @@ def _init_global_singletons() -> None:
     logger.info("🚀 Initializing global search singletons (one-time)...")
 
     try:
-        _embedding_service_instance = EmbeddingService(use_cache=True)
+        # Passe par la fabrique partagee : construire l'instance ici en creait
+        # une seconde, distincte de celle des dependances FastAPI.
+        _embedding_service_instance = get_embedding_service()
         logger.info("✅ EmbeddingService initialized")
     except Exception as e:
         logger.error(f"❌ EmbeddingService init failed: {e}")
@@ -223,58 +226,55 @@ class SearchService:
                 logger.info(f"🎯 Cache HIT ({elapsed_ms}ms)")
                 return SearchResponse(**cached_data)
 
-        # Execute search with fallback handling
-        try:
-            results = await self._execute_search_by_mode(request)
-            elapsed_ms = int((time.time() - start_time) * 1000)
-            response = self._build_search_response(request, results, elapsed_ms)
+        chunks = await self._execute_search_by_mode(request)
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        response = self._build_search_response(request, chunks, elapsed_ms)
 
-            # Store in PostgreSQL cache
-            if self.use_cache:
-                try:
-                    await store_in_pg_cache(
-                        self.db,
-                        cache_key,
-                        response.model_dump(),
-                        ttl_seconds=self.CACHE_TTL_SECONDS,
-                    )
-                except Exception as cache_err:
-                    logger.warning(f"⚠️ Cache write failed (non-fatal): {cache_err}")
+        # Store in PostgreSQL cache
+        if self.use_cache:
+            try:
+                await store_in_pg_cache(
+                    self.db,
+                    cache_key,
+                    # mode="json" et non model_dump() nu : la reponse porte une
+                    # publication_date, et json.dumps refuse un objet date. Sans
+                    # cela l'ecriture levait a chaque fois, l'exception etait
+                    # avalee juste en dessous, et le cache ne servait plus jamais.
+                    response.model_dump(mode="json"),
+                    ttl_seconds=self.CACHE_TTL_SECONDS,
+                )
+            except Exception as cache_err:
+                logger.warning(f"⚠️ Cache write failed (non-fatal): {cache_err}")
 
-            logger.info(
-                f"✅ Search completed: {response.total} results in {elapsed_ms}ms "
-                f"(mode={request.mode})"
-            )
-            return response
+        logger.info(
+            f"✅ Search completed: {response.total} results in {elapsed_ms}ms "
+            f"(mode={request.mode})"
+        )
+        return response
 
-        except TextSearchError as e:
-            return await self._handle_search_fallback(
-                request, start_time, "semantic", e, "PostgreSQL FTS"
-            )
-        except VectorSearchError as e:
-            return await self._handle_search_fallback(
-                request, start_time, "text", e, "Vector search"
-            )
+    async def _execute_search_by_mode(self, request: SearchRequest) -> List[ChunkResult]:
+        """Dispatch search to the correct mode handler. Renvoie des chunks."""
+        budget = self._chunk_budget(request.limit)
 
-    async def _execute_search_by_mode(self, request: SearchRequest):
-        """Dispatch search to the correct mode handler."""
         if request.mode == "text":
-            return await self.text_search(
-                request.query, request.filters, request.limit, request.offset
-            )
+            return await self.text_chunks(request.query, request.filters, budget, 0)
         elif request.mode == "semantic":
-            return await self.semantic_search(
-                request.query, request.filters, request.limit, request.offset
-            )
+            return await self.semantic_chunks(request.query, request.filters, budget, 0)
         elif request.mode == "hybrid":
-            return await self.hybrid_search(
-                request.query, request.filters, request.limit, request.offset
-            )
+            return await self.hybrid_chunks(request.query, request.filters, budget, 0)
         else:
             raise ValueError(f"Mode invalide: {request.mode}")
 
-    def _build_search_response(self, request, results, elapsed_ms):
-        """Build SearchResponse with article reference detection."""
+    def _build_search_response(self, request, chunks: List[ChunkResult], elapsed_ms):
+        """
+        Construit la reponse : documents pour le front, chunks pour le RAG.
+
+        Les documents sont derives de la LISTE COMPLETE de chunks, pour que le
+        front recoive toujours jusqu'a `limit` lois ; les chunks exposes sont
+        eux tronques a `limit`, c'est ce que consomme le RAG.
+        """
+        results = self._chunks_to_search_results(chunks)
+        results = results[request.offset:request.offset + request.limit]
         total = len(results)
         article_ref = self._parse_article_reference(request.query)
         target_article = None
@@ -295,97 +295,88 @@ class SearchService:
             filters_applied=request.filters.model_dump() if request.filters else None,
             target_article=target_article,
             direct_navigation=direct_navigation,
+            chunks=chunks[:request.limit],
         )
 
-    async def _handle_search_fallback(self, request, start_time, fallback_mode, error, source_name):
-        """Handle search error by falling back to alternative mode."""
-        logger.warning(f"⚠️ {source_name} failed, fallback to {fallback_mode}: {error}")
-        if request.mode != "hybrid":
-            raise error
-
-        if fallback_mode == "semantic":
-            results = await self.semantic_search(
-                request.query, request.filters, request.limit, request.offset
-            )
-        else:
-            results = await self.text_search(
-                request.query, request.filters, request.limit, request.offset
-            )
-
-        elapsed_ms = int((time.time() - start_time) * 1000)
-        return SearchResponse(
-            query=request.query,
-            mode=fallback_mode,
-            results=results,
-            total=len(results),
-            search_time_ms=elapsed_ms,
-            filters_applied=request.filters.model_dump() if request.filters else None,
-        )
+    # _handle_search_fallback a ete supprimee : elle etait injoignable.
+    # hybrid_chunks rattrape deja ses deux pannes en interne, et pour un mode
+    # non hybride la methode se contentait de relever l'erreur recue.
 
     # ==================== SEARCH MODES ====================
 
-    async def text_search(
+    # ==================== SEARCH MODES — niveau chunk ====================
+
+    def _chunk_budget(self, limit: int) -> int:
+        """
+        Nombre de chunks a recuperer pour produire `limit` documents.
+
+        Sur-echantillonnage x4 : plusieurs chunks retombent sur la meme loi, et
+        sous filtre PostgreSQL elague APRES le parcours ANN, ce qui peut rendre
+        moins de lignes que demande.
+        """
+        return max(limit * 4, 20)
+
+    async def text_chunks(
         self,
         query: str,
         filters: Optional[SearchFilters] = None,
         limit: int = 15,
         offset: int = 0,
-    ) -> List[SearchResult]:
+    ) -> List[ChunkResult]:
         """
-        Recherche textuelle via PostgreSQL FTS (remplace la recherche plein texte).
+        Recherche textuelle PostgreSQL FTS, au niveau article.
 
-        Cherche d'abord dans les articles, puis dans les lois en fallback.
-
-        Args:
-            query: Requête textuelle
-            filters: Filtres optionnels
-            limit: Nombre max résultats
-            offset: Offset pagination
-
-        Returns:
-            Liste de SearchResult triée par relevance_score
+        Cherche d'abord dans les articles, puis dans les lois en repli. Les
+        filtres sont desormais transmis a la branche article : ils ne l'etaient
+        pas, si bien qu'un status="published" demande par l'appelant — le RAG le
+        fait — n'avait aucun effet des que des articles correspondaient.
 
         Raises:
-            TextSearchError: Si recherche échoue
+            TextSearchError: Si la recherche echoue
         """
         assert query and isinstance(query, str), "query must be a non-empty string"
         assert limit > 0, "limit must be positive"
         start_time = time.time()
 
         try:
-            results = await search_articles_pg(self.db, query, limit, offset)
-            if not results:
-                results = await search_laws_pg(self.db, query, filters, limit, offset)
+            chunks = await search_articles_pg(self.db, query, filters, limit, offset)
+            if not chunks:
+                chunks = await search_laws_pg(self.db, query, filters, limit, offset)
 
             elapsed_ms = int((time.time() - start_time) * 1000)
-            logger.info(f"📝 Text search total: {len(results)} results in {elapsed_ms}ms")
-            return results
+            logger.info(f"📝 Text search total: {len(chunks)} chunks in {elapsed_ms}ms")
+            return chunks
 
         except Exception as e:
             logger.error(f"❌ Text search failed: {e}")
             raise TextSearchError(f"Échec recherche textuelle: {e}") from e
 
-    async def semantic_search(
+    async def semantic_chunks(
         self,
         query: str,
         filters: Optional[SearchFilters] = None,
         limit: int = 15,
         offset: int = 0,
-    ) -> List[SearchResult]:
+    ) -> List[ChunkResult]:
         """
-        Recherche sémantique via pgvector (inchangée).
+        Recherche semantique pgvector, au niveau article.
 
-        Args:
-            query: Requête textuelle
-            filters: Filtres optionnels
-            limit: Nombre max résultats
-            offset: Offset pagination
+        Trois differences avec la version precedente, toutes necessaires :
 
-        Returns:
-            Liste de SearchResult triée par relevance_score (similarity)
+        - Une ligne par ARTICLE. Le `func.max(...) GROUP BY Law.*` d'avant
+          calculait bien la distance article par article, puis jetait l'article
+          gagnant : le resultat ne portait ni son identite ni son texte.
+        - `Article.embedding.cosine_distance(...)` et non
+          `func.cosine_distance(...)`. Seule la premiere forme compile en `<=>`,
+          l'operateur que l'index HNSW indexe ; la forme fonction produit un
+          appel que le planificateur ne peut pas y rattacher, index ou pas.
+        - Le score est borne. `1 - distance` peut etre negatif avec de vrais
+          vecteurs (composantes negatives), et relevance_score est declare
+          ge=0.0 : la reponse levait alors une ValidationError. Les fixtures de
+          test, tirees avec np.random.rand donc toutes positives, le masquaient.
 
         Raises:
-            VectorSearchError: Si recherche échoue
+            VectorSearchError: Si la recherche echoue
         """
         assert isinstance(query, str) and len(query) > 0
         assert isinstance(limit, int) and limit > 0
@@ -397,100 +388,110 @@ class SearchService:
                 return []
 
             # TASK_QUERY et non TASK_DOCUMENT : encoder une question comme un
-            # document dégrade la pertinence en recherche asymétrique.
-            query_embedding = self.embedding_service.generate_embedding(
+            # document degrade la pertinence en recherche asymetrique.
+            # Version async : le client Gemini est synchrone et gelait la boucle
+            # d'evenements pour tout l'aller-retour reseau.
+            query_embedding = await self.embedding_service.generate_embedding_async(
                 query, task_type=self.embedding_service.TASK_QUERY
             )
-            # La liste est passee en parametre lie, PAS en chaine castee : le
-            # convertisseur de pgvector attend une liste ou un ndarray et rejette
-            # une chaine ("expected list or ndarray"). Une chaine castee vers
-            # Vector echouait donc a chaque recherche semantique.
+            # Liste passee en parametre lie, PAS en chaine castee : le
+            # convertisseur pgvector attend une liste ou un ndarray.
             query_vector = query_embedding.tolist()
 
             from sqlalchemy import literal
             from pgvector.sqlalchemy import Vector
 
+            distance = Article.embedding.cosine_distance(
+                literal(query_vector, Vector(EmbeddingService.EMBEDDING_DIM))
+            )
+
             stmt = (
                 select(
-                    Law.id,
+                    Article.id.label("article_id"),
+                    Article.number,
+                    Article.title.label("article_title"),
+                    Article.section,
+                    Article.page_number,
+                    Article.content,
+                    Article.law_id,
                     Law.reference,
-                    Law.title,
+                    Law.title.label("law_title"),
                     Law.type,
                     Law.language,
                     Law.status,
                     Law.category_id,
+                    Law.publication_date,
                     Category.name.label("category_name"),
-                    func.max(
-                        1 - func.cosine_distance(
-                            Article.embedding,
-                            literal(query_vector, Vector(3072))
-                        )
-                    ).label("similarity")
+                    distance.label("distance"),
                 )
-                .join(Article, Law.id == Article.law_id)
-                .outerjoin(Category, Law.category_id == Category.id)
+                .select_from(Article)
+                .join(Law, Law.id == Article.law_id)
+                .outerjoin(Category, Category.id == Law.category_id)
                 .where(Article.embedding.isnot(None))
             )
 
             stmt = self._apply_filters_pgvector(stmt, filters)
+            # ORDER BY sur l'EXPRESSION et non sur son alias : c'est ce que le
+            # planificateur rattache a l'index HNSW.
+            stmt = stmt.order_by(distance).limit(limit).offset(offset)
 
-            stmt = (
-                stmt
-                .group_by(
-                    Law.id, Law.reference, Law.title, Law.type,
-                    Law.language, Law.status, Law.category_id, Category.name
-                )
-                .order_by(text("similarity DESC"))
-                .limit(min(limit, self.MAX_RESULTS_PER_MODE))
-                .offset(offset)
-            )
+            if filters is not None:
+                # Sous filtre, PostgreSQL elague apres le parcours ANN et peut
+                # rendre moins de lignes que demande. iterative_scan rescanne
+                # jusqu'a completer. Sous try : la directive n'existe qu'a
+                # partir de pgvector 0.8, un serveur plus ancien doit degrader
+                # et non renvoyer 500.
+                try:
+                    await self.db.execute(
+                        text("SET LOCAL hnsw.iterative_scan = 'relaxed_order'")
+                    )
+                except Exception as scan_err:
+                    logger.debug(f"hnsw.iterative_scan indisponible: {scan_err}")
 
             result = await self.db.execute(stmt)
             rows = result.all()
 
-            results = []
-            for row in rows:
-                results.append(SearchResult(
-                    law_id=row.id,
-                    reference=row.reference,
-                    title=row.title,
-                    type=row.type,
+            chunks = [
+                ChunkResult(
+                    article_id=row.article_id,
+                    law_id=row.law_id,
+                    number=str(row.number) if row.number else None,
+                    article_title=row.article_title,
+                    section=row.section,
+                    page_number=row.page_number,
+                    content=row.content or "",
+                    excerpt=(row.content or "")[:400],
+                    reference=row.reference or "",
+                    law_title=row.law_title or "",
+                    type=row.type or "loi",
                     language=row.language,
-                    status=row.status,
+                    status=row.status or "published",
                     category_id=row.category_id,
                     category_name=row.category_name,
-                    publication_date=None,
-                    relevance_score=float(row.similarity),
-                    matched_articles=[],
-                    highlights={},
-                ))
+                    publication_date=row.publication_date,
+                    relevance_score=max(0.0, min(1.0, 1.0 - float(row.distance))),
+                    source="semantic",
+                )
+                for row in rows
+            ]
 
             elapsed_ms = int((time.time() - start_time) * 1000)
-            logger.info(f"🧠 Semantic search: {len(results)} results in {elapsed_ms}ms")
-            return results
+            logger.info(f"🧠 Semantic search: {len(chunks)} chunks in {elapsed_ms}ms")
+            return chunks
 
         except Exception as e:
             logger.error(f"❌ Semantic search failed: {e}")
             raise VectorSearchError(f"Échec recherche sémantique: {e}") from e
 
-    async def hybrid_search(
+    async def hybrid_chunks(
         self,
         query: str,
         filters: Optional[SearchFilters] = None,
         limit: int = 15,
         offset: int = 0,
-    ) -> List[SearchResult]:
+    ) -> List[ChunkResult]:
         """
-        Recherche hybride via RRF fusion (40% text + 60% semantic).
-
-        Args:
-            query: Requête textuelle
-            filters: Filtres optionnels
-            limit: Nombre max résultats
-            offset: Offset pagination
-
-        Returns:
-            Liste de SearchResult triée par RRF score
+        Recherche hybride au niveau article, fusion RRF (40% texte + 60% semantique).
         """
         assert isinstance(query, str) and len(query) > 0
         assert isinstance(limit, int) and limit > 0
@@ -499,61 +500,139 @@ class SearchService:
         try:
             # SEQUENTIEL, pas asyncio.gather : les deux recherches partagent
             # self.db, et une AsyncSession n'est pas utilisable par deux
-            # coroutines a la fois ("another operation is in progress"). Comme
-            # hybride est le mode PAR DEFAUT, la panne touchait la majorite des
-            # recherches. Le parallelisme ne gagnait rien de toute facon : une
-            # seule connexion, donc les requetes se serialisent cote serveur.
+            # coroutines a la fois ("another operation is in progress"). Le
+            # parallelisme ne gagnait rien : une seule connexion, donc les
+            # requetes se serialisent cote serveur de toute facon.
             #
-            # Chaque recherche est isolee pour qu'une panne de l'une n'emporte
-            # pas l'autre — comportement de return_exceptions=True conserve.
-            try:
-                text_results = await self.text_search(
-                    query, filters, limit=self.MAX_RESULTS_PER_MODE, offset=0
-                )
-            except Exception as e:
-                text_results = e
+            # Chaque branche est isolee pour qu'une panne de l'une n'emporte
+            # pas l'autre.
+            budget = max(limit, self.MAX_RESULTS_PER_MODE)
 
             try:
-                semantic_results = await self.semantic_search(
-                    query, filters, limit=self.MAX_RESULTS_PER_MODE, offset=0
-                )
+                text_res_list = await self.text_chunks(query, filters, budget, 0)
             except Exception as e:
-                semantic_results = e
+                logger.warning(f"⚠️ Text search failed in hybrid: {e}")
+                text_res_list = []
 
-            if not isinstance(text_results, list):
-                logger.warning(f"⚠️ Text search failed in hybrid: {text_results}")
-                text_res_list: List[SearchResult] = []
-            else:
-                text_res_list = text_results
-
-            if not isinstance(semantic_results, list):
-                logger.warning(f"⚠️ Semantic search failed in hybrid: {semantic_results}")
-                sem_res_list: List[SearchResult] = []
-            else:
-                sem_res_list = semantic_results
+            try:
+                sem_res_list = await self.semantic_chunks(query, filters, budget, 0)
+            except Exception as e:
+                logger.warning(f"⚠️ Semantic search failed in hybrid: {e}")
+                sem_res_list = []
 
             if not text_res_list and not sem_res_list:
                 return []
 
-            fused_results = self._rrf_fusion(
+            fused = self._rrf_fusion(
                 text_res_list, sem_res_list,
                 k=self.RRF_K,
                 text_weight=self.TEXT_WEIGHT,
                 semantic_weight=self.SEMANTIC_WEIGHT,
             )
-            fused_results = self._normalize_scores(fused_results)
-            paginated_results = fused_results[offset:offset + limit]
+            fused = self._normalize_scores(fused)
+            paginated = fused[offset:offset + limit]
 
             elapsed_ms = int((time.time() - start_time) * 1000)
             logger.info(
-                f"🔀 Hybrid search: {len(paginated_results)} results in {elapsed_ms}ms "
+                f"🔀 Hybrid search: {len(paginated)} chunks in {elapsed_ms}ms "
                 f"(text={len(text_res_list)}, semantic={len(sem_res_list)})"
             )
-            return paginated_results
+            return paginated
 
         except Exception as e:
             logger.error(f"❌ Hybrid search failed: {e}")
             raise SearchServiceError(f"Échec recherche hybride: {e}") from e
+
+    # ============ SEARCH MODES — niveau document, derive des chunks ============
+    # Ces trois methodes conservent la signature et le type de retour d'origine
+    # (List[SearchResult]) : le front, les routes et les tests existants n'ont
+    # rien a changer. Elles ne sont plus que des adaptateurs.
+
+    async def text_search(
+        self,
+        query: str,
+        filters: Optional[SearchFilters] = None,
+        limit: int = 15,
+        offset: int = 0,
+    ) -> List[SearchResult]:
+        """Recherche textuelle, resultats regroupes par loi."""
+        chunks = await self.text_chunks(query, filters, self._chunk_budget(limit), 0)
+        return self._chunks_to_search_results(chunks)[offset:offset + limit]
+
+    async def semantic_search(
+        self,
+        query: str,
+        filters: Optional[SearchFilters] = None,
+        limit: int = 15,
+        offset: int = 0,
+    ) -> List[SearchResult]:
+        """Recherche semantique, resultats regroupes par loi."""
+        chunks = await self.semantic_chunks(query, filters, self._chunk_budget(limit), 0)
+        return self._chunks_to_search_results(chunks)[offset:offset + limit]
+
+    async def hybrid_search(
+        self,
+        query: str,
+        filters: Optional[SearchFilters] = None,
+        limit: int = 15,
+        offset: int = 0,
+    ) -> List[SearchResult]:
+        """Recherche hybride, resultats regroupes par loi."""
+        chunks = await self.hybrid_chunks(query, filters, self._chunk_budget(limit), 0)
+        return self._chunks_to_search_results(chunks)[offset:offset + limit]
+
+    @staticmethod
+    def _chunks_to_search_results(chunks: List[ChunkResult]) -> List[SearchResult]:
+        """
+        Regroupe des chunks en resultats niveau document.
+
+        L'ordre des lois suit celui de leur MEILLEUR chunk (premiere apparition
+        dans une liste deja triee par pertinence). Chaque loi porte jusqu'a
+        trois articles correspondants : matched_articles, highlights et content
+        etaient vides sur le chemin semantique, ou remplis d'un prefixe brut de
+        400 caracteres sur le chemin textuel.
+        """
+        by_law: Dict[int, Dict[str, Any]] = {}
+
+        for chunk in chunks:
+            entry = by_law.get(chunk.law_id)
+            if entry is None:
+                by_law[chunk.law_id] = {"best": chunk, "chunks": [chunk]}
+            else:
+                entry["chunks"].append(chunk)
+
+        results: List[SearchResult] = []
+        for law_id, entry in by_law.items():
+            best: ChunkResult = entry["best"]
+            matched = [
+                ArticleMatch(
+                    article_id=c.article_id,
+                    number=c.number or "",
+                    title=c.article_title,
+                    content_snippet=c.excerpt,
+                    relevance_score=c.relevance_score,
+                )
+                for c in entry["chunks"][:3]
+                if c.article_id is not None and c.number
+            ]
+
+            results.append(SearchResult(
+                law_id=law_id,
+                reference=best.reference,
+                title=best.law_title,
+                type=best.type,
+                language=best.language,
+                status=best.status,
+                category_id=best.category_id,
+                category_name=best.category_name,
+                publication_date=best.publication_date,
+                relevance_score=best.relevance_score,
+                matched_articles=matched,
+                highlights={"content": best.excerpt} if best.excerpt else {},
+                content=best.content or None,
+            ))
+
+        return results
 
     # ==================== INDEXING (PostgreSQL native) ====================
 
@@ -669,39 +748,64 @@ class SearchService:
             stmt = stmt.where(Law.type.in_(filters.types))
         if filters.status:
             stmt = stmt.where(Law.status == filters.status)
+        # year_from / year_to n'etaient appliques nulle part, ni ici ni dans le
+        # SQL plein texte : les filtres de periode etaient silencieusement sans
+        # effet.
+        if getattr(filters, "year_from", None):
+            stmt = stmt.where(
+                func.extract("year", Law.publication_date) >= filters.year_from
+            )
+        if getattr(filters, "year_to", None):
+            stmt = stmt.where(
+                func.extract("year", Law.publication_date) <= filters.year_to
+            )
 
         return stmt
 
     def _rrf_fusion(
         self,
-        text_results: List[SearchResult],
-        semantic_results: List[SearchResult],
+        text_results: List[ChunkResult],
+        semantic_results: List[ChunkResult],
         k: int = 60,
         text_weight: float = 0.4,
         semantic_weight: float = 0.6,
-    ) -> List[SearchResult]:
-        """Applique l'algorithme RRF (Reciprocal Rank Fusion) avec poids."""
-        scores: Dict[int, Dict] = {}
+    ) -> List[ChunkResult]:
+        """
+        Applique l'algorithme RRF (Reciprocal Rank Fusion) avec poids.
+
+        La cle est celle du CHUNK (ChunkResult.fusion_key) et non le law_id :
+        deux articles distincts d'une meme loi, l'un trouve par le texte et
+        l'autre par le vecteur, etaient fusionnes en un seul et l'un des deux
+        etait perdu. Le prefixe de la cle evite en plus qu'une ligne de repli
+        niveau-loi entre en collision avec un article de meme identifiant.
+        """
+        scores: Dict[tuple, Dict] = {}
 
         for rank, result in enumerate(text_results, start=1):
-            scores[result.law_id] = {
+            scores[result.fusion_key] = {
                 "text_rank": rank,
                 "semantic_rank": None,
                 "result": result,
             }
 
         for rank, result in enumerate(semantic_results, start=1):
-            if result.law_id in scores:
-                scores[result.law_id]["semantic_rank"] = rank
-                scores[result.law_id]["result"].highlights.update(result.highlights)
+            key = result.fusion_key
+            if key in scores:
+                scores[key]["semantic_rank"] = rank
+                # Le chunk textuel est conserve : il porte un extrait balise
+                # par ts_headline, la ou le chemin semantique n'a qu'un debut
+                # d'article. On ne recupere l'extrait semantique que si l'autre
+                # est vide.
+                if not scores[key]["result"].excerpt:
+                    scores[key]["result"].excerpt = result.excerpt
             else:
-                scores[result.law_id] = {
+                scores[key] = {
                     "text_rank": None,
                     "semantic_rank": rank,
                     "result": result,
                 }
 
-        for law_id, data in scores.items():
+        for _key, data in scores.items():
             rrf_score = 0.0
             if data["text_rank"]:
                 rrf_score += text_weight * (1.0 / (k + data["text_rank"]))
@@ -715,7 +819,7 @@ class SearchService:
         )
         return [item["result"] for item in sorted_results]
 
-    def _normalize_scores(self, results: List[SearchResult]) -> List[SearchResult]:
+    def _normalize_scores(self, results: List[ChunkResult]) -> List[ChunkResult]:
         """Normalise les scores à [0, 1]."""
         if not results:
             return results
@@ -735,11 +839,8 @@ class SearchService:
 
         return results
 
-    def _extract_highlight_snippet(self, content: str, max_length: int = 300) -> str:
-        """Extrait un snippet de contenu."""
-        if len(content) <= max_length:
-            return content
-        return content[:max_length] + "..."
+    # _extract_highlight_snippet a ete supprimee : elle n'etait appelee nulle
+    # part. Les extraits viennent desormais de ts_headline, cote SQL.
 
 
 # ==================== COMPATIBILITY FUNCTION ====================

@@ -1,12 +1,12 @@
 """
 Service de génération d'embeddings vectoriels pour recherche sémantique.
 
-Ce service utilise Gemini API pour générer des embeddings 3072-dim
+Ce service utilise Gemini API pour générer des embeddings 1536-dim
 multilingues (FR/EN) avec cache PostgreSQL pour optimiser les performances.
 
 Architecture:
 - Model: models/gemini-embedding-001 (Gemini API)
-- Dimensions: 3072 (compatible pgvector)
+- Dimensions: 1536 (settings.EMBEDDING_DIM, indexable par pgvector)
 - Cache: Table embedding_cache PostgreSQL avec TTL 7 jours (cache en base)
 - Performance: <300ms single, <2s batch(10)
 
@@ -14,20 +14,20 @@ Author: JuriX Team
 Version: 3.0.0 (cache PostgreSQL)
 """
 
+import asyncio
 import hashlib
 import json
 import logging
 import time
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 from google import genai
 from google.genai import types
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
 from app.core.config import settings
+from app.core.database import SyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -42,17 +42,27 @@ class EmbeddingService:
     Service de génération d'embeddings vectoriels pour recherche sémantique.
 
     Utilise Gemini API avec cache PostgreSQL (table embedding_cache).
-    Supporte FR/EN, dimensions 3072, normalisation L2 automatique.
+    Supporte FR/EN, normalisation L2 automatique.
+
+    Dimension : settings.EMBEDDING_DIM (1536), demandée à l'API via
+    output_dimensionality. gemini-embedding-001 sort 3072 nativement, mais
+    pgvector n'indexe pas au-dela de 2000 dimensions.
 
     Attributes:
         EMBEDDING_MODEL: Nom du modèle Gemini
-        EMBEDDING_DIM: Dimension des embeddings (3072)
+        EMBEDDING_DIM: Dimension des embeddings (settings.EMBEDDING_DIM)
         CACHE_TTL_SECONDS: Durée de vie cache (7 jours)
         use_cache: Flag activation cache
     """
 
     EMBEDDING_MODEL = settings.GEMINI_EMBEDDING_MODEL
-    EMBEDDING_DIM = 3072
+    EMBEDDING_DIM = settings.EMBEDDING_DIM
+    # Dimension native du modele. En dessous, l'API tronque le vecteur
+    # (Matryoshka) et NE le renormalise PAS : c'est a nous de le faire.
+    NATIVE_EMBEDDING_DIM = 3072
+    # Version de la cle de cache. A incrementer si la facon de construire les
+    # vecteurs change sans que le modele ni la dimension ne changent.
+    CACHE_KEY_VERSION = "v2"
     CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 jours
     MAX_TEXT_LENGTH = 10000
     MAX_RETRIES = 3
@@ -98,20 +108,12 @@ class EmbeddingService:
             logger.error(f"❌ Échec configuration Gemini API: {e}")
             raise EmbeddingServiceError(f"Impossible de configurer Gemini API: {e}") from e
 
-        # Cache PostgreSQL (connexion synchrone pour les taches de fond)
+        # Cache PostgreSQL (connexion synchrone pour les taches de fond).
+        # Le service ne POSSEDE plus de moteur : il emprunte celui de
+        # app.core.database. Un create_engine par instance restait ouvert pour
+        # toute la duree du processus, et chaque loi traitee en creait un.
         self.use_cache = use_cache
-        self._sync_engine = None
-        self._sync_session_factory = None
-
-        if use_cache:
-            try:
-                sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
-                self._sync_engine = create_engine(sync_url, pool_pre_ping=True, pool_size=2)
-                self._sync_session_factory = sessionmaker(bind=self._sync_engine)
-                logger.info("✅ EmbeddingService cache PostgreSQL activé")
-            except Exception as e:
-                logger.warning(f"⚠️ Cache PostgreSQL non disponible, désactivé: {e}")
-                self.use_cache = False
+        self._sync_session_factory = SyncSessionLocal if use_cache else None
 
         logger.info(
             f"✅ EmbeddingService initialisé "
@@ -141,7 +143,7 @@ class EmbeddingService:
                        deux côtés dégrade la pertinence.
 
         Returns:
-            Embedding numpy array de dimension (3072,)
+            Embedding numpy array de dimension (EMBEDDING_DIM,)
 
         Raises:
             ValueError: Si texte vide ou trop long (>10000 chars)
@@ -152,9 +154,7 @@ class EmbeddingService:
 
         start_time = time.time()
         self._validate_text(text)
-        # Le type de tâche fait partie de la clé : le même texte encodé comme
-        # document ou comme question ne donne pas le même vecteur.
-        cache_key = self._get_cache_key(f"{task_type}\x00{text}")
+        cache_key = self._cache_key(text, task_type)
 
         # Tentative récupération cache PostgreSQL
         if self.use_cache:
@@ -170,7 +170,10 @@ class EmbeddingService:
                 result = self.client.models.embed_content(
                     model=self.EMBEDDING_MODEL,
                     contents=text,
-                    config=types.EmbedContentConfig(task_type=task_type),
+                    config=types.EmbedContentConfig(
+                        task_type=task_type,
+                        output_dimensionality=self.EMBEDDING_DIM,
+                    ),
                 )
                 embedding = np.array(result.embeddings[0].values, dtype=np.float32)
 
@@ -179,10 +182,7 @@ class EmbeddingService:
                         f"Dimension incorrecte: {embedding.shape[0]} != {self.EMBEDDING_DIM}"
                     )
 
-                if normalize:
-                    norm = np.linalg.norm(embedding)
-                    if norm > 0:
-                        embedding = embedding / norm
+                embedding = self._normalize(embedding, normalize)
 
                 # Stockage dans cache PostgreSQL
                 if self.use_cache:
@@ -339,8 +339,19 @@ class EmbeddingService:
                 )
                 row = result.fetchone()
                 if row:
-                    embedding_list = json.loads(row[0])
-                    return np.array(embedding_list, dtype=np.float32)
+                    cached = np.array(json.loads(row[0]), dtype=np.float32)
+                    # Garde de dimension : une entree ecrite sous une autre
+                    # configuration (3072 avant la bascule) doit etre ignoree,
+                    # pas servie. Sinon la colonne vector(1536) rejette
+                    # l'insertion, ou pire, la comparaison est silencieusement
+                    # fausse.
+                    if cached.ndim != 1 or cached.shape[0] != self.EMBEDDING_DIM:
+                        logger.debug(
+                            f"⚠️ Cache PG: dimension {cached.shape} ignorée "
+                            f"(attendu {self.EMBEDDING_DIM})"
+                        )
+                        return None
+                    return cached
         except Exception as e:
             logger.debug(f"⚠️ Cache PG read failed ({text_hash[:16]}...): {e}")
 
@@ -388,9 +399,9 @@ class EmbeddingService:
         indices_to_generate = []
 
         for idx, text in enumerate(texts):
-            # Même convention de clé que generate_embedding : le type de tâche
-            # fait partie du hash (le lot n'encode que des documents).
-            cache_key = self._get_cache_key(f"{self.TASK_DOCUMENT}\x00{text}")
+            # Même convention de clé que generate_embedding (le lot n'encode
+            # que des documents).
+            cache_key = self._cache_key(text, self.TASK_DOCUMENT)
             if self.use_cache:
                 cached_emb = self._get_from_pg_cache(cache_key)
                 if cached_emb is not None:
@@ -413,17 +424,36 @@ class EmbeddingService:
                 result = self.client.models.embed_content(
                     model=self.EMBEDDING_MODEL,
                     contents=chunk_texts,
-                    config=types.EmbedContentConfig(task_type=self.TASK_DOCUMENT),
+                    config=types.EmbedContentConfig(
+                        task_type=self.TASK_DOCUMENT,
+                        output_dimensionality=self.EMBEDDING_DIM,
+                    ),
                 )
+
+                # L'API peut renvoyer MOINS de vecteurs que de textes. Sans ce
+                # controle, zip() perdait silencieusement la queue du lot, puis
+                # embeddings_dict[idx] levait un KeyError bien plus loin, sans
+                # rapport apparent avec la cause.
+                if len(result.embeddings) != len(chunk_texts):
+                    raise EmbeddingServiceError(
+                        f"Réponse incomplète: {len(result.embeddings)} vecteurs "
+                        f"pour {len(chunk_texts)} textes"
+                    )
+
                 new_embeddings = [
                     np.array(emb.values, dtype=np.float32) for emb in result.embeddings
                 ]
 
-                if normalize:
-                    new_embeddings = [
-                        emb / np.linalg.norm(emb) if np.linalg.norm(emb) > 0 else emb
-                        for emb in new_embeddings
-                    ]
+                # Garde de dimension, absente de ce chemin alors que le chemin
+                # unitaire l'avait : un lot mal dimensionne allait directement
+                # en base et cassait l'insertion vector(1536).
+                bad = [e.shape[0] for e in new_embeddings if e.shape[0] != self.EMBEDDING_DIM]
+                if bad:
+                    raise EmbeddingServiceError(
+                        f"Dimension incorrecte dans le lot: {bad[0]} != {self.EMBEDDING_DIM}"
+                    )
+
+                new_embeddings = [self._normalize(emb, normalize) for emb in new_embeddings]
 
                 for idx, text, embedding in zip(chunk_indices, chunk_texts, new_embeddings):
                     embeddings_dict[idx] = embedding
@@ -431,7 +461,7 @@ class EmbeddingService:
                         # Même clé qu'en lecture (_check_batch_cache), sinon le
                         # cache n'aurait jamais de hit.
                         self._store_in_pg_cache(
-                            self._get_cache_key(f"{self.TASK_DOCUMENT}\x00{text}"), embedding
+                            self._cache_key(text, self.TASK_DOCUMENT), embedding
                         )
 
                 logger.info(f"  ✅ Chunk {current_chunk}/{chunk_count} completed")
@@ -465,7 +495,76 @@ class EmbeddingService:
         """Prétraite le texte pour normalisation cache."""
         return text.strip()
 
-    def _get_cache_key(self, text: str) -> str:
-        """Génère la clé de cache SHA-256 pour un texte."""
-        normalized = self._preprocess_text(text).lower()
-        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:64]
+    def _cache_key(self, text: str, task_type: str) -> str:
+        """
+        Clé de cache SHA-256.
+
+        Contient le modèle, la DIMENSION et le type de tâche, pas seulement le
+        texte : sans la dimension, un vecteur 3072 écrit avant la bascule
+        serait resservi sous configuration 1536, et sans le type de tâche un
+        même texte encodé comme document ou comme question partagerait une
+        entrée alors que les vecteurs diffèrent.
+
+        Le texte n'est PLUS mis en minuscules. Gemini est sensible à la casse
+        et le français juridique la porte ("Article PREMIER" n'est pas
+        "article premier") : minusculer confondait des textes distincts sous
+        une seule clé.
+        """
+        payload = "\x00".join([
+            self.CACHE_KEY_VERSION,
+            self.EMBEDDING_MODEL,
+            str(self.EMBEDDING_DIM),
+            task_type,
+            self._preprocess_text(text),
+        ])
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:64]
+
+    def _normalize(self, embedding: np.ndarray, requested: bool = True) -> np.ndarray:
+        """
+        Normalisation L2.
+
+        Appliquée d'office sous la dimension native : l'API ne normalise que la
+        sortie pleine (3072), les troncatures Matryoshka sortent avec une norme
+        quelconque. Or l'opérateur `<=>` de pgvector et le produit scalaire de
+        similarity() supposent des vecteurs unitaires — un vecteur non normalisé
+        donne des scores faux, pas une erreur.
+        """
+        if not requested and self.EMBEDDING_DIM >= self.NATIVE_EMBEDDING_DIM:
+            return embedding
+        norm = float(np.linalg.norm(embedding))
+        return embedding / norm if norm > 0 else embedding
+
+    async def generate_embedding_async(
+        self,
+        text: str,
+        task_type: str = TASK_QUERY,
+    ) -> np.ndarray:
+        """
+        Version asynchrone de generate_embedding.
+
+        Le client Gemini est synchrone, le backoff est un time.sleep et les
+        lectures/écritures de cache passent par psycopg2 : appelée telle quelle
+        depuis une coroutine, generate_embedding gèle la boucle d'événements
+        pour tout l'aller-retour réseau. Tout appel depuis du code async doit
+        passer par ici.
+
+        task_type vaut TASK_QUERY par défaut : le seul appelant asynchrone est
+        la recherche sémantique, qui encode une question.
+        """
+        return await asyncio.to_thread(self.generate_embedding, text, True, task_type)
+
+
+@lru_cache()
+def get_embedding_service() -> "EmbeddingService":
+    """
+    Instance unique d'EmbeddingService.
+
+    La fabrique vit ICI et non dans app/core/dependencies.py : il en existait
+    deux, celle des dependances FastAPI et le singleton prive de SearchService,
+    donc jusqu'a deux instances par processus. Elles n'ont plus de moteur en
+    propre depuis que le cache emprunte SyncSessionLocal, mais deux clients
+    Gemini et deux journaux d'initialisation restaient inutiles. La placer ici
+    evite le cycle d'import : dependencies.py importe deja SearchService.
+    """
+    logger.info("📦 Création du singleton EmbeddingService")
+    return EmbeddingService(use_cache=True)

@@ -56,7 +56,6 @@ google-genai = "^1.0.0"
 
 # Utils
 python-dotenv = "^1.0.0"
-bleach = "^6.0"
 httpx = "^0.25.2"
 
 [tool.poetry.group.dev.dependencies]

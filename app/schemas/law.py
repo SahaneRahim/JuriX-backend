@@ -426,33 +426,10 @@ class LawListResponse(BaseModel):
     filters_applied: Optional[dict] = Field(None, description="Summary of applied filters")
 
 
-# ============================================================================
-# Search Schemas
-# ============================================================================
-
-
-class SearchQuery(BaseModel):
-    """Schema for search operations."""
-
-    query: str = Field(..., min_length=1, max_length=500, description="Search query text")
-    filters: Optional[LawFilters] = Field(None, description="Additional filters to apply")
-
-
-class SearchResult(LawResponse):
-    """Search result with relevance score."""
-
-    relevance_score: float = Field(
-        0.0, ge=0.0, le=1.0, description="Search relevance score (0.0-1.0)"
-    )
-
-
-class SearchResponse(BaseModel):
-    """Response for search operations."""
-
-    query: str
-    results: List[SearchResult] = Field(default_factory=list)
-    total: int = Field(0, description="Total number of results")
-    search_time_ms: float = Field(0.0, description="Search execution time in milliseconds")
+# Les schemas de recherche vivaient ici en double de app/schemas/search.py, avec
+# les MEMES noms (SearchRequest / SearchResult / SearchResponse). Ils ne
+# servaient qu'a law_service.search_laws, supprime ; la recherche passe
+# entierement par app/schemas/search.py.
 
 
 # ============================================================================

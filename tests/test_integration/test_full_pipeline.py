@@ -28,9 +28,8 @@ from app.services.document_classifier import DocumentClassifier
 from app.services.embedding_service import EmbeddingService
 from app.services.search_service import SearchService
 from app.services.rag_service import RAGService
-from app.services.law_service import LawService
 from app.utils.text_chunker import extract_articles
-from app.schemas.law import LawCreate, ArticleCreate
+from app.models.law import Article, Law
 from app.schemas.search import SearchRequest
 from app.schemas.rag import RAGRequest
 
@@ -96,7 +95,6 @@ async def test_full_pipeline_integration(
     language_detector = LanguageDetector()
     document_classifier = DocumentClassifier()
     embedding_service = EmbeddingService(use_cache=False)
-    law_service = LawService(async_db_session)
     search_service = SearchService(async_db_session)
     rag_service = RAGService(async_db_session)
 
@@ -126,7 +124,9 @@ async def test_full_pipeline_integration(
 
     # STEP 4: Database Persistence (Law)
     print("\n4️⃣ Testing Law Persistence...")
-    law_data = LawCreate(
+    # Ecriture ORM directe : le service de loi a ete supprime, tout le CRUD
+    # vit desormais dans routes/laws.py.
+    created_law = Law(
         reference="LOI-2024-001-TEST",
         title="Code Civil Camerounais - Test Pipeline",
         type="Loi",
@@ -134,10 +134,11 @@ async def test_full_pipeline_integration(
         language="fr",
         content=sample_legal_document,
         publication_date=date(2024, 1, 15),
-        status="published"
+        status="published",
     )
-
-    created_law = await law_service.create_law(law_data)
+    async_db_session.add(created_law)
+    await async_db_session.commit()
+    await async_db_session.refresh(created_law)
     assert created_law.id is not None
     print(f"   ✅ Law created: ID={created_law.id}")
 
@@ -145,15 +146,15 @@ async def test_full_pipeline_integration(
     print("\n5️⃣ Testing Article Persistence...")
     article_count = 0
     for article in articles:
-        article_data = ArticleCreate(
+        async_db_session.add(Article(
             law_id=created_law.id,
             number=article["number"],
-            title=article.get("title", ""),
+            title=article.get("title") or None,
             content=article["content"],
-            position=article["position"]
-        )
-        created_article = await law_service.create_article(article_data)
+            order=article["position"],
+        ))
         article_count += 1
+    await async_db_session.commit()
 
     print(f"   ✅ {article_count} articles persisted")
 
@@ -200,7 +201,8 @@ async def test_full_pipeline_integration(
 
     # Cleanup
     print("\n9️⃣ Cleanup...")
-    await law_service.delete_law(created_law.id)
+    await async_db_session.delete(created_law)
+    await async_db_session.commit()
     print("   ✅ Test data cleaned up")
 
     print("\n" + "="*80)
