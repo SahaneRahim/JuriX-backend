@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://jurix:jurix_dev_password_change_in_prod@localhost:5432/jurix_db"
 
-    # (Redis and Meilisearch have been replaced by PostgreSQL native FTS + cache)
+    # Recherche et cache assures par PostgreSQL (tsvector, pg_trgm, query_cache).
 
     # Gemini API (LLM for RAG)
     GEMINI_API_KEY: str = ""

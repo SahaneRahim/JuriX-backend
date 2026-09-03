@@ -98,7 +98,7 @@ class RAGService:
     def extract_keywords(question: str) -> str:
         """
         Extract important keywords from a natural language question.
-        Removes stopwords to improve Meilisearch results.
+        Removes stopwords pour ameliorer la recherche plein texte.
         """
         import re
         # Normalize: lowercase and remove punctuation except apostrophes
@@ -394,7 +394,7 @@ class RAGService:
         Searches all languages to maximize results.
         Extracts keywords from natural language questions for better search.
         """
-        # Extract keywords from question for better Meilisearch results
+        # Extract keywords from question for better la recherche plein texte results
         search_query = self.extract_keywords(question)
         logger.info(f"🔍 RAG Search: original='{question[:50]}...' keywords='{search_query}'")
         
@@ -629,7 +629,7 @@ class RAGService:
 
     async def _fallback_search(self, question: str, history: List = None) -> List:
         """
-        Multilingual fallback search when Meilisearch returns no results.
+        Multilingual fallback search when la recherche plein texte returns no results.
         
         Logic:
         1. Detect prompt language (FR/EN)
@@ -1128,18 +1128,18 @@ CONTENU COMPLET:
         except Exception as e:
             logger.debug(f"DEBUG: PostgreSQL query failed: {e}")
 
-        # FALLBACK 1: Check matched_articles from Meilisearch
+        # FALLBACK 1: Check matched_articles from la recherche plein texte
         if hasattr(result, 'matched_articles') and result.matched_articles:
             for article in result.matched_articles:
                 if hasattr(article, 'number') and article.number == article_num:
                     if hasattr(article, 'snippet'):
                         return article.snippet[:300]
 
-        # FALLBACK 2: Use highlights from Meilisearch
+        # FALLBACK 2: Use highlights from la recherche plein texte
         if hasattr(result, 'highlights'):
             content = result.highlights.get("content", "")
             if content:
-                logger.debug(f"DEBUG: Using Meilisearch highlights as fallback")
+                logger.debug(f"DEBUG: Extraits de recherche en repli")
                 return content[:300]
 
         return "Voir document complet pour détails"

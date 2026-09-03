@@ -2,7 +2,7 @@
 Service de recherche hybride (textuelle + sémantique) pour JuriX.
 
 Ce service implémente 3 modes de recherche:
-1. Textuelle (PostgreSQL FTS + pg_trgm) - Remplace Meilisearch
+1. Textuelle (PostgreSQL FTS + pg_trgm)
 2. Sémantique (pgvector) - Recherche contextuelle par similarité
 3. Hybrid (RRF fusion 40/60) - Combinaison optimale
 
@@ -10,10 +10,10 @@ Architecture (PostgreSQL native):
 - FTS: tsvector / websearch_to_tsquery + pg_trgm (trigrammes)
 - pgvector: Vector similarity avec HNSW index
 - RRF Fusion: Weighted Reciprocal Rank Fusion (40% text + 60% semantic)
-- Cache: Table query_cache PostgreSQL avec TTL (remplace Redis)
+- Cache: Table query_cache PostgreSQL avec TTL (cache en base)
 
 Author: JuriX Team
-Version: 3.0.0 (PostgreSQL native - no Redis, no Meilisearch)
+Version: 3.0.0 (PostgreSQL natif)
 """
 
 import asyncio
@@ -105,8 +105,6 @@ class IndexingError(SearchServiceError):
     pass
 
 
-# Alias legacy pour compatibilité
-MeilisearchError = TextSearchError
 
 
 # ==================== SEARCH SERVICE ====================
@@ -334,7 +332,7 @@ class SearchService:
         offset: int = 0,
     ) -> List[SearchResult]:
         """
-        Recherche textuelle via PostgreSQL FTS (remplace Meilisearch).
+        Recherche textuelle via PostgreSQL FTS (remplace la recherche plein texte).
 
         Cherche d'abord dans les articles, puis dans les lois en fallback.
 
@@ -544,7 +542,7 @@ class SearchService:
     async def index_law(self, law: Law) -> None:
         """
         Indexe une loi via mise à jour du tsvector PostgreSQL.
-        Remplace l'indexation Meilisearch.
+        Met a jour les tsvector PostgreSQL.
 
         Args:
             law: Instance Law à indexer

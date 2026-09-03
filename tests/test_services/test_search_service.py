@@ -45,7 +45,7 @@ from app.services.search_service import (
 # depend — une suite verte y aurait certifie du code cassé en production.
 # db_session vient desormais de conftest.py (PostgreSQL reel + rollback).
     IndexingError,
-    MeilisearchError,
+    TextSearchError,
     SearchService,
     SearchServiceError,
     VectorSearchError,

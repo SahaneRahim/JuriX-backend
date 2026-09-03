@@ -8,4 +8,4 @@ Author: JuriX Development Team
 Date: 2026-04-17
 """
 
-# No more Celery, tasks are executed via FastAPI BackgroundTasks
+# Les taches sont executees via BackgroundTasks FastAPI, sans courtier.

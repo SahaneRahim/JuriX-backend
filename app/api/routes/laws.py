@@ -503,7 +503,7 @@ async def ingest_law(
     Ingest a new law from an uploaded file.
 
     1. Creates a Law record (status=processing)
-    2. Triggers Celery task to process the file
+    2. Declenche le traitement du fichier en tache de fond
 
     Args:
         request: Ingest request (file_id, title)
@@ -582,7 +582,7 @@ async def ingest_law(
         await db.refresh(new_law)
 
         # Lance le traitement en arrière-plan (BackgroundTasks FastAPI)
-        # Remplace Celery - le traitement s'exécute dans l'event loop FastAPI
+        # Traitement dans une tache asyncio, sans courtier de messages
         # sans bloquer la réponse HTTP
         law_id_for_bg = cast(int, new_law.id)
         file_id_for_bg = request.file_id
@@ -803,7 +803,7 @@ async def delete_law(
         await db.delete(law)
         await db.commit()
 
-        # Vide le search_vector PostgreSQL (remplace suppression Meilisearch)
+        # Vide le search_vector PostgreSQL (remplace suppression la recherche plein texte)
         delete_from_search_index(law_id)
 
         # Invalider le cache de recherche

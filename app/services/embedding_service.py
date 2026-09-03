@@ -7,11 +7,11 @@ multilingues (FR/EN) avec cache PostgreSQL pour optimiser les performances.
 Architecture:
 - Model: models/gemini-embedding-001 (Gemini API)
 - Dimensions: 3072 (compatible pgvector)
-- Cache: Table embedding_cache PostgreSQL avec TTL 7 jours (remplace Redis)
+- Cache: Table embedding_cache PostgreSQL avec TTL 7 jours (cache en base)
 - Performance: <300ms single, <2s batch(10)
 
 Author: JuriX Team
-Version: 3.0.0 (PostgreSQL cache - no Redis)
+Version: 3.0.0 (cache PostgreSQL)
 """
 
 import hashlib
@@ -98,7 +98,7 @@ class EmbeddingService:
             logger.error(f"❌ Échec configuration Gemini API: {e}")
             raise EmbeddingServiceError(f"Impossible de configurer Gemini API: {e}") from e
 
-        # Cache PostgreSQL (connexion synchrone pour les tasks Celery/background)
+        # Cache PostgreSQL (connexion synchrone pour les taches de fond)
         self.use_cache = use_cache
         self._sync_engine = None
         self._sync_session_factory = None

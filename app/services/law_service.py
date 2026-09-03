@@ -171,7 +171,7 @@ class LawService:
                 f"lang={final_language}, confidence={lang_confidence:.2f})"
             )
 
-            # Auto-index in Meilisearch (v2.1 SearchService integration)
+            # Auto-index in la recherche plein texte (v2.1 SearchService integration)
             try:
                 from app.services.search_service import SearchService
                 search_service = SearchService(self.db, use_cache=True)

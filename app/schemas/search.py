@@ -106,7 +106,7 @@ class SearchRequest(BaseModel):
     Request schema for search endpoint.
 
     Supports three search modes:
-    - text: Full-text search only (Meilisearch)
+    - text: Full-text search only (la recherche plein texte)
     - semantic: Vector search only (pgvector)
     - hybrid: Combined search with RRF fusion (default, recommended)
     """
@@ -309,7 +309,7 @@ class SearchStats(BaseModel):
     """
     Statistiques de l'index de recherche (reserve aux administrateurs).
 
-    Reecrit pour PostgreSQL : les champs decrivaient Meilisearch et Redis,
+    Reecrit pour PostgreSQL : les champs decrivaient l'ancienne pile de recherche,
     supprimes de l'architecture. Les quatre champs ajoutes (indexed_documents,
     total_articles, articles_with_embeddings, cache_entries) sont ceux qui
     disent reellement si la chaine d'ingestion a fonctionne.

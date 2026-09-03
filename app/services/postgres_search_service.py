@@ -1,10 +1,10 @@
 """
 Service de recherche full-text natif PostgreSQL pour JuriX.
 
-Remplace Meilisearch en utilisant :
+Recherche plein texte native PostgreSQL :
 - tsvector / tsquery pour la recherche full-text (FR + EN)
 - pg_trgm pour la tolérance aux fautes d'orthographe
-- Table query_cache pour le cache des résultats (remplace Redis)
+- Table query_cache pour le cache des résultats (cache en base)
 
 Architecture :
 - search_articles_pg()  : recherche article par article (index GIN sur search_vector)
@@ -448,7 +448,7 @@ def _rows_to_search_results(rows: Sequence[Any]) -> List[SearchResult]:
 async def update_law_search_vector(db: AsyncSession, law_id: int) -> None:
     """
     Met à jour manuellement le search_vector d'une loi et de ses articles.
-    À appeler après indexation (remplace Meilisearch.index_law).
+    À appeler après indexation (remplace la recherche plein texte.index_law).
 
     Args:
         db: Session async SQLAlchemy
@@ -482,7 +482,7 @@ async def update_law_search_vector(db: AsyncSession, law_id: int) -> None:
 async def remove_law_search_index(db: AsyncSession, law_id: int) -> None:
     """
     'Désindexe' une loi en vidant ses search_vector.
-    À appeler lors d'une suppression (remplace Meilisearch.remove_law).
+    À appeler lors d'une suppression (remplace la recherche plein texte.remove_law).
     Les articles sont supprimés en cascade par le modèle (ondelete=CASCADE).
 
     Args:

@@ -47,7 +47,7 @@ async def ask(
     **Pipeline:**
     1. Retrieve top 5 relevant legal documents (<200ms)
     2. Load conversation history (last 5 messages)
-    3. Generate persona-adapted answer with Mistral 7B (2-5s)
+    3. Generate persona-adapted answer with Gemini (2-5s)
     4. Extract and validate source citations
     5. Calculate confidence score
     6. Save interaction to database

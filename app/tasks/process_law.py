@@ -7,15 +7,15 @@ Pipeline:
 3. Classifier la catégorie
 4. Découper les articles
 5. Générer les embeddings
-6. Mettre à jour les tsvectors PostgreSQL (remplace Meilisearch)
+6. Mettre à jour les tsvectors PostgreSQL (remplace la recherche plein texte)
 7. Mettre à jour la base de données
 
 Ce module expose deux fonctions:
-- process_law_async(): version async pour FastAPI BackgroundTasks (remplace Celery)
+- process_law_async(): traitement asynchrone via BackgroundTasks FastAPI
 - process_law_sync(): version synchrone (conservée pour compatibilité)
 
 Author: JuriX Development Team
-Version: 3.0.0 (no Celery, no Meilisearch)
+Version: 3.0.0 (PostgreSQL natif)
 """
 
 import asyncio
@@ -35,14 +35,14 @@ from app.utils.text_chunker import extract_articles, ArticleExtractionError
 logger = logging.getLogger(__name__)
 
 
-# ==================== ASYNC ENTRY POINT (remplace Celery) ====================
+# ==================== POINT D'ENTREE ASYNCHRONE ====================
 
 
 async def process_law_async(law_id: int, file_id: str = None) -> Dict[str, Any]:
     """
     Traite un document juridique en arrière-plan (BackgroundTasks FastAPI).
 
-    Remplace la tâche Celery. Appelé via:
+    Appelé via:
         background_tasks.add_task(process_law_async, law_id, file_id)
 
     Pipeline: load → extract → analyse → articles → embeddings → index PG FTS → update
@@ -104,7 +104,7 @@ async def process_law_async(law_id: int, file_id: str = None) -> Dict[str, Any]:
 async def _update_fts_vectors_async(db: AsyncSession, law_id: int) -> None:
     """
     Met à jour les tsvectors PostgreSQL pour une loi et ses articles.
-    Remplace l'indexation Meilisearch.
+    Met a jour les tsvector PostgreSQL.
 
     Args:
         db: Session async SQLAlchemy
@@ -604,7 +604,7 @@ def _clean_extracted_text(text: str) -> str:
 def delete_from_search_index(law_id: int) -> bool:
     """
     Désindexe une loi des tsvectors PostgreSQL lors d'une suppression.
-    Remplace delete_from_meilisearch().
+    Retire la loi de l'index plein texte.
 
     Args:
         law_id: ID of the law to deindex
