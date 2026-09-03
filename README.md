@@ -13,7 +13,7 @@ article, réponses citées via Gemini.
 | API | FastAPI (Python 3.11) |
 | Base | PostgreSQL 16 + `pgvector` + `pg_trgm` |
 | Recherche plein texte | `tsvector` / `websearch_to_tsquery`, index GIN, triggers |
-| Recherche sémantique | `pgvector`, embeddings `gemini-embedding-001` (3072 dim.) |
+| Recherche sémantique | `pgvector` + index HNSW, embeddings `gemini-embedding-001` tronqués à 1536 dim. |
 | Cache | tables `query_cache` et `embedding_cache` |
 | LLM | Gemini (`google-genai`) |
 | OCR | LlamaParse v2 |
@@ -116,6 +116,31 @@ exploitable) : la publier serait pire que de ne rien publier.
 
 Les extractions sont mises en cache par `sha256` : un fichier déjà traité n'est
 jamais repayé.
+
+## Recherche et RAG
+
+La recherche renvoie des **chunks** — un article, pas un document. `SearchResult`
+(niveau loi) reste exposé pour le front et est dérivé de ces chunks ;
+`SearchResponse.chunks` porte les articles eux-mêmes, avec leur numéro, leur
+section, leur page et leur contenu intégral. C'est ce que consomme le RAG, et
+c'est ce qui permet à une citation de pointer un `article_id`.
+
+Les embeddings font **1536 dimensions** (`output_dimensionality`, troncature
+Matryoshka renormalisée) et non les 3072 natifs : au-dessus de 2000, pgvector
+refuse tout index HNSW ou IVFFlat, et chaque recherche sémantique balayait la
+table.
+
+Après un changement de dimension ou une restauration, les vecteurs doivent être
+régénérés :
+
+```bash
+alembic upgrade head
+python scripts/regenerate_embeddings.py --all --batch-size 16   # reprenable
+python scripts/regenerate_embeddings.py --reindex               # index en masse
+```
+
+Tant que le backfill n'est pas terminé, la recherche sémantique ne renvoie rien
+et le mode hybride dégrade en recherche plein texte.
 
 ## Tests
 
