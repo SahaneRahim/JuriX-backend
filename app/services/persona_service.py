@@ -869,7 +869,12 @@ class PersonaService:
                     "total_messages": 0,
                     "avg_messages_per_conversation": 0.0,
                     "avg_session_duration_seconds": 0,
-                    "active_days": 0
+                    "active_days": 0,
+                    # Champ obligatoire de DetailedEngagementMetrics. Absent, la
+                    # reponse ne se serialisait pas et l'endpoint renvoyait 500
+                    # des qu'un persona n'avait aucune conversation sur la
+                    # periode — c'est-a-dire toujours sur une base neuve.
+                    "conversations_per_active_day": 0.0
                 }
             }
 

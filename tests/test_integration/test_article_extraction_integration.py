@@ -6,7 +6,7 @@ as intended in the process_law task.
 """
 
 import pytest
-from app.utils.text_chunker import extract_articles, ArticleExtractionError
+from app.utils.text_chunker import extract_articles
 
 
 class TestArticleExtractionIntegration:
@@ -44,19 +44,30 @@ class TestArticleExtractionIntegration:
         en fonction de la forme juridique et du secteur d'activité concerné.
         """
 
-        articles = extract_articles(law_text)
+        chunks = extract_articles(law_text)
+
+        # Le premier chunk porte l'en-tete du texte (intitule de la loi), sous
+        # le numero PREAMBULE ou LEGAL_BASIS : l'extraction ne jette aucun
+        # caractere du document. Les articles proprement dits sont donc filtres.
+        assert chunks[0]['number'] in ('PREAMBULE', 'LEGAL_BASIS')
+        assert 'LOI N° 2023-001' in chunks[0]['content']
+
+        articles = [c for c in chunks if c['number'].isdigit()]
 
         # Verify extraction
         assert len(articles) == 5
-        assert all(a['number'] in ['1', '2', '3', '4', '5'] for a in articles)
+        assert [a['number'] for a in articles] == ['1', '2', '3', '4', '5']
 
         # Verify structure
-        assert articles[0]['number'] == '1'
         assert articles[0]['title'] == 'Objet de la loi'
         assert 'OHADA' in articles[0]['content']
 
         assert articles[3]['number'] == '4'
         assert articles[3]['title'] == 'Conditions de constitution'
+
+        # La section est rattachee a chaque article
+        assert articles[0]['section'].startswith('CHAPITRE I')
+        assert articles[3]['section'].startswith('CHAPITRE II')
 
         # Verify all have required fields
         for article in articles:
@@ -68,19 +79,30 @@ class TestArticleExtractionIntegration:
             assert article['word_count'] > 0
             assert article['char_count'] > 0
 
-    def test_pipeline_validation_minimum_articles(self):
-        """Test that pipeline validation catches documents with <3 articles."""
-        insufficient_text = """
+    def test_short_document_is_extracted(self):
+        """Un texte de deux articles est extrait, pas rejete."""
+        short_text = """
         Article 1. Premier article
         Contenu du premier article avec suffisamment de texte pour validation.
 
         Article 2. Deuxième article seulement
-        Contenu du deuxième article, mais pas assez d'articles au total.
+        Contenu du deuxième article, court mais parfaitement valide.
         """
 
-        # Should raise error in strict mode (default)
-        with pytest.raises(ArticleExtractionError, match="Minimum 3 articles"):
-            extract_articles(insufficient_text)
+        # L'ancienne regle "minimum 3 articles" a ete retiree du chunker, et
+        # elle ne doit pas revenir : la majorite du corpus est faite de decrets
+        # de nomination a deux articles ("Article 1er : est nomme... / Article
+        # 2 : le present decret sera enregistre..."). La retablir refuserait
+        # l'essentiel des documents.
+        articles = extract_articles(short_text)
+
+        assert [a['number'] for a in articles] == ['1', '2']
+        assert all(a['char_count'] > 0 for a in articles)
+
+    def test_empty_document_raises(self):
+        """Un document sans contenu exploitable leve toujours."""
+        with pytest.raises(ValueError):
+            extract_articles("   \n  \n ")
 
     def test_pipeline_processes_large_document(self):
         """Test that pipeline can handle large legal documents."""

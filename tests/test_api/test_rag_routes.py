@@ -235,11 +235,15 @@ class TestHealthEndpoint:
     def test_health_check(self, mock_rag_service_class, client):
         """Test health check endpoint."""
         # Mock healthy service
+        # L'attribut est llm (GeminiService), plus ollama : la doublure posee
+        # sur un nom disparu laissait un AsyncMock nu sur llm, dont .get()
+        # renvoyait une coroutine placee telle quelle dans la reponse
+        # ("Unable to serialize unknown type: <class 'coroutine'>").
         mock_service = AsyncMock()
-        mock_service.ollama = AsyncMock()
-        mock_service.ollama.health_check = AsyncMock(return_value={
+        mock_service.llm = AsyncMock()
+        mock_service.llm.health_check = AsyncMock(return_value={
             "status": "healthy",
-            "model": "mistral:7b",
+            "model": "gemini-2.0-flash",
             "available": True
         })
         mock_service.db = AsyncMock()
@@ -253,6 +257,7 @@ class TestHealthEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert "status" in data
-        assert "ollama" in data
+        assert "llm" in data
+        assert data["llm"] == "healthy"
         assert "database" in data
         assert "search_service" in data

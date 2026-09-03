@@ -265,15 +265,15 @@ class TestLanguageDetectorHealthCheck:
 
         models = health["models"]
 
-        # Vérifier présence des 3 modèles
-        assert "spacy_fr" in models
-        assert "spacy_en" in models
+        # fastText est le seul modele restant : spaCy a ete retire du service
+        # (les deux modeles spacy_fr / spacy_en n'etaient plus charges ni
+        # declares dans les dependances).
         assert "fasttext" in models
+        assert "spacy_fr" not in models
+        assert "spacy_en" not in models
 
-        # Si service healthy, tous modèles devraient être OK
+        # Si service healthy, le modele doit etre OK
         if health["status"] == "healthy":
-            assert "✅" in models["spacy_fr"]
-            assert "✅" in models["spacy_en"]
             assert "✅" in models["fasttext"]
 
 

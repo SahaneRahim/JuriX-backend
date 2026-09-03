@@ -248,8 +248,11 @@ class TestRead:
         law = await law_service.get_law(created_law.id, include_category=True)
 
         # Assert
+        # Le nom vient du jeu de categories seme par conftest ; le figer en dur
+        # ("Droit civil" contre "Droit Civil") ne testait que la casse du seed.
         assert law.category is not None
-        assert law.category.name == "Droit civil"
+        assert law.category.id == sample_law_data_french.category_id
+        assert law.category.name == sample_categories[0].name
 
     async def test_get_law_not_found(self, law_service):
         """Test that fetching non-existent law raises error."""
@@ -749,13 +752,20 @@ class TestCategories:
         assert category.name == "Nouvelle catégorie"
         assert category.description == "Description de test"
 
-    async def test_list_categories(self, law_service, sample_categories):
+    async def test_list_categories(self, law_service, db_session):
         """Test listing all categories with law counts."""
+        # Le nombre attendu est lu en base : conftest seme les 12 categories de
+        # reference, et un total en dur (3) cassait des que le seed evoluait.
+        from sqlalchemy import func, select
+
+        expected = await db_session.scalar(select(func.count()).select_from(Category))
+
         # Act
         categories = await law_service.list_categories()
 
         # Assert
-        assert len(categories) == 3
+        assert expected > 0
+        assert len(categories) == expected
         assert all(hasattr(cat, "law_count") for cat in categories)
 
 

@@ -567,10 +567,19 @@ def _split_by_pattern_with_sections(text: str, pattern: re.Pattern) -> List[Tupl
     """
     articles = []
     
-    # Compile section patterns
+    # Compile section patterns.
+    # SANS re.IGNORECASE : le mot-cle doit etre en capitales, comme dans les
+    # textes du corpus ("CHAPITRE I - DISPOSITIONS GENERALES"). Avec
+    # IGNORECASE, un titre d'article commencant par "Titre 1" ou "Chapitre 2"
+    # etait pris pour un en-tete de section — et plus bas, tout le contenu qui
+    # suit un en-tete trouve DANS un article est coupe. Un article dont le
+    # titre ressemblait a une section perdait donc la totalite de son texte,
+    # silencieusement. Le compromis est asymetrique : rater un en-tete en
+    # minuscules ne coute qu'une metadonnee de section, le confondre avec un
+    # titre coute l'article entier.
     section_pattern = re.compile(
         '|'.join(f'({p})' for p in SECTION_PATTERNS),
-        re.IGNORECASE | re.MULTILINE
+        re.MULTILINE
     )
     
     # Find all article matches
