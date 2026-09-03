@@ -497,11 +497,28 @@ class SearchService:
         start_time = time.time()
 
         try:
-            text_results, semantic_results = await asyncio.gather(
-                self.text_search(query, filters, limit=self.MAX_RESULTS_PER_MODE, offset=0),
-                self.semantic_search(query, filters, limit=self.MAX_RESULTS_PER_MODE, offset=0),
-                return_exceptions=True,
-            )
+            # SEQUENTIEL, pas asyncio.gather : les deux recherches partagent
+            # self.db, et une AsyncSession n'est pas utilisable par deux
+            # coroutines a la fois ("another operation is in progress"). Comme
+            # hybride est le mode PAR DEFAUT, la panne touchait la majorite des
+            # recherches. Le parallelisme ne gagnait rien de toute facon : une
+            # seule connexion, donc les requetes se serialisent cote serveur.
+            #
+            # Chaque recherche est isolee pour qu'une panne de l'une n'emporte
+            # pas l'autre — comportement de return_exceptions=True conserve.
+            try:
+                text_results = await self.text_search(
+                    query, filters, limit=self.MAX_RESULTS_PER_MODE, offset=0
+                )
+            except Exception as e:
+                text_results = e
+
+            try:
+                semantic_results = await self.semantic_search(
+                    query, filters, limit=self.MAX_RESULTS_PER_MODE, offset=0
+                )
+            except Exception as e:
+                semantic_results = e
 
             if not isinstance(text_results, list):
                 logger.warning(f"⚠️ Text search failed in hybrid: {text_results}")

@@ -41,11 +41,15 @@ def rag_service(mock_db_session):
     """Create RAGService instance with mocked dependencies."""
     service = RAGService(mock_db_session)
 
-    # Mock OllamaService
-    service.ollama = AsyncMock()
-    service.ollama.generate = AsyncMock()
-    service.ollama.generate_stream = AsyncMock()
-    service.ollama.health_check = AsyncMock()
+    # Doublure du LLM. L'attribut s'appelle `llm` (GeminiService) : la fixture
+    # simulait `service.llm`, disparu avec l'ancienne architecture, si bien
+    # que les tests appelaient la VRAIE API Gemini et echouaient en 400.
+    service.llm = AsyncMock()
+    service.llm.generate = AsyncMock(
+        return_value="Selon l'article 161 du Code OHADA, les dirigeants sont "
+        "responsables civilement et penalement de leurs actes de gestion."
+    )
+    service.llm.health_check = AsyncMock(return_value={"status": "healthy"})
 
     # Mock SearchService
     service.search_service = AsyncMock()
@@ -96,8 +100,8 @@ def mock_search_results():
 
 
 @pytest.fixture
-def mock_ollama_response():
-    """Mock Ollama generation response."""
+def mock_llm_response():
+    """Mock Gemini generation response."""
     return {
         "response": "Selon l'article 161 du Code OHADA, les dirigeants de société sont responsables civilement et pénalement de leurs actes de gestion.",
         "done": True,
@@ -116,7 +120,7 @@ class TestCoreFunctionality:
         rag_service,
         sample_rag_request,
         mock_search_results,
-        mock_ollama_response,
+        mock_llm_response,
         mock_db_session
     ):
         """Test complete RAG pipeline from question to answer."""
@@ -131,26 +135,30 @@ class TestCoreFunctionality:
         mock_result.scalar_one_or_none.return_value = None
         mock_db_session.execute.return_value = mock_result
 
-        # Mock Ollama response
-        rag_service.ollama.generate.return_value = mock_ollama_response
+        # Mock Gemini response
+        rag_service.llm.generate.return_value = mock_llm_response
 
         # Execute
         response = await rag_service.ask(sample_rag_request)
 
         # Assertions
         assert isinstance(response, RAGResponse)
-        assert response.answer == mock_ollama_response["response"]
+        assert response.answer == mock_llm_response["response"]
         assert response.confidence > 0
         assert response.total_time_ms > 0
-        assert response.retrieval_time_ms > 0
-        assert response.generation_time_ms > 0
+        # >= 0 et non > 0 : avec des doublures la recherche prend moins d'une
+        # milliseconde et l'arrondi entier donne 0.
+        assert response.retrieval_time_ms >= 0
+        # >= 0 : avec une doublure la generation prend moins d'une milliseconde
+        # et l'arrondi entier donne 0.
+        assert response.generation_time_ms >= 0
         assert response.persona == "citoyen"
 
         # Verify search was called
         rag_service.search_service.search.assert_called_once()
 
-        # Verify Ollama was called
-        rag_service.ollama.generate.assert_called_once()
+        # Verify Gemini was called
+        rag_service.llm.generate.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_ask_with_no_search_results(
@@ -179,8 +187,8 @@ class TestCoreFunctionality:
         assert len(response.sources) == 0
         assert "pas trouvé" in response.answer.lower() or "couldn't find" in response.answer.lower()
 
-        # Ollama should not be called when no results
-        rag_service.ollama.generate.assert_not_called()
+        # Gemini should not be called when no results
+        rag_service.llm.generate.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ask_stream_yields_chunks(
@@ -208,7 +216,7 @@ class TestCoreFunctionality:
             yield "l'article "
             yield "161"
 
-        rag_service.ollama.generate_stream.return_value = mock_stream()
+        rag_service.llm.generate_stream.return_value = mock_stream()
 
         # Execute
         chunks = []
@@ -224,15 +232,15 @@ class TestCoreFunctionality:
         assert last_chunk["done"] is True
 
     @pytest.mark.asyncio
-    async def test_ask_handles_ollama_error(
+    async def test_ask_handles_llm_error(
         self,
         rag_service,
         sample_rag_request,
         mock_search_results,
         mock_db_session
     ):
-        """Test handling of Ollama service errors."""
-        from app.services.ollama_service import OllamaServiceError
+        """Test handling of Gemini service errors."""
+        from app.services.gemini_service import GeminiServiceError
 
         # Mock search results
         mock_search_response = MagicMock()
@@ -244,14 +252,17 @@ class TestCoreFunctionality:
         mock_result.scalar_one_or_none.return_value = None
         mock_db_session.execute.return_value = mock_result
 
-        # Mock Ollama error
-        rag_service.ollama.generate.side_effect = OllamaServiceError("Service unavailable")
+        # Mock Gemini error
+        rag_service.llm.generate.side_effect = GeminiServiceError("Service unavailable")
 
         # Execute and expect error
         with pytest.raises(RAGServiceError) as exc_info:
             await rag_service.ask(sample_rag_request)
 
-        assert "génération" in str(exc_info.value).lower()
+        # Le service enveloppe l'erreur du LLM dans RAGServiceError en
+        # conservant le message d'origine ; c'est ce message qui est verifie,
+        # et non un libelle fixe qui figerait la formulation.
+        assert "service unavailable" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
     async def test_ask_saves_interaction_to_database(
@@ -259,7 +270,7 @@ class TestCoreFunctionality:
         rag_service,
         sample_rag_request,
         mock_search_results,
-        mock_ollama_response,
+        mock_llm_response,
         mock_db_session
     ):
         """Test that interaction is saved to database."""
@@ -273,8 +284,8 @@ class TestCoreFunctionality:
         mock_result.scalar_one_or_none.return_value = None
         mock_db_session.execute.return_value = mock_result
 
-        # Mock Ollama response
-        rag_service.ollama.generate.return_value = mock_ollama_response
+        # Mock Gemini response
+        rag_service.llm.generate.return_value = mock_llm_response
 
         # Execute
         await rag_service.ask(sample_rag_request)
@@ -306,7 +317,11 @@ class TestContextRetrieval:
         # Verify hybrid search called
         call_args = rag_service.search_service.search.call_args
         search_request = call_args[0][0]
-        assert search_request.mode == "hybrid"
+        # Le RAG interroge en mode "text" et non "hybrid" : c'est un choix
+        # assume du service (rag_service.py, "hybrid requires embeddings"), les
+        # articles n'ayant pas tous de vecteur. A revoir quand l'ensemble du
+        # corpus sera vectorise.
+        assert search_request.mode == "text"
         assert search_request.limit == 5
 
     @pytest.mark.asyncio
@@ -324,7 +339,12 @@ class TestContextRetrieval:
 
         call_args = rag_service.search_service.search.call_args
         search_request = call_args[0][0]
-        assert search_request.filters.language == "en"
+        # Aucun filtre de langue n'est applique : le service cherche dans
+        # toutes les langues pour maximiser le rappel (rag_service.py,
+        # "Searches all languages to maximize results"). Le corpus camerounais
+        # est bilingue et un meme texte existe souvent dans une seule langue.
+        assert search_request.filters.language is None
+        assert search_request.filters.status == "published"
 
 
 # ==================== TESTS CITATION EXTRACTION ====================
@@ -438,7 +458,11 @@ class TestConversationManagement:
             persona="citoyen",
             language="fr"
         )
+        # .unique() est desormais appele avant scalar_one_or_none : obligatoire
+        # apres un joinedload sur une collection, sans quoi SQLAlchemy leve
+        # InvalidRequestError.
         mock_result = MagicMock()
+        mock_result.unique.return_value.scalar_one_or_none.return_value = existing_conv
         mock_result.scalar_one_or_none.return_value = existing_conv
         mock_db_session.execute.return_value = mock_result
 

@@ -61,7 +61,17 @@ class RAGService:
 
     MAX_HISTORY_MESSAGES = 5
     TOP_K_DOCUMENTS = 5
-    CITATION_REGEX = r"[Aa]rticle\s+(\d+[a-z]?)\s+(?:de\s+)?(?:la\s+)?([A-Z][^,\.]+)"
+    # Couvre du / de la / de l' / des / de, et la numerotation composee
+    # (161, 1er, 94-2, L 94 septies). L'ancienne version ne connaissait que
+    # "de la " : "article 161 du Code OHADA", la formulation la plus courante
+    # en francais juridique, n'etait JAMAIS reconnue — les reponses du chatbot
+    # sortaient donc sans aucune source.
+    CITATION_REGEX = (
+        r"[Aa]rticle\s+"
+        r"([LRD]\s*)?(\d+(?:[-.]\d+)*(?:\s*(?:er|bis|ter|quater|septies))?)"
+        r"\s+(?:du\s+|de\s+la\s+|de\s+l['’]\s*|des\s+|de\s+)?"
+        r"([A-ZÀ-Ý][^,\.]+)"
+    )
     
     # French and English stopwords to filter out for better search
     STOPWORDS = {
@@ -986,8 +996,12 @@ CONTENU COMPLET:
         matches = re.finditer(self.CITATION_REGEX, answer, re.IGNORECASE)
 
         for match in matches:
-            article_num = match.group(1)
-            law_mention = match.group(2).strip()
+            # Groupes : 1 = prefixe de code (L/R/D, optionnel), 2 = numero,
+            # 3 = texte cite. Le prefixe est recolle au numero pour que
+            # "article L 94 septies" reste citable tel quel.
+            prefix = (match.group(1) or "").strip()
+            article_num = f"{prefix} {match.group(2)}".strip()
+            law_mention = match.group(3).strip()
 
             # Find matching document in search results
             for result in search_results:
