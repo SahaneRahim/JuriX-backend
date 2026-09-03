@@ -71,22 +71,18 @@ def service(_stub_gemini):
     # Portee fonction et dependance explicite a la doublure : en portee module,
     # le service etait construit AVANT que le patch de genai.Client ne s'applique,
     # et gardait donc un vrai client.
-    """
-    Shared service instance for all tests (module-scoped).
-
-    Évite de recharger le modèle sentence-transformers (~120MB)
-    pour chaque test, ce qui accélère significativement l'exécution.
-    """
+    """Service partage par les tests, cache desactive pour rester deterministe."""
     return EmbeddingService(use_cache=False)  # Cache désactivé pour tests déterministes
 
 
 @pytest.fixture
 def service_with_cache(_stub_gemini):
-    """Service instance avec cache Redis activé."""
+    """Service avec cache active. Le cache est une table PostgreSQL
+    (embedding_cache), plus Redis."""
     try:
         return EmbeddingService(use_cache=True)
-    except Exception:
-        pytest.skip("Redis non disponible pour tests cache")
+    except Exception as exc:
+        pytest.skip(f"Cache PostgreSQL indisponible: {exc}")
 
 
 @pytest.fixture
@@ -151,7 +147,7 @@ class TestBasicFunctionality:
 # ==================== TESTS CACHING ====================
 
 class TestCaching:
-    """Tests du système de cache Redis."""
+    """Tests du cache d'embeddings (table PostgreSQL embedding_cache)."""
 
     def test_cache_hit(self, service_with_cache, sample_french_text):
         """Test que le deuxième appel utilise le cache."""
@@ -365,9 +361,9 @@ class TestHealthCheck:
         assert health["provider"] == "Gemini API"
         assert isinstance(health["cache_enabled"], bool)
 
-    def test_health_check_with_redis_down(self, service):
-        """Test graceful degradation si Redis indisponible."""
-        # Service créé sans cache (Redis potentiellement indisponible)
+    def test_health_check_without_cache(self, service):
+        """Test degradation propre quand le cache est indisponible."""
+        # Service cree sans cache
         health = service.health_check()
 
         # Le service devrait rester "healthy" même sans cache

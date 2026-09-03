@@ -2,7 +2,7 @@
 Comprehensive test suite for SearchService.
 
 Tests cover:
-- Text search (Meilisearch)
+- Text search (PostgreSQL FTS)
 - Semantic search (pgvector)
 - Hybrid search (RRF fusion)
 - Indexing operations (create, update, delete, reindex)
@@ -193,11 +193,11 @@ async def sample_data(db_session):
 
 
 # ============================================================================
-# Test Text Search (Meilisearch)
+# Test Text Search (PostgreSQL FTS)
 # ============================================================================
 
 class TestTextSearch:
-    """Test text search functionality with Meilisearch."""
+    """Test text search functionality (PostgreSQL FTS)."""
 
     @pytest.mark.asyncio
     async def test_text_search_basic(self, search_service, sample_data):
@@ -239,7 +239,7 @@ class TestTextSearch:
     @pytest.mark.asyncio
     async def test_text_search_typo_tolerance(self, search_service):
         """Test that typos are handled gracefully."""
-        # Meilisearch mock already configured with results
+        # Resultats semes en base par les fixtures
         results = await search_service.text_search(
             query="civi",  # Typo: civil
             filters=None,
@@ -248,7 +248,7 @@ class TestTextSearch:
         )
 
         assert isinstance(results, list)
-        # Meilisearch should still return results with typo tolerance
+        # La recherche plein texte tolere la faute de frappe
 
     @pytest.mark.asyncio
     async def test_text_search_multilingual(self, search_service, sample_data):
@@ -523,7 +523,7 @@ class TestHybridSearch:
 # ============================================================================
 
 class TestIndexing:
-    """Test Meilisearch indexing operations."""
+    """Test des operations d'indexation (search_vector PostgreSQL)."""
 
     @pytest.mark.asyncio
     async def test_index_law(self, search_service, sample_data):

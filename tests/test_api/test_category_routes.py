@@ -353,15 +353,13 @@ class TestHealthCheckAPI:
         """Test health check endpoint."""
         response = await client.get("/api/v1/categories/health")
 
-        # Accept 200 or 422 (Pydantic validation may affect response model)
-        assert response.status_code in [200, 422]
+        # 200 strictement : "200 ou 422" laissait passer une reponse que le
+        # schema refuse de serialiser, c'est-a-dire l'endpoint casse.
+        assert response.status_code == 200
 
-        if response.status_code == 200:
-            data = response.json()
-            assert "status" in data
-            assert "service" in data
-            assert data["status"] == "healthy"
-            assert data["service"] == "CategoryService"
+        data = response.json()
+        assert data["status"] == "healthy"
+        assert data["service"] == "CategoryService"
 
 
 class TestErrorHandling:
@@ -379,8 +377,10 @@ class TestErrorHandling:
         """Test negative pagination parameters."""
         response = await client.get("/api/v1/categories?skip=-1&limit=-1")
 
-        # Should either reject or treat as 0
-        assert response.status_code in [200, 422]
+        # 422 : les bornes sont declarees (ge=0) sur les parametres de route,
+        # la pagination negative est donc rejetee, pas silencieusement ramenee
+        # a zero.
+        assert response.status_code == 422
 
     @pytest.mark.asyncio
     async def test_create_category_with_extra_fields(self, admin_client: AsyncClient):
