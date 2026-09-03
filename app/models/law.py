@@ -37,16 +37,12 @@ from pgvector.sqlalchemy import Vector
 from app.core.database import Base
 
 
-# Type adapter for suggested_categories - uses ARRAY for PostgreSQL, JSON for others
-def get_array_type():
-    """Get appropriate array type based on database dialect."""
-    import os
-    db_url = os.getenv("DATABASE_URL", "")
-    if "postgresql" in db_url or "asyncpg" in db_url:
-        return ARRAY(Integer)
-    else:
-        # Use JSON for SQLite and other databases
-        return JSON
+# NOTE: un adaptateur get_array_type() existait ici pour choisir ARRAY sous
+# PostgreSQL et JSON ailleurs. Il n'a jamais ete appele — la colonne etait
+# declaree en JSON en dur alors que la migration 001 la cree en integer[],
+# donc toute ecriture de suggested_categories echouait en DatatypeMismatchError
+# ("column is of type integer[] but expression is of type json").
+# Le projet ne cible que PostgreSQL : le type est desormais declare directement.
 
 
 class Category(Base):
@@ -143,7 +139,7 @@ class Law(Base):
     language = Column(String(2), nullable=True, index=True)  # fr, en
     language_confidence = Column(Float, nullable=True)
     detected_language = Column(String(2), nullable=True)
-    suggested_categories = Column(JSON, nullable=True)  # List[int] stored as JSON for compatibility
+    suggested_categories = Column(ARRAY(Integer), nullable=True)  # ids des categories suggerees
     category_confidence = Column(Float, nullable=True)
 
     # File tracking

@@ -224,7 +224,10 @@ class EmbeddingService:
         Returns:
             Liste d'embeddings numpy array (ordre préservé)
         """
-        assert texts, "La liste de textes ne peut pas être vide"
+        # ValueError et non assert : les assertions sautent sous python -O,
+        # la validation disparaitrait alors silencieusement en production.
+        if not texts:
+            raise ValueError("La liste de textes ne peut pas être vide")
         start_time = time.time()
 
         for idx, text in enumerate(texts):
