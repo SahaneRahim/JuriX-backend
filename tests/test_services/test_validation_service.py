@@ -59,8 +59,13 @@ class TestSQLInjectionPrevention:
         sanitized = validation_service.sanitize_sql_input(dangerous)
         
         assert "DROP" not in sanitized
-        assert "TABLE" not in sanitized
         assert "--" not in sanitized
+        assert ";" not in sanitized
+        # "TABLE" n'est PAS retire, et ne doit pas l'etre : SQL_DANGEROUS_KEYWORDS
+        # sert aussi a validate_sql_input, qui rejette toute entree contenant un
+        # mot de la liste. Y ajouter TABLE ferait rejeter "table des matieres" —
+        # et UNION y figure deja, ce qui rejette "union europeenne". Isole du
+        # verbe, le mot ne porte aucune charge.
 
 
 # ==================== XSS PREVENTION TESTS ====================

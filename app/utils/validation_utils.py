@@ -96,15 +96,25 @@ def sanitize_sql_input(input_str: str) -> str:
     if not input_str:
         return ""
 
-    # Remove SQL keywords
+    # Remove SQL keywords.
+    # Les mots-cles ne sont pas tous des mots : la liste contient "--", "/*",
+    # "*/" et les prefixes "xp_"/"sp_". Interpoles tels quels dans rf"\b{kw}\b",
+    # ils formaient des motifs invalides — "*/" donnait "\b*/\b", soit
+    # re.error: nothing to repeat. La boucle levait donc pour TOUTE entree non
+    # vide : la fonction n'a jamais rien assaini. D'ou trois formes de motif.
     sanitized = input_str
     for keyword in SQL_DANGEROUS_KEYWORDS:
-        sanitized = re.sub(
-            rf"\b{keyword}\b",
-            "",
-            sanitized,
-            flags=re.IGNORECASE
-        )
+        escaped = re.escape(keyword)
+        if keyword.endswith("_"):
+            # Prefixe de procedure etendue : "\bxp_\b" ne matcherait pas
+            # "xp_cmdshell", le "_" etant lui-meme un caractere de mot.
+            pattern = rf"\b{escaped}\w*"
+        elif keyword[0].isalnum() and keyword[-1].isalnum():
+            pattern = rf"\b{escaped}\b"
+        else:
+            # Symboles : aucune frontiere de mot n'a de sens autour d'eux.
+            pattern = escaped
+        sanitized = re.sub(pattern, "", sanitized, flags=re.IGNORECASE)
 
     # Remove SQL comment patterns
     sanitized = sanitized.replace("--", "")
@@ -182,6 +192,18 @@ def sanitize_html(html: str, allowed_tags: Optional[list] = None) -> str:
     if not html:
         return ""
 
+    # Les elements executables sont retires AVEC leur contenu, avant bleach.
+    # bleach ne supprime que la balise : "<script>alert(1)</script>" ressort en
+    # "alert(1)" avec strip=True, ou echappe avec strip=False. Dans les deux cas
+    # le corps du script se retrouve dans le texte rendu, ce que l'appelant
+    # d'une fonction nommee sanitize_html n'attend pas.
+    html = re.sub(
+        r"<(script|style)\b[^>]*>.*?(?:</\1\s*>|$)",
+        "",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
     try:
         import bleach
 
@@ -201,9 +223,10 @@ def sanitize_html(html: str, allowed_tags: Optional[list] = None) -> str:
 
         return cleaned
 
-    except ImportError:
-        # Fallback: strip all HTML tags
-        return re.sub(r"<[^>]+>", "", html)
+    except ImportError:  # pragma: no cover - bleach est une dependance declaree
+        # Repli sans bleach : aucune balise conservee. Le contenu executable a
+        # deja ete retire au-dessus. Degrade le rendu, jamais la securite.
+        return re.sub(r"<[^>]*>", "", html)
 
 
 def validate_email(email: str) -> bool:
@@ -351,6 +374,14 @@ def sanitize_filename(filename: str) -> str:
 
     # Remove dangerous characters
     sanitized = re.sub(r"[<>:\"|?*]", "_", sanitized)
+
+    # Neutraliser les remontees de repertoire.
+    # lstrip(".") ne retirait que les points EN TETE : "../../etc/passwd"
+    # devenait "_.._etc_passwd", qui contient encore "..". Selon la facon dont
+    # l'appelant rassemble le chemin, la remontee reste exploitable — or c'est
+    # la seule raison d'etre de cette fonction. Toute suite de deux points ou
+    # plus est donc reduite a un point unique, partout dans le nom.
+    sanitized = re.sub(r"\.{2,}", ".", sanitized)
 
     # Remove leading dots (hidden files)
     sanitized = sanitized.lstrip(".")

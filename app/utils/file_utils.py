@@ -319,14 +319,21 @@ def is_file_size_valid(file_path: Path, max_size_mb: int = 50) -> Tuple[bool, Op
         True
     """
     try:
-        size_mb = get_file_size_mb(file_path)
-        
-        if size_mb > max_size_mb:
+        # Les DEUX comparaisons portent sur les octets, jamais sur les Mo.
+        # get_file_size_mb arrondit a deux decimales : tout fichier de moins de
+        # ~5 Ko donnait 0.0 et etait rejete comme "File is empty (0 bytes)",
+        # message faux qui refusait des PDF et DOCX parfaitement valides — un
+        # decret d'une page pese souvent moins que ca. Symetriquement, un
+        # fichier de 50,004 Mo s'arrondissait a 50.0 et passait sous la limite.
+        size_bytes = file_path.stat().st_size
+        size_mb = round(size_bytes / (1024 * 1024), 2)
+
+        if size_bytes > max_size_mb * 1024 * 1024:
             return False, f"File size {size_mb} MB exceeds maximum {max_size_mb} MB"
-        
-        if size_mb == 0:
+
+        if size_bytes == 0:
             return False, "File is empty (0 bytes)"
-        
+
         return True, None
 
     except Exception as e:

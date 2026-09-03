@@ -49,4 +49,8 @@ google-genai>=1.0.0,<2.0.0
 
 # ── Utils ─────────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0,<2.0.0
+# Assainissement HTML (app/utils/validation_utils.sanitize_html). Absent, le
+# repli ne conserve aucune balise : sur du contenu formate la fonction devient
+# inutilisable, sans cesser d'etre sure.
+bleach>=6.0,<7.0
 httpx>=0.25.2,<1.0.0
