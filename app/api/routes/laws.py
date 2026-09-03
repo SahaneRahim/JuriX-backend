@@ -45,6 +45,9 @@ class LawIngestRequest(BaseModel):
 
 logger = logging.getLogger(__name__)
 
+# Références fortes vers les tâches de fond (cf. create_task plus bas).
+_background_tasks: set = set()
+
 router = APIRouter(tags=["Laws"])
 
 
@@ -567,7 +570,13 @@ async def ingest_law(
             title=request.title or "Document en cours de traitement",
             type="autre",  # Changed from "unknown" to valid type
             content="Document en cours de traitement par le système.",  # Min 10 chars required
-            status="published",  # Published so it appears in public list
+            # "processing" et non "published" : le document n'a pas encore ete
+            # extrait. Le publier d'emblee le rendait visible dans le corpus
+            # public avec son contenu de remplacement ("Document en cours de
+            # traitement par le systeme."), et un echec d'OCR l'y laissait
+            # indefiniment. Le pipeline le passe a "published" en cas de succes,
+            # a "refused" en cas d'echec.
+            status="processing",
             category_id=request.category_id,  # Category selected by admin
             file_id=request.file_id,
             original_filename=request.original_filename,
@@ -595,7 +604,13 @@ async def ingest_law(
                 logger.error(f"❌ Background processing failed: {bg_err}", exc_info=True)
 
         import asyncio as _asyncio
-        _asyncio.create_task(_process_and_invalidate())
+
+        # Reference forte conservee : asyncio ne garde qu'une reference FAIBLE
+        # sur les taches, une tache non referencee peut etre collectee en plein
+        # traitement et le document rester bloque en "processing".
+        _task = _asyncio.create_task(_process_and_invalidate())
+        _background_tasks.add(_task)
+        _task.add_done_callback(_background_tasks.discard)
         logger.info(f"🚀 Background task started for Law ID={new_law.id}")
 
         return new_law

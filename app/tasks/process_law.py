@@ -82,7 +82,13 @@ async def process_law_async(law_id: int, file_id: str = None) -> Dict[str, Any]:
         # Mark law as failed in DB
         async with AsyncSessionLocal() as db:
             await db.execute(
-                text("UPDATE laws SET status='draft', processing_error=:err WHERE id=:id"),
+                # 'refused' et non 'draft' : draft signifie "en cours de
+                # redaction", pas "le traitement a echoue". L'admin doit pouvoir
+                # filtrer les echecs et les relancer.
+                text(
+                    "UPDATE laws SET status='refused', processing_error=:err, "
+                    "processing_progress=0 WHERE id=:id"
+                ),
                 {"err": str(e), "id": law_id},
             )
             await db.commit()
@@ -258,54 +264,62 @@ def _ingest_file_content(law_id: int, law, file_id: str):
         extracted_text, docx_errors = _extract_docx_text(file_path)
         errors.extend(docx_errors)
 
-    if extracted_text and len(extracted_text) > 50:
-        _update_law_content(law_id, extracted_text)
-        law.content = extracted_text
-        logger.info(f"✅ Extracted {len(extracted_text)} chars from file")
-    else:
-        logger.warning("⚠️ No text extracted or text too short")
+    if not extracted_text or len(extracted_text) <= 50:
+        # Auparavant : un simple warning, puis le pipeline continuait et le
+        # document finissait publie avec son contenu de remplacement.
+        raise ValueError(
+            f"Extraction insuffisante pour {file_path.name} : "
+            f"{len(extracted_text or '')} caracteres (minimum 50). "
+            "Document non publie."
+        )
 
+    _update_law_content(law_id, extracted_text)
+    law.content = extracted_text
+    logger.info(f"✅ {len(extracted_text)} caracteres extraits")
     return law, errors
 
 
 def _extract_pdf_text(file_path) -> tuple:
-    """Extrait le texte d'un PDF via LlamaParse → OCR → pypdf."""
+    """
+    Extrait le texte d'un PDF via LlamaParse. Aucun repli degrade.
+
+    Le repli precedent — LlamaParse -> Tesseract -> pypdf — etait dangereux :
+    pypdf renvoie la couche texte deja presente dans les PDF prc.cm, mesuree a
+    ~20% de rappel (filigrane injecte au milieu des phrases, cachets lus comme
+    du charabia, 21% des documents sans aucun texte exploitable). Le document
+    etait alors publie avec ce contenu et marque "completed", sans aucun signal.
+
+    Desormais : LlamaParse fait ses 4 tentatives avec backoff exponentiel ; s'il
+    echoue, on leve. L'appelant marque le document "refused" avec l'erreur, et
+    il reste retraitable. Rien de degrade n'entre dans l'index.
+
+    Returns:
+        (texte, []) — la liste d'erreurs est conservee pour compatibilite d'appel
+
+    Raises:
+        LlamaParseError: extraction impossible
+    """
     import asyncio
-    from app.core.config import settings
 
-    try:
-        from app.services.llama_parse_service import LlamaParseService, LlamaParseError
-        logger.info(f"📄 Processing PDF with LlamaParse: {file_path.name}")
-        llama_service = LlamaParseService()
-        if llama_service.is_available():
-            text = asyncio.run(llama_service.extract_text(file_path))
-            logger.info(f"✅ LlamaParse Complete: {len(text)} chars")
-            return text, []
-        raise LlamaParseError("LlamaParse not configured")
-    except Exception as e:
-        logger.warning(f"LlamaParse failed ({e}), trying OCR fallback...")
-        return _extract_pdf_ocr_fallback(file_path, settings)
+    from app.services.llama_parse_service import (
+        LlamaParseError,
+        get_llama_parse_service,
+    )
 
+    # get_llama_parse_service() et non LlamaParseService() : le singleton
+    # lru_cache existait mais etait contourne par une construction directe,
+    # ce qui recreait le client et perdait le cache a chaque document.
+    service = get_llama_parse_service()
+    if not service.is_available():
+        raise LlamaParseError(
+            "LLAMA_CLOUD_API_KEY absente : extraction impossible. "
+            "Aucun repli degrade n'est utilise."
+        )
 
-def _extract_pdf_ocr_fallback(file_path, settings) -> tuple:
-    """OCR puis pypdf fallback pour extraction PDF."""
-    import asyncio
-    try:
-        from app.services.ocr_service import OCRService
-        ocr_service = OCRService(tesseract_path=settings.TESSERACT_PATH)
-        ocr_result = asyncio.run(ocr_service.process_pdf(file_path))
-        logger.info(f"✅ OCR Fallback: {len(ocr_result.text)} chars")
-        return ocr_result.text, []
-    except Exception as ocr_e:
-        logger.error(f"OCR failed ({ocr_e}), reverting to pypdf fallback...")
-        from pypdf import PdfReader
-        reader = PdfReader(file_path)
-        pages_text = []
-        for page_num, page in enumerate(reader.pages, start=1):
-            pages_text.append(f"<<PAGE:{page_num}>>\n{page.extract_text()}")
-        text = _clean_extracted_text("\n".join(pages_text))
-        logger.info(f"✅ pypdf Fallback: {len(text)} chars from {len(reader.pages)} pages")
-        return text, []
+    logger.info(f"📄 Extraction LlamaParse : {file_path.name}")
+    text = asyncio.run(service.extract_text(file_path))
+    logger.info(f"✅ LlamaParse : {len(text)} caracteres")
+    return text, []
 
 
 def _extract_docx_text(file_path) -> tuple:

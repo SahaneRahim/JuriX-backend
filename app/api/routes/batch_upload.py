@@ -17,12 +17,18 @@ import uuid
 import logging
 from datetime import datetime, timezone
 
-from app.core.database import get_db
+from app.core.database import AsyncSessionLocal, get_db
 from app.models.law import Law
 from app.tasks.process_law import process_law_async
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Références fortes vers les tâches de fond. asyncio ne conserve qu'une référence
+# FAIBLE sur les tâches créées par create_task : sans ce registre, une tâche peut
+# être collectée en plein traitement et le document rester bloqué en "processing",
+# l'exception n'apparaissant qu'au ramasse-miettes.
+_background_tasks: set[asyncio.Task] = set()
 
 router = APIRouter(tags=["batch-upload"])
 
@@ -137,29 +143,35 @@ async def batch_upload(
             content = await file.read()
             
             # Create law entry with PENDING status
+            from app.services.file_upload_service import get_upload_service
+
+            upload_service = get_upload_service()
+            file_id = str(uuid.uuid4())
+            file_path = upload_service.storage_path / f"{file_id}.pdf"
+
+            with open(file_path, "wb") as f:
+                f.write(content)
+
             law = Law(
                 reference=f"PENDING-{uuid.uuid4().hex[:8]}",
                 title=f"PENDING-{uuid.uuid4().hex[:8]}",
                 type="loi",
-                content="",  # Will be filled by processing
+                # content non vide : le schema LawResponse impose min_length=10,
+                # et une seule ligne a contenu vide faisait echouer GET /laws
+                # entier avec une ResponseValidationError 500.
+                content="Document en attente de traitement.",
                 status="pending",
+                # file_id etait genere mais JAMAIS persiste : sans lui,
+                # /laws/{id}/download, /pdf-data, /pdf-info et /page/{n}
+                # renvoyaient 404 pour tout document issu d'un lot.
+                file_id=file_id,
+                original_filename=file.filename,
                 processing_progress=0,
                 processing_started_at=None
             )
-            
+
             db.add(law)
             await db.flush()  # Get ID
-            
-            # Save file temporarily
-            from pathlib import Path
-            from app.services.file_upload_service import get_upload_service
-            
-            upload_service = get_upload_service()
-            file_id = str(uuid.uuid4())
-            file_path = upload_service.storage_path / f"{file_id}.pdf"
-            
-            with open(file_path, "wb") as f:
-                f.write(content)
             
             created_laws.append({
                 "id": law.id,
@@ -184,9 +196,17 @@ async def batch_upload(
             })
     
     await db.commit()
-    
-    # Start background processing for all files
-    asyncio.create_task(process_batch(created_laws, session_id, db))
+
+    # La session `db` vient de Depends(get_db) : elle est fermee des le retour
+    # du handler. La passer a une tache detachee garantissait un echec.
+    # process_batch ouvre desormais la sienne.
+    #
+    # La reference est conservee dans _background_tasks : asyncio ne garde qu'une
+    # reference faible sur les taches, une tache non referencee peut donc etre
+    # collectee en plein vol et le document rester bloque en "processing".
+    task = asyncio.create_task(process_batch(created_laws, session_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     
     return {
         "session_id": session_id,
@@ -195,75 +215,90 @@ async def batch_upload(
     }
 
 
-async def process_batch(laws: List[dict], session_id: str, db: AsyncSession):
+async def process_batch(laws: List[dict], session_id: str) -> None:
     """
-    Background task to process all uploaded files.
+    Traite en arriere-plan tous les fichiers d'un lot.
+
+    Ouvre sa PROPRE session par document, et ne recoit plus celle de la requete :
+    `Depends(get_db)` la ferme des le retour du handler, donc chaque acces
+    echouait. Une session par document plutot qu'une pour le lot entier : le
+    traitement dure plusieurs minutes par piece, et garder une connexion du pool
+    ouverte pendant toute la duree du lot le viderait; par ailleurs un document
+    en echec n'entraine pas les suivants.
     """
     for law_data in laws:
-        try:
-            law_id = law_data["id"]
-            file_id = law_data["file_id"]
-            
-            # Update status to PROCESSING
-            result = await db.execute(select(Law).where(Law.id == law_id))
-            law = result.scalar_one_or_none()
-            
-            if not law:
-                logger.error(f"❌ Law ID={law_id} not found for background processing")
-                continue
+        law_id = law_data.get("id")
+        filename = law_data.get("filename")
 
-            setattr(law, "status", "processing")
-            setattr(law, "processing_progress", 0)
-            setattr(law, "processing_started_at", datetime.now(timezone.utc))
-            await db.commit()
-            
-            # Send processing start
+        try:
+            async with AsyncSessionLocal() as db:
+                law = (
+                    await db.execute(select(Law).where(Law.id == law_id))
+                ).scalar_one_or_none()
+                if not law:
+                    logger.error(f"❌ Loi ID={law_id} introuvable pour le traitement")
+                    continue
+
+                law.status = "processing"
+                law.processing_progress = 0
+                law.processing_started_at = datetime.now(timezone.utc)
+                await db.commit()
+
             await manager.send_progress(session_id, {
                 "type": "processing_start",
                 "law_id": law_id,
-                "filename": law_data["filename"],
-                "status": "processing"
+                "filename": filename,
+                "status": "processing",
             })
-            
-            # Call processing pipeline (async, runs in event loop)
-            result = await process_law_async(law_id, file_id)
-            
-            # Update final status
-            if result.get("status") == "completed":
-                setattr(law, "status", "published")
-                setattr(law, "processing_progress", 100)
-            else:
-                setattr(law, "status", "refused")
-                setattr(law, "processing_error", str(result.get("errors", [])))
-            
-            await db.commit()
-            
-            # Send completion
+
+            result = await process_law_async(law_id, law_data["file_id"])
+            succeeded = result.get("status") == "completed"
+
+            # Session distincte : le pipeline a pu durer plusieurs minutes.
+            async with AsyncSessionLocal() as db:
+                law = (
+                    await db.execute(select(Law).where(Law.id == law_id))
+                ).scalar_one_or_none()
+                if law:
+                    if succeeded:
+                        law.status = "published"
+                        law.processing_progress = 100
+                        law.processing_error = None
+                    else:
+                        law.status = "refused"
+                        law.processing_error = str(result.get("errors", []))
+                    await db.commit()
+
             await manager.send_progress(session_id, {
                 "type": "processing_complete",
                 "law_id": law_id,
-                "filename": law_data["filename"],
-                "status": law.status,
-                "progress": 100
+                "filename": filename,
+                # etat calcule et non lu sur un objet detache
+                "status": "published" if succeeded else "refused",
+                "progress": 100,
             })
-            
+
         except Exception as e:
-            # Mark as refused if law exists
+            logger.error(f"❌ Echec du traitement de la loi {law_id}: {e}", exc_info=True)
             try:
-                result = await db.execute(select(Law).where(Law.id == law_data.get("id")))
-                law = result.scalar_one_or_none()
-                if law:
-                    setattr(law, "status", "refused")
-                    setattr(law, "processing_error", str(e))
-                    await db.commit()
-            except:
-                pass
-                
+                async with AsyncSessionLocal() as db:
+                    law = (
+                        await db.execute(select(Law).where(Law.id == law_id))
+                    ).scalar_one_or_none()
+                    if law:
+                        law.status = "refused"
+                        law.processing_error = str(e)
+                        await db.commit()
+            except Exception as inner:
+                # except nu auparavant : il avalait jusqu'aux KeyboardInterrupt
+                # et masquait totalement l'echec de session ci-dessus.
+                logger.error(f"❌ Impossible de marquer la loi {law_id} en echec: {inner}")
+
             await manager.send_progress(session_id, {
                 "type": "processing_error",
-                "law_id": law_data.get("id"),
-                "filename": law_data.get("filename"),
-                "error": str(e)
+                "law_id": law_id,
+                "filename": filename,
+                "error": str(e),
             })
 
 
