@@ -62,18 +62,17 @@ async def law_service(db_session):
 
 @pytest.fixture(scope="function")
 async def sample_categories(db_session):
-    """Create sample categories for testing."""
-    categories = [
-        Category(id=1, name="Droit civil", description="Code civil et lois connexes"),
-        Category(id=2, name="Droit pénal", description="Code pénal et procédure pénale"),
-        Category(id=3, name="Droit commercial", description="Commerce et affaires"),
-    ]
+    """
+    Categories d'exemple.
 
-    for cat in categories:
-        db_session.add(cat)
+    Ne les insere plus : la fixture db_session de conftest seme deja les 12
+    categories de reference avec les ids 1 a 12. Les reinserer avec des ids
+    explicites provoquait une violation d'unicite au setup de chaque test.
+    """
+    from sqlalchemy import select
 
-    await db_session.commit()
-    return categories
+    result = await db_session.execute(select(Category).order_by(Category.id).limit(3))
+    return list(result.scalars().all())
 
 
 @pytest.fixture

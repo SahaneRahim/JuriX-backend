@@ -47,15 +47,8 @@ from app.models.law import Article, Category, Law
 @pytest.fixture
 async def sample_laws(db_session):
     """Create sample data for testing."""
-    # Categories
-    categories = [
-        Category(id=1, name="Droit Civil", description="Droit civil"),
-        Category(id=2, name="Droit Pénal", description="Droit pénal"),
-    ]
-
-    for cat in categories:
-        db_session.add(cat)
-
+    # Categories : deja semees par la fixture db_session de conftest (ids 1-12).
+    # Les reinserer ici violait la contrainte d'unicite sur la cle primaire.
     await db_session.flush()
 
     # Laws

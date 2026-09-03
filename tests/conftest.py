@@ -162,15 +162,14 @@ def pytest_collection_modifyitems(config, items):
 # ==================== BASE DE DONNEES ====================
 
 
-@pytest_asyncio.fixture(scope="session")
-async def pg_engine():
+@pytest.fixture(scope="session")
+def _migrated_schema():
     """
-    Moteur de session, schéma construit par Alembic.
+    Applique `alembic upgrade head` une seule fois par session.
 
-    `alembic upgrade head` et non `Base.metadata.create_all` : c'est le seul
-    moyen d'obtenir les extensions (vector, pg_trgm), les colonnes
-    `search_vector`, les triggers de mise à jour et les tables de cache, dont
-    aucun n'existe dans les modèles ORM.
+    Fixture SYNCHRONE volontairement : Alembic utilise un moteur psycopg2, donc
+    aucune boucle asyncio n'est impliquée et le schéma peut être construit une
+    fois pour toute la session sans lier quoi que ce soit à une boucle donnée.
     """
     from alembic import command
     from alembic.config import Config
@@ -178,17 +177,32 @@ async def pg_engine():
     previous = os.environ.get("DATABASE_URL")
     os.environ["DATABASE_URL"] = TEST_DATABASE_URL
     try:
-        cfg = Config("alembic.ini")
-        command.upgrade(cfg, "head")
+        command.upgrade(Config("alembic.ini"), "head")
     finally:
         if previous is None:
             os.environ.pop("DATABASE_URL", None)
         else:
             os.environ["DATABASE_URL"] = previous
+    return True
 
+
+@pytest_asyncio.fixture
+async def pg_engine(_migrated_schema):
+    """
+    Moteur async, créé DANS la boucle du test.
+
+    Portée fonction et non session : un moteur asyncpg est lié à la boucle
+    d'événements qui l'a créé. Une fixture de session le rattachait à la boucle
+    des fixtures, tandis que chaque test tourne dans la sienne — d'où des
+    "attached to a different loop" qui remontaient en HTTP 500 depuis les routes.
+    Créer le moteur est peu coûteux ; c'est la migration qui l'était, et elle
+    reste faite une seule fois par _migrated_schema.
+    """
     engine = create_async_engine(TEST_DATABASE_URL, echo=False, future=True)
-    yield engine
-    await engine.dispose()
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
 
 
 # Tables purgées entre deux tests. alembic_version en est exclue : elle porte
@@ -216,6 +230,14 @@ async def async_db_session(pg_engine) -> AsyncGenerator[AsyncSession, None]:
     remet aussi les séquences à zéro — ce dont les tests qui écrivent des ids
     explicites (les 12 catégories de référence) ont besoin.
     """
+    truncate = text(f"TRUNCATE {', '.join(_DATA_TABLES)} RESTART IDENTITY CASCADE")
+
+    # Purge AVANT et APRES : purger seulement en sortie laisse la base sale si un
+    # test est interrompu, et le test suivant echoue alors sur des donnees qui ne
+    # lui appartiennent pas — un mode de panne trompeur.
+    async with pg_engine.begin() as conn:
+        await conn.execute(truncate)
+
     session_factory = async_sessionmaker(
         pg_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
     )
@@ -227,9 +249,7 @@ async def async_db_session(pg_engine) -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
     async with pg_engine.begin() as conn:
-        await conn.execute(
-            text(f"TRUNCATE {', '.join(_DATA_TABLES)} RESTART IDENTITY CASCADE")
-        )
+        await conn.execute(truncate)
 
 
 @pytest_asyncio.fixture
@@ -245,6 +265,14 @@ async def db_session(async_db_session: AsyncSession) -> AsyncSession:
     ]
     for i, nom in enumerate(noms, start=1):
         async_db_session.add(Category(id=i, name=nom, description=nom))
+    await async_db_session.commit()
+
+    # Insérer avec des ids explicites ne fait PAS avancer la séquence : le
+    # prochain id auto-généré repartirait à 1 et heurterait "Droit Civil".
+    # C'est ce qui faisait échouer tous les tests créant une catégorie via l'API.
+    await async_db_session.execute(
+        text("SELECT setval('categories_id_seq', (SELECT max(id) FROM categories))")
+    )
     await async_db_session.commit()
     return async_db_session
 
