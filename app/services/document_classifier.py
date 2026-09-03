@@ -262,9 +262,10 @@ class DocumentClassifier:
             ValueError: Si texte invalide
             DocumentClassificationError: Si erreur de classification
         """
-        assert isinstance(text, str) and len(text) > 0, "text must be a non-empty string"
-        assert isinstance(top_k, int) and 1 <= top_k <= 5, "top_k must be between 1 and 5"
-
+        # Les assertions qui se trouvaient ici court-circuitaient _validate_input :
+        # elles levaient AssertionError (donc HTTP 500 au lieu de 422) et
+        # disparaissaient sous python -O, supprimant toute validation. Elles
+        # contredisaient en plus _validate_input, qui autorise top_k jusqu'a 12.
         start_time = time.time()
 
         # Validation entrée

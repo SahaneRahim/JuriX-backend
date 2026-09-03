@@ -12,6 +12,8 @@ Total: 23 tests pour Phase 1
 Phase 3 ajoutera: 10+ tests ML
 """
 
+from pathlib import Path
+
 import pytest
 import time
 from typing import List, Tuple
@@ -241,7 +243,9 @@ class TestInputValidation:
 
     def test_text_too_long_raises_error(self, classifier):
         """Test que texte trop long lève ValueError."""
-        long_text = "A" * 51000  # >50000 chars
+        # MAX_TEXT_LENGTH est passe de 50 000 a 250 000 pour accepter les gros
+        # documents juridiques (la loi de finances fait 151 pages).
+        long_text = "A" * 250_001
 
         with pytest.raises(ValueError, match="Texte trop long"):
             classifier.classify(long_text)
@@ -429,8 +433,24 @@ class TestPreprocessing:
 
 # ==================== TESTS ML MODE ====================
 
+@pytest.mark.skipif(
+    not (
+        Path(__file__).resolve().parents[2] / "models" / "category_classifier.pkl"
+    ).exists(),
+    reason=(
+        "Modeles ML absents (models/category_classifier.pkl). Le classifieur "
+        "fonctionne en mode mots-cles seul. Pour les generer : "
+        "python scripts/train_classifier.py"
+    ),
+)
 class TestMLMode:
-    """Tests spécifiques au mode ML (hybrid)."""
+    """
+    Tests du mode hybride (mots-cles + modele ML).
+
+    Ignores tant que les .pkl ne sont pas presents : sans eux le classifieur
+    renvoie method='keyword', ce qui est le comportement de repli attendu et
+    non un echec.
+    """
 
     def test_ml_models_loaded(self, classifier):
         """Test que les modèles ML sont chargés."""

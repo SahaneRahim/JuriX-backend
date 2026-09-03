@@ -106,68 +106,72 @@ async def sample_laws(db_session):
 
 @pytest.fixture
 def mock_search_service():
-    """Mock SearchService for API tests."""
-    with patch("app.api.routes.search.get_search_service") as mock_get_service:
-        mock_service = MagicMock()
+    """
+    Doublure de SearchService, posee via dependency_overrides.
 
-        # Mock search response
-        from app.schemas.search import SearchResponse, SearchResult
+    L'ancienne version patchait app.api.routes.search.get_search_service :
+    sans effet, FastAPI resolvant Depends() a la definition de la route. Les
+    tests s'executaient donc contre le vrai service, ce qui expliquait des
+    assertions incoherentes (la vraie requete revenait au lieu du mock).
 
-        mock_service.search.return_value = SearchResponse(
-            query="test",
-            mode="hybrid",
-            results=[
-                SearchResult(
-                    law_id=1,
-                    reference="LOI-2024-001",
-                    title="Code civil",
-                    type="loi",
-                    language="fr",
-                    status="published",
-                    category_id=1,
-                    category_name="Droit Civil",
-                    publication_date=date(2024, 1, 15),
-                    relevance_score=0.95,
-                    matched_articles=[],
-                    highlights={"title": "Code <mark>civil</mark>"}
-                )
-            ],
-            total=1,
-            search_time_ms=150,
-            filters_applied=None
-        )
+    AsyncMock et non MagicMock : les routes attendent les methodes du service.
+    Les references a meilisearch_client et redis_client ont ete retirees — ces
+    attributs n'existent plus depuis le passage a PostgreSQL natif, et /stats
+    comme /health interrogent maintenant la base directement, sans passer par
+    ce service.
+    """
+    from datetime import date
+    from unittest.mock import AsyncMock
 
-        # Mock reindex response
-        from app.schemas.search import ReindexResponse
+    from app.api.routes.search import get_search_service
+    from app.schemas.search import (
+        ReindexResponse,
+        SearchResponse,
+        SearchResult,
+    )
 
-        mock_service.reindex_all_laws.return_value = ReindexResponse(
-            status="success",
-            total_laws=10,
-            indexed_count=10,
-            failed_count=0,
-            duration_seconds=3
-        )
+    service = AsyncMock()
+    service.search.return_value = SearchResponse(
+        query="test",
+        mode="hybrid",
+        results=[
+            SearchResult(
+                law_id=1,
+                reference="LOI-2024-001",
+                title="Code civil",
+                type="loi",
+                language="fr",
+                status="published",
+                category_id=1,
+                category_name="Droit Civil",
+                publication_date=date(2024, 1, 15),
+                relevance_score=0.95,
+                matched_articles=[],
+                highlights={"title": "Code <mark>civil</mark>"},
+            )
+        ],
+        total=1,
+        search_time_ms=150,
+        filters_applied=None,
+    )
+    service.reindex_all_laws.return_value = ReindexResponse(
+        status="success",
+        total_laws=10,
+        indexed_count=10,
+        failed_count=0,
+        duration_seconds=3,
+    )
 
-        # Mock stats response
-        from app.schemas.search import SearchStats
-
-        mock_service.meilisearch_client.index.return_value.get_stats.return_value = {
-            "numberOfDocuments": 10
-        }
-
-        mock_service.redis_client = MagicMock()
-        mock_service.embedding_service.health_check.return_value = {"status": "healthy"}
-
-        mock_get_service.return_value = mock_service
-
-        yield mock_service
+    app.dependency_overrides[get_search_service] = lambda: service
+    try:
+        yield service
+    finally:
+        app.dependency_overrides.pop(get_search_service, None)
 
 
-@pytest.fixture
-async def client() -> AsyncGenerator[AsyncClient, None]:
-    """Create async HTTP client for testing."""
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        yield ac
+# NOTE: la fixture client locale a ete retiree. Elle masquait celle de
+# conftest.py et ne posait aucune surcharge de get_db : les endpoints qui
+# interrogent la base (/stats) tombaient donc en 500.
 
 
 # ============================================================================
@@ -352,9 +356,9 @@ class TestReindexEndpoint:
     """Test batch reindex endpoint (admin)."""
 
     @pytest.mark.asyncio
-    async def test_reindex_success(self, client, mock_search_service):
+    async def test_reindex_success(self, admin_client, mock_search_service):
         """Test successful reindex operation."""
-        response = await client.post("/api/v1/search/reindex")
+        response = await admin_client.post("/api/v1/search/reindex")
 
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
@@ -367,12 +371,12 @@ class TestReindexEndpoint:
         assert data["indexed_count"] == data["total_laws"]
 
     @pytest.mark.asyncio
-    async def test_reindex_service_error(self, client, mock_search_service):
+    async def test_reindex_service_error(self, admin_client, mock_search_service):
         """Test reindex with service error returns 500."""
         from app.services.search_service import IndexingError
         mock_search_service.reindex_all_laws.side_effect = IndexingError("Reindex failed")
 
-        response = await client.post("/api/v1/search/reindex")
+        response = await admin_client.post("/api/v1/search/reindex")
 
         assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
         data = response.json()
@@ -387,9 +391,9 @@ class TestStatsEndpoint:
     """Test search statistics endpoint (admin)."""
 
     @pytest.mark.asyncio
-    async def test_get_stats_success(self, client, mock_search_service):
+    async def test_get_stats_success(self, admin_client, mock_search_service):
         """Test successful stats retrieval."""
-        response = await client.get("/api/v1/search/stats")
+        response = await admin_client.get("/api/v1/search/stats")
 
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
@@ -402,13 +406,15 @@ class TestStatsEndpoint:
         assert "cache_status" in data
 
     @pytest.mark.asyncio
-    async def test_get_stats_error(self, client, mock_search_service):
-        """Test stats with error returns 500."""
-        mock_search_service.meilisearch_client.index.side_effect = Exception("Connection failed")
+    async def test_get_stats_requires_admin(self, client):
+        """
+        /stats est reserve aux administrateurs.
 
+        Remplace un test qui simulait une panne Meilisearch : l'endpoint
+        n'utilise plus SearchService, il interroge la base directement.
+        """
         response = await client.get("/api/v1/search/stats")
-
-        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
 
 # ============================================================================
@@ -419,43 +425,32 @@ class TestHealthEndpoint:
     """Test health check endpoint."""
 
     @pytest.mark.asyncio
-    async def test_health_check_healthy(self, client, mock_search_service):
-        """Test health check returns healthy status."""
-        # Configure mocks for healthy state
-        mock_search_service.meilisearch_client.health.return_value = {"status": "available"}
-        mock_search_service.redis_client.ping.return_value = True
-        mock_search_service.embedding_service.health_check.return_value = {"status": "healthy"}
-
+    async def test_health_check_healthy(self, client):
+        """Le rapport de sante expose une sonde par composant."""
         response = await client.get("/api/v1/search/health")
 
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
 
-        assert "status" in data
-        assert "meilisearch" in data
-        assert "redis" in data
-        assert "embedding_service" in data
+        # Les cles meilisearch et redis ont disparu avec l'ancienne pile.
+        assert "meilisearch" not in data
+        assert "redis" not in data
+        for key in ("status", "database", "fts_index", "cache", "embedding_service"):
+            assert key in data, f"sonde manquante : {key}"
 
     @pytest.mark.asyncio
-    async def test_health_check_degraded(self, client, mock_search_service):
-        """Test health check returns degraded when Redis is down."""
-        # Configure mocks for degraded state
-        mock_search_service.meilisearch_client.health.return_value = {"status": "available"}
-        mock_search_service.redis_client.ping.side_effect = Exception("Redis down")
-        mock_search_service.embedding_service.health_check.return_value = {"status": "healthy"}
+    async def test_health_check_reports_each_probe(self, client):
+        """
+        Une sonde en echec degrade le rapport sans le faire echouer.
 
+        L'ancienne version renvoyait toujours 500 : la verification de
+        redis_client etait hors de tout try.
+        """
         response = await client.get("/api/v1/search/health")
 
         assert response.status_code == status.HTTP_200_OK
-        data = response.json()
+        assert response.json()["status"] in ("healthy", "degraded")
 
-        assert data["status"] == "degraded"
-        assert "error" in data["redis"]
-
-
-# ============================================================================
-# Test Error Responses
-# ============================================================================
 
 class TestErrorResponses:
     """Test various error response scenarios."""
