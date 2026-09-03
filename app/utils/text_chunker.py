@@ -68,6 +68,19 @@ ARTICLE_PATTERNS = [
     
     # Sec. (abbreviation, English) + number
     r'(?:^|\n)\s*Sec\.?\s+(\d+)(?:\.\d+)*\s*[.:\-–]?\s*',
+
+    # === NUMEROTATION CODIFIEE (Code Général des Impôts, CGI) ===
+    # "Article L 94 septies.-", "Article L 94", "Art. M 12 bis"
+    # Rencontre dans les lois de finances qui modifient le CGI.
+    r'(?:^|\n)\s*Art(?:icle|\.)?\s+([A-Z]\s*\d+(?:\s+(?:bis|ter|quater|quinquies|'
+    r'sexies|septies|octies|novies|decies))?)\s*[.:\-–]?\s*',
+
+    # === ORDINAUX COMPOSES (français) ===
+    # "ARTICLE QUATRE-VINGT-SIXIÈME", "Article trente-et-unième"
+    # La liste explicite ci-dessus s'arrête à "dixième" ; les lois de finances
+    # numérotent leurs articles en toutes lettres bien au-delà.
+    r'(?:^|\n)\s*Article\s+((?:[A-Za-zÀ-ÿ]+-)+[A-Za-zÀ-ÿ]*(?:ièmes?|èmes?|iemes?|emes?))'
+    r'\s*[.:\-–]?\s*',
 ]
 
 # Pattern for préambule/preamble detection - multiple patterns for flexibility

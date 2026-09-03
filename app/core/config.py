@@ -23,8 +23,13 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = "gemini-3-flash"
     GEMINI_EMBEDDING_MODEL: str = "models/gemini-embedding-001"  # native 3072-dim embeddings
 
-    # LlamaParse (PDF extraction)
+    # LlamaParse (PDF extraction OCR)
     LLAMA_CLOUD_API_KEY: str = ""
+    # Tier de parsing : fast(1cr) | cost_effective(3cr) | agentic(10cr) | agentic_plus(45cr)
+    # cost_effective est le meilleur rapport qualite/prix mesure sur le corpus prc.cm
+    LLAMA_PARSE_TIER: str = "cost_effective"
+    # Cache OCR par sha256 — evite de repayer l'extraction d'un fichier deja traite
+    OCR_CACHE_DIR: str = "./data/ocr_cache"
 
     # CORS — comma-separated list of extra allowed origins for production
     # Example: https://jurix.vercel.app,https://www.jurix.cm
