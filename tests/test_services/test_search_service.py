@@ -61,110 +61,53 @@ from app.services.search_service import (
 
 
 
-@pytest.fixture
-def mock_meilisearch():
-    """Mock Meilisearch client."""
-    with patch("app.services.search_service.meilisearch.Client") as mock_client:
-        # Mock index
-        mock_index = MagicMock()
-
-        # Mock search response
-        mock_index.search.return_value = {
-            "hits": [
-                {
-                    "id": 1,
-                    "reference": "LOI-2024-001",
-                    "title": "Code civil camerounais",
-                    "type": "loi",
-                    "language": "fr",
-                    "status": "published",
-                    "category_id": 1,
-                    "category_name": "Droit Civil",
-                    "publication_year": 2024,
-                    "_formatted": {
-                        "title": "Code <mark>civil</mark> camerounais",
-                        "content": "Article 1er du Code <mark>civil</mark>..."
-                    }
-                }
-            ],
-            "estimatedTotalHits": 1,
-            "processingTimeMs": 15
-        }
-
-        # Mock stats
-        mock_index.get_stats.return_value = {
-            "numberOfDocuments": 10,
-            "isIndexing": False
-        }
-
-        # Mock add/delete operations
-        mock_index.add_documents.return_value = {"taskUid": 1}
-        mock_index.delete_document.return_value = {"taskUid": 2}
-
-        # Configure client
-        mock_client.return_value.index.return_value = mock_index
-        mock_client.return_value.health.return_value = {"status": "available"}
-        mock_client.return_value.get_index.return_value = mock_index
-        mock_client.return_value.create_index.return_value = mock_index
-        mock_client.return_value.delete_index.return_value = {"taskUid": 3}
-
-        yield mock_client
+# NOTE: les fixtures mock_meilisearch et mock_redis ont ete supprimees. Elles
+# patchaient app.services.search_service.meilisearch.Client et .redis.from_url,
+# deux symboles qui n'existent plus depuis le passage a PostgreSQL natif — le
+# patch echouait donc au setup. La recherche textuelle s'appuie desormais sur la
+# vraie base fournie par conftest.
 
 
 @pytest.fixture
 def mock_embedding_service():
-    """Mock EmbeddingService."""
+    """
+    Doublure d'EmbeddingService.
+
+    3072 dimensions et non 768 : c'est la taille reelle produite par
+    gemini-embedding-001 et le type declare sur articles.embedding.
+    """
     mock_service = MagicMock()
-
-    # Generate random 768-dim embedding
-    mock_service.generate_embedding.return_value = np.random.rand(768).astype(np.float32)
-
-    # Health check
-    mock_service.health_check.return_value = {
-        "status": "healthy",
-        "dimensions": 768
-    }
-
+    mock_service.generate_embedding.return_value = np.random.rand(3072).astype(np.float32)
+    mock_service.TASK_DOCUMENT = "RETRIEVAL_DOCUMENT"
+    mock_service.TASK_QUERY = "RETRIEVAL_QUERY"
+    mock_service.health_check.return_value = {"status": "healthy", "dimensions": 3072}
     return mock_service
 
 
 @pytest.fixture
-def mock_redis():
-    """Mock Redis client."""
-    with patch("app.services.search_service.redis.from_url") as mock_redis_fn:
-        mock_client = MagicMock()
-        mock_client.ping.return_value = True
-        mock_client.get.return_value = None  # Cache miss by default
-        mock_client.setex.return_value = True
-        mock_redis_fn.return_value = mock_client
-        yield mock_client
+async def search_service(db_session, mock_embedding_service):
+    """
+    SearchService branche sur la vraie base, embeddings simules.
 
-
-@pytest.fixture
-async def search_service(db_session, mock_meilisearch, mock_redis):
-    """Create SearchService instance with mocks."""
-    with patch("app.services.search_service.SearchService._get_embedding_service") as mock_get_emb:
-        mock_get_emb.return_value = MagicMock()
-        mock_get_emb.return_value.generate_embedding.return_value = np.random.rand(768).astype(np.float32)
-        mock_get_emb.return_value.health_check.return_value = {"status": "healthy"}
-
-        service = SearchService(db_session, use_cache=False)
-        yield service
+    L'ancienne version patchait SearchService._get_embedding_service, methode
+    qui n'existe plus : le service lit maintenant un singleton de module,
+    qu'on remplace directement sur l'instance.
+    """
+    service = SearchService(db_session, use_cache=False)
+    service.embedding_service = mock_embedding_service
+    yield service
 
 
 @pytest.fixture
 async def sample_data(db_session):
-    """Create sample laws, categories, and articles for testing."""
-    # Categories
-    categories = [
-        Category(id=1, name="Droit Civil", description="Droit civil"),
-        Category(id=2, name="Droit Pénal", description="Droit pénal"),
-        Category(id=3, name="Droit Commercial", description="Droit commercial"),
-    ]
+    """
+    Lois et articles d'exemple.
 
-    for cat in categories:
-        db_session.add(cat)
-
+    Les categories ne sont plus creees ici : la fixture db_session de conftest
+    seme deja les 12 categories de reference avec les ids 1 a 12. Les reinserer
+    avec des ids explicites provoquait une violation de contrainte d'unicite au
+    setup de chaque test de ce fichier.
+    """
     await db_session.flush()
 
     # Laws
@@ -219,7 +162,7 @@ async def sample_data(db_session):
             law_id=1,
             number="1",
             content="Article 1er sur la responsabilité.",
-            embedding=json.dumps(np.random.rand(768).tolist()),
+            embedding=np.random.rand(3072).tolist(),
             order=1
         ),
         Article(
@@ -227,7 +170,7 @@ async def sample_data(db_session):
             law_id=1,
             number="2",
             content="Article 2 sur les dirigeants.",
-            embedding=json.dumps(np.random.rand(768).tolist()),
+            embedding=np.random.rand(3072).tolist(),
             order=2
         ),
         Article(
@@ -235,7 +178,7 @@ async def sample_data(db_session):
             law_id=2,
             number="1",
             content="Article 1er sur les infractions.",
-            embedding=json.dumps(np.random.rand(768).tolist()),
+            embedding=np.random.rand(3072).tolist(),
             order=1
         ),
     ]
@@ -245,7 +188,8 @@ async def sample_data(db_session):
 
     await db_session.commit()
 
-    return {"laws": laws, "categories": categories, "articles": articles}
+    # categories vient de la fixture db_session (conftest), plus de cette fixture
+    return {"laws": laws, "articles": articles}
 
 
 # ============================================================================
@@ -293,7 +237,7 @@ class TestTextSearch:
             assert result.language == "fr"
 
     @pytest.mark.asyncio
-    async def test_text_search_typo_tolerance(self, search_service, mock_meilisearch):
+    async def test_text_search_typo_tolerance(self, search_service):
         """Test that typos are handled gracefully."""
         # Meilisearch mock already configured with results
         results = await search_service.text_search(
@@ -330,7 +274,7 @@ class TestTextSearch:
         assert isinstance(en_results, list)
 
     @pytest.mark.asyncio
-    async def test_text_search_no_results(self, search_service, mock_meilisearch):
+    async def test_text_search_no_results(self, search_service):
         """Test text search with no matching results."""
         # Configure mock to return empty results
         mock_index = search_service.meilisearch_client.index.return_value
@@ -711,55 +655,62 @@ class TestFiltering:
 # ============================================================================
 
 class TestCaching:
-    """Test Redis caching functionality."""
+    """
+    Cache de recherche PostgreSQL (table query_cache).
+
+    Reecrits : la version precedente simulait Redis, remplace par la table
+    query_cache lors du passage a PostgreSQL natif.
+    """
 
     @pytest.mark.asyncio
-    async def test_cache_hit(self, db_session, mock_meilisearch, mock_redis):
-        """Test cache hit returns cached response."""
-        # Create service with cache enabled
-        with patch("app.services.search_service.SearchService._get_embedding_service") as mock_get_emb:
-            mock_get_emb.return_value = MagicMock()
-            mock_get_emb.return_value.generate_embedding.return_value = np.random.rand(768).astype(np.float32)
+    async def test_cache_stores_and_serves_response(self, db_session, sample_data):
+        """Une meme requete lancee deux fois est servie par le cache la 2e fois."""
+        from sqlalchemy import text as sa_text
 
-            service = SearchService(db_session, use_cache=True)
+        service = SearchService(db_session, use_cache=True)
+        service.embedding_service = None  # mode texte uniquement
 
-            # Mock cache hit
-            cached_response = SearchResponse(
-                query="test",
-                mode="hybrid",
-                results=[],
-                total=0,
-                search_time_ms=50,
-                filters_applied=None
+        request = SearchRequest(query="responsabilite", mode="text")
+
+        first = await service.search(request)
+        assert isinstance(first, SearchResponse)
+
+        rows = await db_session.execute(sa_text("SELECT count(*) FROM query_cache"))
+        assert rows.scalar() == 1, "la reponse aurait du etre mise en cache"
+
+        second = await service.search(request)
+        assert isinstance(second, SearchResponse)
+        assert second.query == first.query
+        assert second.total == first.total
+
+    @pytest.mark.asyncio
+    async def test_expired_entry_is_ignored(self, db_session):
+        """Une entree expiree n'est pas servie."""
+        from app.services.postgres_search_service import get_from_pg_cache
+        from sqlalchemy import text as sa_text
+
+        await db_session.execute(
+            sa_text(
+                "INSERT INTO query_cache (cache_key, response_json, expires_at) "
+                "VALUES ('perimee', '{\"query\": \"x\"}', now() - interval '1 hour')"
             )
+        )
+        await db_session.commit()
 
-            mock_redis.get.return_value = json.dumps(cached_response.model_dump()).encode()
-
-            request = SearchRequest(query="test", mode="hybrid")
-            response = await service.search(request)
-
-            # Should return cached response
-            assert isinstance(response, SearchResponse)
+        assert await get_from_pg_cache(db_session, "perimee") is None
 
     @pytest.mark.asyncio
-    async def test_cache_miss(self, db_session, mock_meilisearch, mock_redis, sample_data):
-        """Test cache miss performs actual search."""
-        # Create service with cache enabled
-        with patch("app.services.search_service.SearchService._get_embedding_service") as mock_get_emb:
-            mock_get_emb.return_value = MagicMock()
-            mock_get_emb.return_value.generate_embedding.return_value = np.random.rand(768).astype(np.float32)
+    async def test_cache_disabled_writes_nothing(self, db_session, sample_data):
+        """use_cache=False ne doit rien ecrire dans query_cache."""
+        from sqlalchemy import text as sa_text
 
-            service = SearchService(db_session, use_cache=True)
+        service = SearchService(db_session, use_cache=False)
+        service.embedding_service = None
 
-            # Mock cache miss
-            mock_redis.get.return_value = None
+        await service.search(SearchRequest(query="responsabilite", mode="text"))
 
-            request = SearchRequest(query="test", mode="text")
-            response = await service.search(request)
-
-            # Should perform actual search and store in cache
-            assert isinstance(response, SearchResponse)
-            mock_redis.setex.assert_called()  # Cache should be written
+        rows = await db_session.execute(sa_text("SELECT count(*) FROM query_cache"))
+        assert rows.scalar() == 0
 
 
 # ============================================================================
@@ -790,7 +741,7 @@ class TestEdgeCases:
         assert isinstance(results, list)
 
     @pytest.mark.asyncio
-    async def test_meilisearch_failure_fallback(self, search_service, mock_meilisearch, sample_data):
+    async def test_meilisearch_failure_fallback(self, search_service, sample_data):
         """Test graceful handling when Meilisearch fails in hybrid mode."""
         # Configure mock to raise exception for Meilisearch
         mock_index = search_service.meilisearch_client.index.return_value

@@ -242,11 +242,11 @@ async def _trigram_articles_query(
     index gin_trgm_ops — seul l'opérateur `%` l'est. Le filtre utilise donc `%`
     et `similarity()` ne sert plus qu'au tri. Le `ILIKE '%q%'` précédent forçait
     de toute façon un balayage séquentiel : il est retiré, `%` le couvre.
-    Le seuil est fixé par pg_trgm.similarity_threshold, positionné juste avant.
+    Le seuil est celui de pg_trgm.similarity_threshold (0.3 par defaut). Il se
+    regle au niveau base — `ALTER DATABASE <db> SET pg_trgm.similarity_threshold
+    = 0.2` — et non par requete : un `SET LOCAL` ici emettrait un second execute
+    sur une session deja occupee ("another operation is in progress").
     """
-    # SET LOCAL : portée limitée à la transaction courante.
-    await db.execute(text("SET LOCAL pg_trgm.similarity_threshold = 0.15"))
-
     sql = text("""
         SELECT
             a.id              AS article_id,
