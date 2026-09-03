@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.core.config import settings
 from app.schemas.ocr import (
     OCRResult,
     PDFType,
@@ -83,7 +84,10 @@ class OCRService:
 
         self.default_language = default_language
         self.default_dpi = default_dpi
-        self.tesseract_path = tesseract_path
+        # settings.TESSERACT_PATH en repli : le parametre existait, la
+        # configuration aussi, mais rien ne les reliait — le reglage documente
+        # dans .env.example n'avait aucun effet.
+        self.tesseract_path = tesseract_path or settings.TESSERACT_PATH or None
 
         # Vérifier disponibilité Tesseract
         self.tesseract_available = self._check_tesseract()

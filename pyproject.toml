@@ -59,20 +59,24 @@ python-dotenv = "^1.0.0"
 httpx = "^0.25.2"
 
 [tool.poetry.group.dev.dependencies]
+# Aligne sur requirements-dev.txt, le manifeste reellement installe. Les deux
+# avaient diverge : pytest 7 ici contre 8 la-bas, et pytest-asyncio 0.21 contre
+# 0.24 — or la portee des boucles d'evenements, dont depend toute la suite, a
+# change entre ces versions.
 # Testing
-pytest = "^7.4.3"
-pytest-asyncio = "^0.21.1"
-pytest-cov = "^4.1.0"
-pytest-mock = "^3.12.0"
-pytest-timeout = "^2.2.0"
+pytest = "^8.3"
+pytest-asyncio = "^0.24"
+pytest-cov = "^5.0"
+pytest-mock = "^3.14"
+pytest-timeout = "^2.3"
+respx = "^0.21"
 httpx = "^0.25.2"
-aiosqlite = "^0.19.0"  # For async SQLite in tests
+# aiosqlite retire : conftest.py tourne exclusivement sur PostgreSQL (pgvector,
+# tsvector et les fonctions PostgreSQL n'existent pas sous SQLite).
 
 # Linting & Formatting
-black = "^23.11.0"
-ruff = "^0.1.6"
-mypy = "^1.7.1"
-pylint = "^3.0.3"
+black = "^24.0"
+ruff = "^0.6"
 
 # Type stubs
 

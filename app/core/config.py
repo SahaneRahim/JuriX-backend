@@ -45,26 +45,18 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
-    # Qodo (Tests)
-    QODO_API_KEY: Optional[str] = None
+    # QODO_API_KEY, ZEROSTEP_API_KEY et CORS_ORIGINS ont ete retires : les deux
+    # premiers n'etaient lus nulle part, et main.py lit ALLOWED_ORIGINS, pas
+    # CORS_ORIGINS — cette liste, qui contenait un joker "*", ne s'appliquait a
+    # rien tout en donnant a lire le contraire.
 
-    # Zerostep (Tests E2E)
-    ZEROSTEP_API_KEY: Optional[str] = None
-
-    # CORS
-    CORS_ORIGINS: list[str] = [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-        "*"  # Keep wildcard for flexibility if needed, but explicit ones usually take precedence
-    ]
-    
     # Upload limits
     MAX_UPLOAD_SIZE: int = 1073741824  # 1GB in bytes for batch upload
-    
-    # OCR
-    TESSERACT_PATH: str = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+    # OCR — chemin du binaire tesseract. Vide par defaut : sous Linux et dans
+    # l'image Docker il est sur le PATH. Le defaut precedent etait un chemin
+    # Windows, et n'etait de toute facon lu par personne.
+    TESSERACT_PATH: str = ""
 
     class Config:
         env_file = ".env"

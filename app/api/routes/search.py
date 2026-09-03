@@ -25,6 +25,7 @@ from app.schemas.search import (
     SearchResponse,
     SearchStats,
 )
+from app.services.postgres_search_service import escape_like
 from app.services.search_service import SearchService, SearchServiceError
 from app.core.auth import get_current_admin_user
 from app.models.user import User
@@ -130,9 +131,10 @@ async def search(
         }
         ```
     """
-    assert request is not None, "SearchRequest must not be None"
-    assert isinstance(request.query, str) and len(request.query) > 0, "Query must be a non-empty string"
-    assert request.mode in ("text", "semantic", "hybrid"), f"Invalid search mode: {request.mode}"
+    # Les trois assertions posees ici ont ete retirees : SearchRequest declare
+    # deja query avec min_length=1 et valide mode, donc FastAPI repond 422 pour
+    # chacun de ces cas. Et un `assert` disparait sous python -O : la garde
+    # etait au mieux redondante, au pire absente en production.
 
     try:
         logger.info(f'📥 Search request: mode={request.mode}, query="{request.query[:50]}"')
@@ -259,8 +261,6 @@ async def find_article(
     from sqlalchemy import select, or_
     from app.models.law import Law, Article
     
-    assert isinstance(q, str) and len(q) > 0, "Query must be a non-empty string"
-
     start_time = time.time()
     
     # Parse article reference from query
@@ -279,10 +279,13 @@ async def find_article(
         law_query = select(Law).where(Law.status == "published")
         
         if doc_hint:
+            # Metacaracteres echappes : un % ou un _ dans la saisie elargit
+            # sinon le motif au lieu d'etre cherche litteralement.
+            pattern = f"%{escape_like(doc_hint)}%"
             law_query = law_query.where(
                 or_(
-                    Law.title.ilike(f"%{doc_hint}%"),
-                    Law.reference.ilike(f"%{doc_hint}%")
+                    Law.title.ilike(pattern, escape="\\"),
+                    Law.reference.ilike(pattern, escape="\\")
                 )
             )
         

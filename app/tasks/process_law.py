@@ -329,7 +329,7 @@ def _extract_pdf_text(file_path) -> tuple:
         )
 
     logger.info(f"📄 Extraction LlamaParse : {file_path.name}")
-    text = asyncio.run(service.extract_text(file_path))
+    text = _run_blocking(service.extract_text(file_path))
     logger.info(f"✅ LlamaParse : {len(text)} caracteres")
     return text, []
 
@@ -344,6 +344,21 @@ def _extract_docx_text(file_path) -> tuple:
     except Exception as e:
         logger.error(f"DOCX extraction failed: {e}")
         return "", [f"DOCX extraction failed: {str(e)}"]
+
+
+def _run_blocking(coro):
+    """
+    Execute une coroutine depuis un thread d'executor.
+
+    asyncio.run() ne fonctionnait ici que par accident : le thread de
+    l'executor n'a pas de boucle ambiante. Boucle creee et fermee
+    explicitement, ce qui ne peut jamais toucher une boucle existante.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def _load_law(law_id: int) -> Law:

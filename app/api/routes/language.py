@@ -59,13 +59,17 @@ class DetectLanguageRequest(BaseModel):
             raise ValueError("Le texte ne peut pas être vide")
         return v.strip()
 
-    class Config:
-        schema_extra = {
+    # model_config / json_schema_extra et non `class Config: schema_extra` :
+    # cette derniere est la forme Pydantic v1, ignoree en silence sous v2 —
+    # l'exemple ne s'affichait donc jamais dans la documentation OpenAPI.
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "text": "Article 1. La présente loi régit les conditions de création des sociétés commerciales au Cameroun. Les dispositions du Code civil s'appliquent en matière de contrats.",
                 "min_confidence": 0.80
             }
         }
+    }
 
 
 class DetectLanguageResponse(BaseModel):
@@ -90,7 +94,6 @@ class DetectLanguageResponse(BaseModel):
         description="Votes de chaque méthode de détection",
         example={
             "langdetect": "fr",
-            "spacy": "fr",
             "fasttext": "fr"
         }
     )
@@ -115,14 +118,13 @@ class DetectLanguageResponse(BaseModel):
         example=156
     )
 
-    class Config:
-        schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "language": "fr",
                 "confidence": 0.98,
                 "method_votes": {
                     "langdetect": "fr",
-                    "spacy": "fr",
                     "fasttext": "fr"
                 },
                 "consensus": True,
@@ -130,6 +132,7 @@ class DetectLanguageResponse(BaseModel):
                 "text_length": 156
             }
         }
+    }
 
 
 class HealthResponse(BaseModel):
@@ -140,8 +143,6 @@ class HealthResponse(BaseModel):
     models: Dict[str, str] = Field(
         ...,
         example={
-            "spacy_fr": "✅ OK",
-            "spacy_en": "✅ OK",
             "fasttext": "✅ OK"
         }
     )
@@ -157,7 +158,7 @@ class HealthResponse(BaseModel):
     description="""
     Détecte automatiquement la langue (français ou anglais) d'un texte juridique.
 
-    **Méthode:** Triple ensemble (langdetect + spaCy + fastText) avec vote majoritaire
+    **Méthode:** Ensemble langdetect + fastText avec vote majoritaire
 
     **Performance:** <1 seconde pour textes jusqu'à 5000 caractères
 
@@ -236,8 +237,6 @@ async def detect_language(
     Vérifie que tous les modèles NLP sont chargés et fonctionnels.
 
     **Modèles vérifiés:**
-    - spaCy français (fr_core_news_sm)
-    - spaCy anglais (en_core_web_sm)
     - fastText (lid.176.bin)
     """,
     response_description="État de santé de chaque composant"

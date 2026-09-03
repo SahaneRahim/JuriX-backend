@@ -1,153 +1,250 @@
 """
-Script pour régénérer les embeddings avec respect des limites de quota.
-Attend automatiquement quand le quota est atteint.
+Regenere les embeddings des articles.
+
+A lancer apres la migration e4f5a6b7c8d9 : elle remet la colonne
+`articles.embedding` a NULL en la passant de vector(3072) a vector(1536), donc
+tous les vecteurs existants doivent etre recalcules. Tant que le backfill n'est
+pas termine, la recherche semantique ne renvoie rien et l'hybride degrade en
+recherche plein texte.
+
+Reprise : par defaut le script ne traite que les articles dont l'embedding est
+NULL et progresse par curseur sur l'id. Une interruption ne coute donc qu'un
+lot, et une re-execution reprend ou elle s'est arretee.
+
+Usage:
+    python scripts/regenerate_embeddings.py --all
+    python scripts/regenerate_embeddings.py --law-id 3 12 --batch-size 8
+    python scripts/regenerate_embeddings.py --all --dry-run
+    python scripts/regenerate_embeddings.py --reindex
 """
+
+import argparse
+import logging
+import re
 import sys
 import time
-sys.path.insert(0, '.')
+from typing import List, Optional, Sequence
 
-from sqlalchemy import create_engine, text
-from app.core.config import settings
-from app.services.embedding_service import EmbeddingService, EmbeddingServiceError
+from sqlalchemy import text
 
-# Configuration
-LAW_ID = 3  # Code Pénal
-BATCH_SIZE = 10  # Petit batch pour éviter timeout
-DELAY_BETWEEN_CHUNKS = 2  # Secondes entre chaque chunk
-QUOTA_WAIT_TIME = 65  # Secondes à attendre si quota dépassé
+sys.path.insert(0, ".")
 
-print(f"🔄 REGENERATION EMBEDDINGS - Law ID {LAW_ID}")
-print("=" * 60)
+from app.core.database import SyncSessionLocal, sync_engine  # noqa: E402
+from app.services.embedding_service import (  # noqa: E402
+    EmbeddingService,
+    EmbeddingServiceError,
+)
 
-# Connect to database
-sync_url = settings.DATABASE_URL.replace('+asyncpg', '')
-engine = create_engine(sync_url)
+logger = logging.getLogger("regenerate_embeddings")
 
-# Initialize embedding service
-embedding_service = EmbeddingService(use_cache=True)
+# Messages d'erreur qui signalent un depassement de quota et non une panne.
+QUOTA_PATTERN = re.compile(r"429|RESOURCE_EXHAUSTED|quota", re.IGNORECASE)
 
-with engine.connect() as conn:
-    # Get law info
-    result = conn.execute(text("""
-        SELECT title, reference FROM laws WHERE id = :law_id
-    """), {"law_id": LAW_ID})
-    law = result.fetchone()
-    if not law:
-        print(f"❌ Law ID {LAW_ID} not found!")
-        sys.exit(1)
-    
-    print(f"📚 Law: {law[0]}")
-    
-    # Get articles without embeddings or all articles
-    result = conn.execute(text("""
-        SELECT id, number, content 
-        FROM articles 
-        WHERE law_id = :law_id
-        ORDER BY id
-    """), {"law_id": LAW_ID})
-    
-    articles = result.fetchall()
-    print(f"📄 Total articles: {len(articles)}")
-    
-    if not articles:
-        print("✅ No articles found!")
-        sys.exit(0)
-    
-    # Check which already have embeddings
-    result = conn.execute(text("""
-        SELECT COUNT(*) FROM articles 
-        WHERE law_id = :law_id AND embedding IS NOT NULL
-    """), {"law_id": LAW_ID})
-    existing_count = result.fetchone()[0]
-    print(f"📊 Already have embeddings: {existing_count}")
-    
-    # Get articles without embeddings
-    result = conn.execute(text("""
-        SELECT id, number, content 
-        FROM articles 
-        WHERE law_id = :law_id AND embedding IS NULL
-        ORDER BY id
-    """), {"law_id": LAW_ID})
-    
-    articles_to_process = result.fetchall()
-    print(f"📄 Articles to process: {len(articles_to_process)}")
-    
-    if not articles_to_process:
-        print("✅ All articles already have embeddings!")
-        sys.exit(0)
-    
-    # Process in small batches with rate limiting
-    total_processed = 0
-    chunk_num = 0
-    total_chunks = (len(articles_to_process) + BATCH_SIZE - 1) // BATCH_SIZE
-    
-    print(f"\n🔢 Processing {len(articles_to_process)} articles in {total_chunks} chunks")
-    print(f"   Batch size: {BATCH_SIZE}, Delay: {DELAY_BETWEEN_CHUNKS}s between chunks")
-    print("")
-    
-    for i in range(0, len(articles_to_process), BATCH_SIZE):
-        chunk = articles_to_process[i:i + BATCH_SIZE]
-        chunk_num += 1
-        
-        article_ids = [a[0] for a in chunk]
-        article_texts = [a[2] or f"Article {a[1]}" for a in chunk]
-        
-        print(f"📝 Chunk {chunk_num}/{total_chunks}: {len(chunk)} articles (IDs {article_ids[0]}-{article_ids[-1]})...")
-        
-        success = False
-        retries = 0
-        max_retries = 5
-        
-        while not success and retries < max_retries:
+MAX_QUOTA_WAIT_SECONDS = 900
+
+
+def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    scope = parser.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--all", action="store_true", help="Traite tout le corpus")
+    scope.add_argument("--law-id", type=int, nargs="+", help="Limite a ces lois")
+    scope.add_argument(
+        "--reindex",
+        action="store_true",
+        help="Reconstruit l'index HNSW (a faire une fois le backfill termine)",
+    )
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--limit", type=int, default=None, help="Nombre max d'articles")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Recalcule aussi les articles qui ont deja un embedding",
+    )
+    parser.add_argument("--sleep", type=float, default=0.5, help="Pause entre les lots")
+    parser.add_argument("--max-quota-waits", type=int, default=20)
+    parser.add_argument("--dry-run", action="store_true")
+    return parser.parse_args(argv)
+
+
+def _fetch_batch(session, law_ids, force: bool, cursor: int, size: int) -> List[dict]:
+    """
+    Lot suivant, par curseur sur l'id.
+
+    Curseur et non OFFSET : les lignes traitees sortent du filtre
+    `embedding IS NULL` au fur et a mesure, ce qui decale un OFFSET et fait
+    sauter des articles.
+    """
+    clauses = ["a.id > :cursor"]
+    params = {"cursor": cursor, "size": size}
+
+    if not force:
+        clauses.append("a.embedding IS NULL")
+    if law_ids:
+        clauses.append("a.law_id = ANY(:law_ids)")
+        params["law_ids"] = list(law_ids)
+
+    sql = text(f"""
+        SELECT a.id, a.law_id, a.number, a.content
+        FROM articles a
+        WHERE {' AND '.join(clauses)}
+        ORDER BY a.id
+        LIMIT :size
+    """)
+
+    rows = session.execute(sql, params).fetchall()
+    return [
+        {"id": r.id, "law_id": r.law_id, "number": r.number, "content": r.content or ""}
+        for r in rows
+    ]
+
+
+def _count_remaining(session, law_ids, force: bool) -> int:
+    clauses = ["TRUE"]
+    params = {}
+    if not force:
+        clauses.append("embedding IS NULL")
+    if law_ids:
+        clauses.append("law_id = ANY(:law_ids)")
+        params["law_ids"] = list(law_ids)
+    sql = text(f"SELECT count(*) FROM articles WHERE {' AND '.join(clauses)}")
+    return int(session.execute(sql, params).scalar() or 0)
+
+
+def _write_batch(session, ids: List[int], embeddings) -> None:
+    """
+    Ecrit les vecteurs.
+
+    CAST(:embedding AS vector) sur une CHAINE "[x,y,...]" : une liste Python
+    passee a travers text() est adaptee en ARRAY par le pilote, et un ARRAY ne
+    se caste pas proprement en vector.
+    """
+    sql = text("UPDATE articles SET embedding = CAST(:embedding AS vector) WHERE id = :id")
+    for article_id, embedding in zip(ids, embeddings):
+        literal = "[" + ",".join(f"{v:.7f}" for v in embedding.tolist()) + "]"
+        session.execute(sql, {"embedding": literal, "id": article_id})
+
+
+def _embed_with_quota_retry(service, texts, batch_size, max_waits):
+    """Genere un lot, en attendant si le quota est atteint."""
+    for attempt in range(max_waits + 1):
+        try:
+            return service.generate_batch_embeddings(
+                texts=texts, batch_size=batch_size, normalize=True
+            )
+        except EmbeddingServiceError as exc:
+            if not QUOTA_PATTERN.search(str(exc)) or attempt == max_waits:
+                raise
+            wait = min(60 * (2 ** attempt), MAX_QUOTA_WAIT_SECONDS)
+            logger.warning("Quota atteint, reprise du MEME lot dans %ss", wait)
+            time.sleep(wait)
+    raise EmbeddingServiceError("Quota toujours atteint apres attentes repetees")
+
+
+def reindex(session) -> None:
+    """
+    Reconstruit l'index HNSW.
+
+    La migration cree l'index sur une table dont la colonne vient d'etre videe,
+    donc sur zero ligne. Apres un backfill, une reconstruction en masse donne un
+    graphe de meilleure qualite que les insertions incrementales. CONCURRENTLY
+    exige l'autocommit, d'ou la connexion dediee.
+    """
+    logger.info("Reconstruction de l'index HNSW (peut etre long)...")
+    with sync_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.execute(text("SET maintenance_work_mem = '512MB'"))
+        conn.execute(text("REINDEX INDEX CONCURRENTLY idx_articles_embedding_hnsw"))
+    logger.info("Index reconstruit")
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = _parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    if args.reindex:
+        with SyncSessionLocal() as session:
+            reindex(session)
+        return 0
+
+    law_ids = args.law_id
+    max_len = EmbeddingService.MAX_TEXT_LENGTH
+
+    processed = 0
+    failed_ids: List[int] = []
+    cursor = 0
+
+    with SyncSessionLocal() as session:
+        remaining = _count_remaining(session, law_ids, args.force)
+        logger.info(
+            "%s article(s) a traiter (dimension %s)", remaining, EmbeddingService.EMBEDDING_DIM
+        )
+        if args.dry_run:
+            logger.info("--dry-run : aucun appel a l'API, aucune ecriture")
+            return 0
+        if remaining == 0:
+            return 0
+
+        # Construit APRES le dry-run : le constructeur exige GEMINI_API_KEY, et
+        # un compte a blanc n'a aucune raison d'en demander une.
+        service = EmbeddingService(use_cache=True)
+
+        while True:
+            if args.limit is not None and processed >= args.limit:
+                break
+
+            size = args.batch_size
+            if args.limit is not None:
+                size = min(size, args.limit - processed)
+
+            batch = _fetch_batch(session, law_ids, args.force, cursor, size)
+            if not batch:
+                break
+            cursor = batch[-1]["id"]
+
+            texts = []
+            for row in batch:
+                content = row["content"]
+                if len(content) > max_len:
+                    logger.warning(
+                        "Article %s (loi %s) tronque : %s > %s caracteres",
+                        row["number"], row["law_id"], len(content), max_len,
+                    )
+                    content = content[:max_len]
+                texts.append(content or " ")
+
             try:
-                # Generate embeddings one at a time to avoid batch issues
-                embeddings = []
-                for idx, text_content in enumerate(article_texts):
-                    emb = embedding_service.generate_embedding(text_content)
-                    embeddings.append(emb)
-                    if idx > 0 and idx % 5 == 0:
-                        time.sleep(0.5)  # Small delay within chunk
-                
-                # Save to database
-                for article_id, embedding in zip(article_ids, embeddings):
-                    emb_list = embedding.tolist()
-                    conn.execute(text("""
-                        UPDATE articles 
-                        SET embedding = :embedding 
-                        WHERE id = :article_id
-                    """), {"embedding": emb_list, "article_id": article_id})
-                
-                conn.commit()
-                total_processed += len(chunk)
-                print(f"   ✅ Saved {len(chunk)} embeddings (total: {total_processed}/{len(articles_to_process)})")
-                success = True
-                
-            except Exception as e:
-                error_str = str(e)
-                if "429" in error_str or "quota" in error_str.lower():
-                    retries += 1
-                    wait_time = QUOTA_WAIT_TIME * retries
-                    print(f"   ⏳ Quota exceeded! Waiting {wait_time}s before retry ({retries}/{max_retries})...")
-                    time.sleep(wait_time)
-                else:
-                    print(f"   ❌ Error: {e}")
-                    retries += 1
-                    if retries < max_retries:
-                        print(f"   🔄 Retrying in 10s ({retries}/{max_retries})...")
-                        time.sleep(10)
-        
-        if not success:
-            print(f"❌ Failed to process chunk {chunk_num} after {max_retries} attempts")
-            print(f"   Processed {total_processed}/{len(articles_to_process)} articles before failure")
-            sys.exit(1)
-        
-        # Wait between chunks to avoid rate limiting
-        if i + BATCH_SIZE < len(articles_to_process):
-            print(f"   ⏳ Waiting {DELAY_BETWEEN_CHUNKS}s before next chunk...")
-            time.sleep(DELAY_BETWEEN_CHUNKS)
+                embeddings = _embed_with_quota_retry(
+                    service, texts, args.batch_size, args.max_quota_waits
+                )
+                _write_batch(session, [r["id"] for r in batch], embeddings)
+                # Commit par lot : une interruption brutale ne perd qu'un lot.
+                session.commit()
+                processed += len(batch)
+                logger.info("%s/%s traite(s)", processed, remaining)
+            except Exception as exc:
+                session.rollback()
+                ids = [r["id"] for r in batch]
+                failed_ids.extend(ids)
+                logger.error("Lot %s ignore : %s", ids, exc)
 
-print("\n" + "=" * 60)
-print(f"🎉 REGENERATION COMPLETE! Processed {total_processed} articles")
-print("=" * 60)
-print("\nN'oubliez pas d'indexer dans Meilisearch:")
-print("python scripts/index_articles_meili.py")
+            if args.sleep:
+                time.sleep(args.sleep)
+
+    logger.info("Termine : %s article(s) traite(s)", processed)
+    if failed_ids:
+        logger.error("%s article(s) en echec : %s", len(failed_ids), failed_ids)
+        return 1
+
+    if processed:
+        logger.info(
+            "Pensez a reconstruire l'index : "
+            "python scripts/regenerate_embeddings.py --reindex"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
