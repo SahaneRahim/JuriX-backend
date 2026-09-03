@@ -170,3 +170,38 @@ class TestCacheRead:
         await db_session.commit()
 
         assert service._get_from_pg_cache(key) is None
+
+
+class TestOffLoop:
+
+    @pytest.mark.asyncio
+    async def test_generate_embedding_async_runs_off_the_event_loop(self, service):
+        """
+        La recherche semantique appelait generate_embedding depuis une
+        coroutine : la boucle etait gelee pour l'aller-retour Gemini, le
+        time.sleep du backoff et les E/S psycopg2 du cache.
+        """
+        import threading
+
+        loop_thread = threading.get_ident()
+        seen = {}
+
+        original = service.generate_embedding
+
+        def _spy(*args, **kwargs):
+            seen["thread"] = threading.get_ident()
+            return original(*args, **kwargs)
+
+        service.generate_embedding = _spy
+
+        embedding = await service.generate_embedding_async("Une question")
+
+        assert embedding.shape == (EmbeddingService.EMBEDDING_DIM,)
+        assert seen["thread"] != loop_thread
+
+    @pytest.mark.asyncio
+    async def test_async_wrapper_defaults_to_query_task(self, service, recorder):
+        """Son seul appelant encode une question, pas un document."""
+        await service.generate_embedding_async("Une question")
+
+        assert recorder["configs"][-1].task_type == EmbeddingService.TASK_QUERY

@@ -9,6 +9,8 @@ Provides async methods for:
 - health_check(): API connectivity check
 """
 
+import asyncio
+import functools
 import logging
 from functools import lru_cache
 from typing import AsyncIterator, Dict, Optional
@@ -115,11 +117,18 @@ FORBIDDEN:
                 system_instruction=system_instruction
             )
             
-            # Generate content (sync call wrapped for async compatibility)
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=config
+            # Deporte dans un thread : le client google-genai est SYNCHRONE.
+            # Appele directement depuis cette coroutine, il gelait la boucle
+            # d'evenements pendant tout l'aller-retour avec le modele — soit
+            # plusieurs secondes a chaque question posee au RAG, pendant
+            # lesquelles le serveur ne traitait plus aucune autre requete.
+            response = await asyncio.to_thread(
+                functools.partial(
+                    self.client.models.generate_content,
+                    model=self.model_name,
+                    contents=prompt,
+                    config=config,
+                )
             )
             
             # Extract text from response

@@ -200,3 +200,41 @@ class TestCitations:
         assert len(sources) == 1
         assert sources[0].article_id == 161
         assert "repli" in sources[0].excerpt
+
+
+class TestEventLoop:
+    """Le chemin RAG ne doit rien appeler de bloquant sur la boucle."""
+
+    @pytest.mark.asyncio
+    async def test_gemini_generate_runs_off_the_event_loop(self, monkeypatch):
+        """
+        GeminiService.generate est `async def` mais appelle un client
+        SYNCHRONE : sans deport, la boucle d'evenements etait gelee pendant
+        tout l'aller-retour avec le modele, a chaque question.
+        """
+        import asyncio
+        import threading
+
+        from app.services.gemini_service import GeminiService
+
+        service = GeminiService.__new__(GeminiService)
+        service.model_name = "test-model"
+        service.SYSTEM_INSTRUCTION = "sys"
+
+        loop_thread = threading.get_ident()
+        seen = {}
+
+        class _Response:
+            text = "réponse"
+
+        class _Models:
+            def generate_content(self, **kwargs):
+                seen["thread"] = threading.get_ident()
+                return _Response()
+
+        service.client = type("C", (), {"models": _Models()})()
+
+        result = await service.generate(prompt="Question ?")
+
+        assert result["response"] == "réponse"
+        assert seen["thread"] != loop_thread
