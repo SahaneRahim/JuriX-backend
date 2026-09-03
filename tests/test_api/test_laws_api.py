@@ -17,11 +17,13 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.main import app
+from datetime import date
+
 from app.models.law import Law
 
 
 @pytest.fixture
-async def sample_law(db: AsyncSession):
+async def sample_law(db_session: AsyncSession):
     """Fixture: Create a sample law for testing."""
     law = Law(
         reference="LOI-2024-001",
@@ -29,12 +31,12 @@ async def sample_law(db: AsyncSession):
         type="loi",
         content="Article 1. La présente loi régit les sociétés commerciales au Cameroun.",
         language="fr",
-        status="active",
-        publication_date="2024-01-01"
+        status="published",
+        publication_date=date(2024, 1, 1)
     )
-    db.add(law)
-    await db.commit()
-    await db.refresh(law)
+    db_session.add(law)
+    await db_session.commit()
+    await db_session.refresh(law)
     return law
 
 
@@ -47,7 +49,7 @@ class TestGetLaws:
     @pytest.mark.asyncio
     async def test_get_laws_success(self, client: AsyncClient, sample_law):
         """Test récupération liste des lois."""
-        response = await client.get("/api/v1/laws")
+        response = await client.get("/api/v1/laws/")
         
         assert response.status_code == 200
         laws = response.json()
@@ -57,7 +59,7 @@ class TestGetLaws:
     @pytest.mark.asyncio
     async def test_get_laws_filter_language(self, client: AsyncClient, sample_law):
         """Test filtre par langue."""
-        response = await client.get("/api/v1/laws?language=fr")
+        response = await client.get("/api/v1/laws/?language=fr")
         
         assert response.status_code == 200
         laws = response.json()
@@ -66,16 +68,16 @@ class TestGetLaws:
     @pytest.mark.asyncio
     async def test_get_laws_filter_status(self, client: AsyncClient, sample_law):
         """Test filtre par statut."""
-        response = await client.get("/api/v1/laws?status=active")
+        response = await client.get("/api/v1/laws/?law_status=published")
         
         assert response.status_code == 200
         laws = response.json()
-        assert all(law["status"] == "active" for law in laws)
+        assert all(law["status"] == "published" for law in laws)
 
     @pytest.mark.asyncio
     async def test_get_laws_pagination(self, client: AsyncClient, sample_law):
         """Test pagination."""
-        response = await client.get("/api/v1/laws?skip=0&limit=10")
+        response = await client.get("/api/v1/laws/?skip=0&limit=10")
         
         assert response.status_code == 200
         laws = response.json()
@@ -84,7 +86,7 @@ class TestGetLaws:
     @pytest.mark.asyncio
     async def test_get_laws_empty(self, client: AsyncClient):
         """Test résultat vide."""
-        response = await client.get("/api/v1/laws?language=xx")
+        response = await client.get("/api/v1/laws/?language=xx")
         
         assert response.status_code == 200
         laws = response.json()
@@ -123,14 +125,16 @@ class TestGetLaw:
         
         assert response.status_code == 200
         law = response.json()
-        assert "articles" in law
+        # LawResponse expose article_count, pas la liste des articles :
+        # la charger sur chaque loi d'une liste serait un N+1.
+        assert "article_count" in law
 
 
 # ==================== POST /admin/laws TESTS ====================
 
 
 class TestCreateLaw:
-    """Tests pour POST /api/v1/admin/laws."""
+    """Tests pour POST /api/v1/laws/admin."""
 
     @pytest.mark.asyncio
     async def test_create_law_success(self, admin_client: AsyncClient):
@@ -141,10 +145,10 @@ class TestCreateLaw:
             "type": "loi",
             "content": "Contenu de la loi test.",
             "language": "fr",
-            "status": "active"
+            "status": "published"
         }
         
-        response = await admin_client.post("/api/v1/admin/laws", json=new_law)
+        response = await admin_client.post("/api/v1/laws/admin", json=new_law)
         
         assert response.status_code == 201
         law = response.json()
@@ -159,11 +163,11 @@ class TestCreateLaw:
             "reference": sample_law.reference,
             "title": "Loi duplicate",
             "type": "loi",
-            "content": "Contenu.",
+            "content": "Contenu de la loi dupliquee.",
             "language": "fr"
         }
         
-        response = await admin_client.post("/api/v1/admin/laws", json=duplicate_law)
+        response = await admin_client.post("/api/v1/laws/admin", json=duplicate_law)
         
         assert response.status_code == 409
         assert "already exists" in response.json()["detail"].lower()
@@ -176,7 +180,7 @@ class TestCreateLaw:
             "title": "Test"
         }
         
-        response = await admin_client.post("/api/v1/admin/laws", json=invalid_law)
+        response = await admin_client.post("/api/v1/laws/admin", json=invalid_law)
         
         assert response.status_code == 422
 
@@ -185,7 +189,7 @@ class TestCreateLaw:
 
 
 class TestUpdateLaw:
-    """Tests pour PUT /api/v1/admin/laws/{id}."""
+    """Tests pour PUT /api/v1/laws/admin/{id}."""
 
     @pytest.mark.asyncio
     async def test_update_law_success(self, admin_client: AsyncClient, sample_law):
@@ -196,7 +200,7 @@ class TestUpdateLaw:
         }
         
         response = await admin_client.put(
-            f"/api/v1/admin/laws/{sample_law.id}",
+            f"/api/v1/laws/admin/{sample_law.id}",
             json=update_data
         )
         
@@ -209,7 +213,7 @@ class TestUpdateLaw:
     async def test_update_law_not_found(self, admin_client: AsyncClient):
         """Test mise à jour loi non trouvée."""
         response = await admin_client.put(
-            "/api/v1/admin/laws/99999",
+            "/api/v1/laws/admin/99999",
             json={"title": "Test"}
         )
         
@@ -220,12 +224,12 @@ class TestUpdateLaw:
 
 
 class TestDeleteLaw:
-    """Tests pour DELETE /api/v1/admin/laws/{id}."""
+    """Tests pour DELETE /api/v1/laws/admin/{id}."""
 
     @pytest.mark.asyncio
     async def test_delete_law_success(self, admin_client: AsyncClient, sample_law):
         """Test suppression loi."""
-        response = await admin_client.delete(f"/api/v1/admin/laws/{sample_law.id}")
+        response = await admin_client.delete(f"/api/v1/laws/admin/{sample_law.id}")
         
         assert response.status_code == 204
         
@@ -236,7 +240,7 @@ class TestDeleteLaw:
     @pytest.mark.asyncio
     async def test_delete_law_not_found(self, admin_client: AsyncClient):
         """Test suppression loi non trouvée."""
-        response = await admin_client.delete("/api/v1/admin/laws/99999")
+        response = await admin_client.delete("/api/v1/laws/admin/99999")
         
         assert response.status_code == 404
 
@@ -257,9 +261,9 @@ class TestLawsIntegration:
             "type": "loi",
             "content": "Contenu test.",
             "language": "fr",
-            "status": "active"
+            "status": "published"
         }
-        create_response = await admin_client.post("/api/v1/admin/laws", json=new_law)
+        create_response = await admin_client.post("/api/v1/laws/admin", json=new_law)
         assert create_response.status_code == 201
         law_id = create_response.json()["id"]
         
@@ -270,14 +274,14 @@ class TestLawsIntegration:
         
         # 3. Update
         update_response = await admin_client.put(
-            f"/api/v1/admin/laws/{law_id}",
+            f"/api/v1/laws/admin/{law_id}",
             json={"title": "Titre modifié"}
         )
         assert update_response.status_code == 200
         assert update_response.json()["title"] == "Titre modifié"
         
         # 4. Delete
-        delete_response = await admin_client.delete(f"/api/v1/admin/laws/{law_id}")
+        delete_response = await admin_client.delete(f"/api/v1/laws/admin/{law_id}")
         assert delete_response.status_code == 204
         
         # 5. Verify deletion

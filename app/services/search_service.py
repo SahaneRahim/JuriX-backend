@@ -401,9 +401,13 @@ class SearchService:
             query_embedding = self.embedding_service.generate_embedding(
                 query, task_type=self.embedding_service.TASK_QUERY
             )
-            query_embedding_str = f"[{','.join(map(str, query_embedding.tolist()))}]"
+            # La liste est passee en parametre lie, PAS en chaine castee : le
+            # convertisseur de pgvector attend une liste ou un ndarray et rejette
+            # une chaine ("expected list or ndarray"). Une chaine castee vers
+            # Vector echouait donc a chaque recherche semantique.
+            query_vector = query_embedding.tolist()
 
-            from sqlalchemy import cast
+            from sqlalchemy import literal
             from pgvector.sqlalchemy import Vector
 
             stmt = (
@@ -419,10 +423,7 @@ class SearchService:
                     func.max(
                         1 - func.cosine_distance(
                             Article.embedding,
-                            # cast vers Vector, pas String : Postgres rejette
-                            # cosine_distance(vector, text) et la recherche
-                            # sémantique échouait systématiquement.
-                            cast(query_embedding_str, Vector(3072))
+                            literal(query_vector, Vector(3072))
                         )
                     ).label("similarity")
                 )

@@ -275,14 +275,7 @@ class TestTextSearch:
 
     @pytest.mark.asyncio
     async def test_text_search_no_results(self, search_service):
-        """Test text search with no matching results."""
-        # Configure mock to return empty results
-        mock_index = search_service.meilisearch_client.index.return_value
-        mock_index.search.return_value = {
-            "hits": [],
-            "estimatedTotalHits": 0,
-            "processingTimeMs": 5
-        }
+        """Une requete sans correspondance renvoie une liste vide, pas une erreur."""
 
         results = await search_service.text_search(
             query="nonexistentquery12345",
@@ -540,9 +533,15 @@ class TestIndexing:
         # Should not raise
         await search_service.index_law(law)
 
-        # Verify Meilisearch add_documents was called
-        mock_index = search_service.meilisearch_client.index.return_value
-        mock_index.add_documents.assert_called()
+        # L'indexation renseigne le tsvector PostgreSQL (l'ancien assert
+        # portait sur un mock Meilisearch qui n'existe plus).
+        from sqlalchemy import text as sa_text
+
+        indexed = await search_service.db.execute(
+            sa_text("SELECT search_vector IS NOT NULL FROM laws WHERE id = :i"),
+            {"i": law.id},
+        )
+        assert indexed.scalar() is True
 
     @pytest.mark.asyncio
     async def test_update_law_index(self, search_service, sample_data):
@@ -552,9 +551,13 @@ class TestIndexing:
         # Should not raise
         await search_service.update_law_index(law.id, law)
 
-        # Update uses same add_documents (upsert)
-        mock_index = search_service.meilisearch_client.index.return_value
-        mock_index.add_documents.assert_called()
+        from sqlalchemy import text as sa_text
+
+        indexed = await search_service.db.execute(
+            sa_text("SELECT search_vector IS NOT NULL FROM laws WHERE id = :i"),
+            {"i": law.id},
+        )
+        assert indexed.scalar() is True
 
     @pytest.mark.asyncio
     async def test_delete_law_index(self, search_service, sample_data):
@@ -564,9 +567,14 @@ class TestIndexing:
         # Should not raise
         await search_service.delete_law_index(law_id)
 
-        # Verify delete_document was called
-        mock_index = search_service.meilisearch_client.index.return_value
-        mock_index.delete_document.assert_called_with(law_id)
+        # La desindexation vide le search_vector ; le trigger nettoie les articles.
+        from sqlalchemy import text as sa_text
+
+        cleared = await search_service.db.execute(
+            sa_text("SELECT search_vector IS NULL FROM laws WHERE id = :i"),
+            {"i": law_id},
+        )
+        assert cleared.scalar() is True
 
     @pytest.mark.asyncio
     async def test_reindex_all_laws(self, search_service, sample_data):
@@ -741,11 +749,17 @@ class TestEdgeCases:
         assert isinstance(results, list)
 
     @pytest.mark.asyncio
-    async def test_meilisearch_failure_fallback(self, search_service, sample_data):
-        """Test graceful handling when Meilisearch fails in hybrid mode."""
-        # Configure mock to raise exception for Meilisearch
-        mock_index = search_service.meilisearch_client.index.return_value
-        mock_index.search.side_effect = Exception("Meilisearch connection failed")
+    async def test_text_search_failure_falls_back(self, search_service, sample_data, monkeypatch):
+        """
+        Le mode hybride doit degrader proprement si la recherche textuelle echoue.
+
+        L'ancienne version simulait une panne Meilisearch ; on fait desormais
+        echouer la recherche plein texte PostgreSQL elle-meme.
+        """
+        async def _boom(*a, **kw):
+            raise RuntimeError("recherche plein texte indisponible")
+
+        monkeypatch.setattr(search_service, "text_search", _boom)
 
         request = SearchRequest(query="test", mode="hybrid")
 

@@ -160,7 +160,15 @@ class LawBase(BaseModel):
         """Validate status against allowed values."""
         if v is None:
             return "draft"
-        allowed_statuses = {"draft", "published", "archived"}
+        # Statuts du cycle de vie d'ingestion inclus : un document passe par
+        # pending -> processing -> published | refused. Sans eux, LawResponse
+        # rejetait sa propre reponse (erreur 500) des qu'un document etait en
+        # cours de traitement ou en echec — donc invisible dans l'admin, qui
+        # est justement l'endroit ou il faut le suivre.
+        allowed_statuses = {
+            "draft", "published", "archived",
+            "pending", "processing", "refused",
+        }
         if v.lower() not in allowed_statuses:
             raise ValueError(f"Status must be one of: {', '.join(allowed_statuses)}. Got: {v}")
         return v.lower()
@@ -225,7 +233,15 @@ class LawUpdate(BaseModel):
         """Validate status if provided."""
         if v is None:
             return v
-        allowed_statuses = {"draft", "published", "archived"}
+        # Statuts du cycle de vie d'ingestion inclus : un document passe par
+        # pending -> processing -> published | refused. Sans eux, LawResponse
+        # rejetait sa propre reponse (erreur 500) des qu'un document etait en
+        # cours de traitement ou en echec — donc invisible dans l'admin, qui
+        # est justement l'endroit ou il faut le suivre.
+        allowed_statuses = {
+            "draft", "published", "archived",
+            "pending", "processing", "refused",
+        }
         if v.lower() not in allowed_statuses:
             raise ValueError(f"Status must be one of: {', '.join(allowed_statuses)}. Got: {v}")
         return v.lower()
@@ -347,7 +363,15 @@ class LawFilters(BaseModel):
         """Validate status filter."""
         if v is None:
             return v
-        allowed_statuses = {"draft", "published", "archived"}
+        # Statuts du cycle de vie d'ingestion inclus : un document passe par
+        # pending -> processing -> published | refused. Sans eux, LawResponse
+        # rejetait sa propre reponse (erreur 500) des qu'un document etait en
+        # cours de traitement ou en echec — donc invisible dans l'admin, qui
+        # est justement l'endroit ou il faut le suivre.
+        allowed_statuses = {
+            "draft", "published", "archived",
+            "pending", "processing", "refused",
+        }
         if v.lower() not in allowed_statuses:
             raise ValueError(f"Status must be one of: {', '.join(allowed_statuses)}. Got: {v}")
         return v.lower()
