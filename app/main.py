@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import close_db
-from app.api.routes import language, classifier, articles, search, rag, categories, personas, upload, ocr, laws, analytics, admin, batch_upload
+from app.api.routes import auth, language, classifier, articles, search, rag, categories, personas, upload, ocr, laws, analytics, admin, batch_upload
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,7 @@ async def health():
 
 
 # Include routers with global /api/v1 prefix
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(language.router, prefix="/api/v1/language", tags=["language"])
 app.include_router(classifier.router, prefix="/api/v1/classifier", tags=["classifier"])
 app.include_router(search.router, prefix="/api/v1/search", tags=["search"])

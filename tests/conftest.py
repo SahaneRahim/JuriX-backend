@@ -89,6 +89,7 @@ _DB_FIXTURES = {
     "test_superadmin_user",
     "auth_headers",
     "admin_headers",
+    "as_admin",
 }
 
 _pg_available: bool | None = None
@@ -332,3 +333,89 @@ def override_get_db(async_db_session: AsyncSession):
         yield async_db_session
 
     return _override_get_db
+
+
+# ==================== AUTHENTIFICATION ====================
+#
+# Surcharger `get_current_user` suffit à débloquer les trois niveaux d'accès :
+# `get_current_active_user`, `get_current_admin_user` et
+# `get_current_superadmin_user` en dépendent tous. Les surcharger un par un
+# obligerait à traiter chaque endpoint séparément.
+#
+# `client` reste volontairement anonyme, pour que les tests qui vérifient les
+# 401 continuent de fonctionner.
+
+
+async def _make_user(db: AsyncSession, email: str, username: str, role: str):
+    from app.core.auth import hash_password
+    from app.models.user import User
+
+    user = User(
+        email=email,
+        username=username,
+        hashed_password=hash_password("MotDePasseTest123"),
+        role=role,
+        is_active=True,
+        is_verified=True,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+@pytest_asyncio.fixture
+async def test_user(db_session: AsyncSession):
+    """Compte sans privilège."""
+    return await _make_user(db_session, "user@test.cm", "usertest", "user")
+
+
+@pytest_asyncio.fixture
+async def test_admin_user(db_session: AsyncSession):
+    """Compte administrateur."""
+    return await _make_user(db_session, "admin@test.cm", "admintest", "admin")
+
+
+@pytest_asyncio.fixture
+async def test_superadmin_user(db_session: AsyncSession):
+    """Compte superadministrateur."""
+    return await _make_user(db_session, "super@test.cm", "supertest", "superadmin")
+
+
+@pytest.fixture
+def auth_headers(test_user):
+    """En-tête Authorization pour un compte sans privilège (jeton réel)."""
+    from app.core.auth import create_access_token
+
+    return {"Authorization": f"Bearer {create_access_token({'sub': test_user.email})}"}
+
+
+@pytest.fixture
+def admin_headers(test_admin_user):
+    """En-tête Authorization pour un administrateur (jeton réel)."""
+    from app.core.auth import create_access_token
+
+    return {"Authorization": f"Bearer {create_access_token({'sub': test_admin_user.email})}"}
+
+
+@pytest.fixture
+def as_admin(test_admin_user):
+    """
+    Court-circuite l'authentification en se faisant passer pour un administrateur.
+
+    Utile aux tests qui portent sur la logique métier et non sur l'authentification :
+    ils n'ont pas à fabriquer un jeton ni à gérer son expiration.
+    """
+    from app.core.auth import get_current_user
+
+    app.dependency_overrides[get_current_user] = lambda: test_admin_user
+    try:
+        yield test_admin_user
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest_asyncio.fixture
+async def admin_client(client: AsyncClient, as_admin) -> AsyncClient:
+    """Client HTTP authentifié comme administrateur."""
+    return client

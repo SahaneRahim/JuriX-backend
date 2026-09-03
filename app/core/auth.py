@@ -7,13 +7,16 @@ Author: JuriX Team
 Date: 2026-01-12
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
+import base64
+import hashlib
+
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,20 +24,36 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.models.user import User
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# ==================== HACHAGE DES MOTS DE PASSE ====================
+#
+# bcrypt est utilise directement, sans passlib. passlib 1.7.4 (derniere version,
+# 2020) lit `bcrypt.__about__.__version__` pour detecter le backend — attribut
+# supprime depuis bcrypt 4.1. Avec bcrypt 5.x, le hachage echouait totalement
+# avec "password cannot be longer than 72 bytes" MEME pour un mot de passe de
+# 13 caracteres. L'authentification etait donc inutilisable telle que declaree.
+#
+# bcrypt ignore silencieusement tout ce qui depasse 72 octets : deux mots de
+# passe partageant les 72 premiers octets seraient equivalents. On pre-hache donc
+# en SHA-256 puis on encode en base64, ce qui donne une entree de longueur fixe
+# (44 octets) et supporte les phrases de passe de n'importe quelle longueur.
+
+
+def _prepare(password: str) -> bytes:
+    """Normalise un mot de passe en une entree bcrypt de longueur fixe."""
+    digest = hashlib.sha256(password.encode("utf-8")).digest()
+    return base64.b64encode(digest)
 
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
-# JWT settings
-SECRET_KEY = (
-    settings.SECRET_KEY
-    if hasattr(settings, "SECRET_KEY")
-    else "dev-secret-key-change-in-production"
-)
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
+# JWT settings — lus depuis la configuration.
+# Auparavant ALGORITHM et ACCESS_TOKEN_EXPIRE_MINUTES etaient codes en dur ici
+# (7 jours) alors que config.py declare 30 minutes : les deux valeurs se
+# contredisaient et celle du fichier de configuration n'avait aucun effet.
+# Le garde-fou hasattr etait vestigial : SECRET_KEY existe toujours.
+SECRET_KEY = settings.SECRET_KEY
+ALGORITHM = settings.ALGORITHM
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
 
 
 def hash_password(password: str) -> str:
@@ -47,7 +66,7 @@ def hash_password(password: str) -> str:
     Returns:
         Hashed password
     """
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(_prepare(password), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -61,7 +80,11 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     Returns:
         True if password matches, False otherwise
     """
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return bcrypt.checkpw(_prepare(plain_password), hashed_password.encode("utf-8"))
+    except (ValueError, TypeError):
+        # Empreinte illisible ou tronquee : on refuse plutot que de propager.
+        return False
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -77,9 +100,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     """
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
 
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)

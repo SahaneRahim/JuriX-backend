@@ -13,7 +13,7 @@ Date: 2026-01-11
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 
 from app.schemas.ocr import (
@@ -23,6 +23,9 @@ from app.schemas.ocr import (
     PDFTypeDetectionRequest,
     PDFTypeDetectionResult,
 )
+from app.core.auth import get_current_admin_user
+from app.models.user import User
+from app.utils.file_utils import resolve_upload_path
 from app.services.ocr_service import OCRError, OCRService
 
 logger = logging.getLogger(__name__)
@@ -65,7 +68,10 @@ def get_ocr_service() -> OCRService:
     - OCR recommendation
     """,
 )
-async def detect_pdf_type(request: PDFTypeDetectionRequest) -> PDFTypeDetectionResult:
+async def detect_pdf_type(
+    request: PDFTypeDetectionRequest,
+    current_admin: User = Depends(get_current_admin_user),
+) -> PDFTypeDetectionResult:
     """
     Detect PDF type without processing.
     
@@ -81,18 +87,23 @@ async def detect_pdf_type(request: PDFTypeDetectionRequest) -> PDFTypeDetectionR
         500: Detection error
     """
     assert request is not None, "PDFTypeDetectionRequest must not be None"
-    assert isinstance(request.pdf_path, str) and len(request.pdf_path) > 0, "pdf_path must be a non-empty string"
 
-    logger.info(f"🔍 PDF type detection request: {request.pdf_path}")
+    logger.info(f"🔍 PDF type detection request: {request.file_id}")
     
-    pdf_path = Path(request.pdf_path)
-    
-    # Validate path
-    if not pdf_path.exists():
+    # resolve_upload_path contraint le fichier au repertoire d'upload.
+    # Auparavant : Path(request.pdf_path) sur un chemin serveur arbitraire, sans
+    # authentification — enumeration et lecture de n'importe quel fichier lisible.
+    try:
+        pdf_path = resolve_upload_path(request.file_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except FileNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"PDF file not found: {request.pdf_path}",
+            detail=f"Fichier introuvable : {request.file_id}",
         )
+    
+    # Validate path
     
     try:
         service = get_ocr_service()
@@ -126,7 +137,10 @@ async def detect_pdf_type(request: PDFTypeDetectionRequest) -> PDFTypeDetectionR
     **Languages:** French (fra), English (eng), or both (fra+eng)
     """,
 )
-async def process_pdf(request: OCRRequest) -> OCRResult:
+async def process_pdf(
+    request: OCRRequest,
+    current_admin: User = Depends(get_current_admin_user),
+) -> OCRResult:
     """
     Process PDF with OCR.
     
@@ -142,21 +156,26 @@ async def process_pdf(request: OCRRequest) -> OCRResult:
         500: Processing error
     """
     assert request is not None, "OCRRequest must not be None"
-    assert isinstance(request.pdf_path, str) and len(request.pdf_path) > 0, "pdf_path must be a non-empty string"
 
     logger.info(
-        f"📄 OCR processing request: {request.pdf_path} "
+        f"📄 OCR processing request: {request.file_id} "
         f"(lang: {request.language}, dpi: {request.dpi})"
     )
     
-    pdf_path = Path(request.pdf_path)
-    
-    # Validate path
-    if not pdf_path.exists():
+    # resolve_upload_path contraint le fichier au repertoire d'upload.
+    # Auparavant : Path(request.pdf_path) sur un chemin serveur arbitraire, sans
+    # authentification — enumeration et lecture de n'importe quel fichier lisible.
+    try:
+        pdf_path = resolve_upload_path(request.file_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except FileNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"PDF file not found: {request.pdf_path}",
+            detail=f"Fichier introuvable : {request.file_id}",
         )
+    
+    # Validate path
     
     try:
         service = get_ocr_service()

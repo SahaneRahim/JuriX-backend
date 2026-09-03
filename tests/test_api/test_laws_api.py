@@ -133,7 +133,7 @@ class TestCreateLaw:
     """Tests pour POST /api/v1/admin/laws."""
 
     @pytest.mark.asyncio
-    async def test_create_law_success(self, client: AsyncClient):
+    async def test_create_law_success(self, admin_client: AsyncClient):
         """Test création loi."""
         new_law = {
             "reference": "LOI-2024-002",
@@ -144,7 +144,7 @@ class TestCreateLaw:
             "status": "active"
         }
         
-        response = await client.post("/api/v1/admin/laws", json=new_law)
+        response = await admin_client.post("/api/v1/admin/laws", json=new_law)
         
         assert response.status_code == 201
         law = response.json()
@@ -153,7 +153,7 @@ class TestCreateLaw:
         assert "id" in law
 
     @pytest.mark.asyncio
-    async def test_create_law_duplicate_reference(self, client: AsyncClient, sample_law):
+    async def test_create_law_duplicate_reference(self, admin_client: AsyncClient, sample_law):
         """Test création avec référence existante."""
         duplicate_law = {
             "reference": sample_law.reference,
@@ -163,20 +163,20 @@ class TestCreateLaw:
             "language": "fr"
         }
         
-        response = await client.post("/api/v1/admin/laws", json=duplicate_law)
+        response = await admin_client.post("/api/v1/admin/laws", json=duplicate_law)
         
         assert response.status_code == 409
         assert "already exists" in response.json()["detail"].lower()
 
     @pytest.mark.asyncio
-    async def test_create_law_validation_error(self, client: AsyncClient):
+    async def test_create_law_validation_error(self, admin_client: AsyncClient):
         """Test création avec données invalides."""
         invalid_law = {
             "reference": "",  # Invalid: empty
             "title": "Test"
         }
         
-        response = await client.post("/api/v1/admin/laws", json=invalid_law)
+        response = await admin_client.post("/api/v1/admin/laws", json=invalid_law)
         
         assert response.status_code == 422
 
@@ -188,14 +188,14 @@ class TestUpdateLaw:
     """Tests pour PUT /api/v1/admin/laws/{id}."""
 
     @pytest.mark.asyncio
-    async def test_update_law_success(self, client: AsyncClient, sample_law):
+    async def test_update_law_success(self, admin_client: AsyncClient, sample_law):
         """Test mise à jour loi."""
         update_data = {
             "title": "Titre mis à jour",
             "status": "archived"
         }
         
-        response = await client.put(
+        response = await admin_client.put(
             f"/api/v1/admin/laws/{sample_law.id}",
             json=update_data
         )
@@ -206,9 +206,9 @@ class TestUpdateLaw:
         assert law["status"] == update_data["status"]
 
     @pytest.mark.asyncio
-    async def test_update_law_not_found(self, client: AsyncClient):
+    async def test_update_law_not_found(self, admin_client: AsyncClient):
         """Test mise à jour loi non trouvée."""
-        response = await client.put(
+        response = await admin_client.put(
             "/api/v1/admin/laws/99999",
             json={"title": "Test"}
         )
@@ -223,20 +223,20 @@ class TestDeleteLaw:
     """Tests pour DELETE /api/v1/admin/laws/{id}."""
 
     @pytest.mark.asyncio
-    async def test_delete_law_success(self, client: AsyncClient, sample_law):
+    async def test_delete_law_success(self, admin_client: AsyncClient, sample_law):
         """Test suppression loi."""
-        response = await client.delete(f"/api/v1/admin/laws/{sample_law.id}")
+        response = await admin_client.delete(f"/api/v1/admin/laws/{sample_law.id}")
         
         assert response.status_code == 204
         
         # Vérifier que la loi est supprimée
-        get_response = await client.get(f"/api/v1/laws/{sample_law.id}")
+        get_response = await admin_client.get(f"/api/v1/laws/{sample_law.id}")
         assert get_response.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_delete_law_not_found(self, client: AsyncClient):
+    async def test_delete_law_not_found(self, admin_client: AsyncClient):
         """Test suppression loi non trouvée."""
-        response = await client.delete("/api/v1/admin/laws/99999")
+        response = await admin_client.delete("/api/v1/admin/laws/99999")
         
         assert response.status_code == 404
 
@@ -248,7 +248,7 @@ class TestLawsIntegration:
     """Tests d'intégration."""
 
     @pytest.mark.asyncio
-    async def test_full_crud_workflow(self, client: AsyncClient):
+    async def test_full_crud_workflow(self, admin_client: AsyncClient):
         """Test workflow CRUD complet."""
         # 1. Create
         new_law = {
@@ -259,17 +259,17 @@ class TestLawsIntegration:
             "language": "fr",
             "status": "active"
         }
-        create_response = await client.post("/api/v1/admin/laws", json=new_law)
+        create_response = await admin_client.post("/api/v1/admin/laws", json=new_law)
         assert create_response.status_code == 201
         law_id = create_response.json()["id"]
         
         # 2. Read
-        read_response = await client.get(f"/api/v1/laws/{law_id}")
+        read_response = await admin_client.get(f"/api/v1/laws/{law_id}")
         assert read_response.status_code == 200
         assert read_response.json()["title"] == new_law["title"]
         
         # 3. Update
-        update_response = await client.put(
+        update_response = await admin_client.put(
             f"/api/v1/admin/laws/{law_id}",
             json={"title": "Titre modifié"}
         )
@@ -277,9 +277,9 @@ class TestLawsIntegration:
         assert update_response.json()["title"] == "Titre modifié"
         
         # 4. Delete
-        delete_response = await client.delete(f"/api/v1/admin/laws/{law_id}")
+        delete_response = await admin_client.delete(f"/api/v1/admin/laws/{law_id}")
         assert delete_response.status_code == 204
         
         # 5. Verify deletion
-        verify_response = await client.get(f"/api/v1/laws/{law_id}")
+        verify_response = await admin_client.get(f"/api/v1/laws/{law_id}")
         assert verify_response.status_code == 404

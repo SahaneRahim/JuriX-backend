@@ -19,7 +19,10 @@ pgvector>=0.2.3,<1.0.0
 
 # ── Security ──────────────────────────────────────────────────────────────────
 python-jose[cryptography]>=3.3.0,<4.0.0
-passlib[bcrypt]>=1.7.4,<2.0.0
+# bcrypt utilise directement, sans passlib : passlib 1.7.4 (derniere version,
+# 2020) est incompatible avec bcrypt >= 4.1 (il lit bcrypt.__about__, supprime),
+# et le hachage echouait totalement avec bcrypt 5.x.
+bcrypt>=4.0,<6.0
 python-multipart>=0.0.6,<1.0.0
 
 # ── Document Processing ───────────────────────────────────────────────────────

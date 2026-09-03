@@ -31,6 +31,8 @@ from app.services.category_service import (
     CategoryServiceError
 )
 from app.schemas.law import CategoryCreate, CategoryUpdate, CategoryResponse, CategoryStats
+from app.core.auth import get_current_admin_user
+from app.models.user import User
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -59,7 +61,8 @@ router = APIRouter(
 )
 async def create_category(
     category_data: CategoryCreate,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin_user),
 ) -> CategoryResponse:
     """
     Create a new legal category.
@@ -274,7 +277,8 @@ async def get_category(
 async def update_category(
     category_id: int,
     category_data: CategoryUpdate,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin_user),
 ) -> CategoryResponse:
     """
     Update a category.
@@ -341,7 +345,8 @@ async def update_category(
 async def delete_category(
     category_id: int,
     force: bool = Query(False, description="Force delete even if laws are associated"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin_user),
 ):
     """
     Delete a category.

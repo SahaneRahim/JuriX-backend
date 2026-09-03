@@ -11,9 +11,9 @@ class TestCreateCategoryAPI:
     """Tests for POST /api/v1/categories endpoint."""
 
     @pytest.mark.asyncio
-    async def test_create_category_success(self, client: AsyncClient):
+    async def test_create_category_success(self, admin_client: AsyncClient):
         """Test successful category creation via API."""
-        response = await client.post(
+        response = await admin_client.post(
             "/api/v1/categories",
             json={"name": "API Test Category", "description": "Created via API"}
         )
@@ -26,16 +26,16 @@ class TestCreateCategoryAPI:
         assert "created_at" in data
 
     @pytest.mark.asyncio
-    async def test_create_category_duplicate_name(self, client: AsyncClient):
+    async def test_create_category_duplicate_name(self, admin_client: AsyncClient):
         """Test creating duplicate category returns 409."""
         # First create
-        await client.post(
+        await admin_client.post(
             "/api/v1/categories",
             json={"name": "Duplicate Test", "description": "First"}
         )
 
         # Try to create again
-        response = await client.post(
+        response = await admin_client.post(
             "/api/v1/categories",
             json={"name": "Duplicate Test", "description": "Second"}
         )
@@ -44,9 +44,9 @@ class TestCreateCategoryAPI:
         assert "already exists" in response.json()["detail"].lower()
 
     @pytest.mark.asyncio
-    async def test_create_category_invalid_data(self, client: AsyncClient):
+    async def test_create_category_invalid_data(self, admin_client: AsyncClient):
         """Test creating category with invalid data returns 422."""
-        response = await client.post(
+        response = await admin_client.post(
             "/api/v1/categories",
             json={}  # Missing required 'name' field
         )
@@ -99,17 +99,17 @@ class TestGetCategoryAPI:
     """Tests for GET /api/v1/categories/{id} endpoint."""
 
     @pytest.mark.asyncio
-    async def test_get_category_success(self, client: AsyncClient):
+    async def test_get_category_success(self, admin_client: AsyncClient):
         """Test getting single category by ID."""
         # First create a category
-        create_response = await client.post(
+        create_response = await admin_client.post(
             "/api/v1/categories",
             json={"name": "Get Test Category"}
         )
         created = create_response.json()
 
         # Now get it
-        response = await client.get(f"/api/v1/categories/{created['id']}")
+        response = await admin_client.get(f"/api/v1/categories/{created['id']}")
 
         assert response.status_code == 200
         data = response.json()
@@ -129,17 +129,17 @@ class TestUpdateCategoryAPI:
     """Tests for PUT /api/v1/categories/{id} endpoint."""
 
     @pytest.mark.asyncio
-    async def test_update_category_success(self, client: AsyncClient):
+    async def test_update_category_success(self, admin_client: AsyncClient):
         """Test successful category update."""
         # Create a category
-        create_response = await client.post(
+        create_response = await admin_client.post(
             "/api/v1/categories",
             json={"name": "Update Test", "description": "Original"}
         )
         created = create_response.json()
 
         # Update it
-        response = await client.put(
+        response = await admin_client.put(
             f"/api/v1/categories/{created['id']}",
             json={"name": "Updated Name", "description": "Updated Desc"}
         )
@@ -151,9 +151,9 @@ class TestUpdateCategoryAPI:
         assert data["description"] == "Updated Desc"
 
     @pytest.mark.asyncio
-    async def test_update_category_not_found(self, client: AsyncClient):
+    async def test_update_category_not_found(self, admin_client: AsyncClient):
         """Test updating non-existent category returns 404."""
-        response = await client.put(
+        response = await admin_client.put(
             "/api/v1/categories/999999",
             json={"name": "New Name"}
         )
@@ -161,21 +161,21 @@ class TestUpdateCategoryAPI:
         assert response.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_update_category_duplicate_name(self, client: AsyncClient):
+    async def test_update_category_duplicate_name(self, admin_client: AsyncClient):
         """Test updating to duplicate name returns 409."""
         # Create two categories
-        cat1 = (await client.post(
+        cat1 = (await admin_client.post(
             "/api/v1/categories",
             json={"name": "Category 1"}
         )).json()
 
-        cat2 = (await client.post(
+        cat2 = (await admin_client.post(
             "/api/v1/categories",
             json={"name": "Category 2"}
         )).json()
 
         # Try to update cat2 to have same name as cat1
-        response = await client.put(
+        response = await admin_client.put(
             f"/api/v1/categories/{cat2['id']}",
             json={"name": "Category 1"}
         )
@@ -187,43 +187,43 @@ class TestDeleteCategoryAPI:
     """Tests for DELETE /api/v1/categories/{id} endpoint."""
 
     @pytest.mark.asyncio
-    async def test_delete_category_success(self, client: AsyncClient):
+    async def test_delete_category_success(self, admin_client: AsyncClient):
         """Test successful category deletion."""
         # Create a category
-        create_response = await client.post(
+        create_response = await admin_client.post(
             "/api/v1/categories",
             json={"name": "Delete Test"}
         )
         created = create_response.json()
 
         # Delete it
-        response = await client.delete(f"/api/v1/categories/{created['id']}")
+        response = await admin_client.delete(f"/api/v1/categories/{created['id']}")
 
         assert response.status_code == 204
 
         # Verify it's gone
-        get_response = await client.get(f"/api/v1/categories/{created['id']}")
+        get_response = await admin_client.get(f"/api/v1/categories/{created['id']}")
         assert get_response.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_delete_category_not_found(self, client: AsyncClient):
+    async def test_delete_category_not_found(self, admin_client: AsyncClient):
         """Test deleting non-existent category returns 404."""
-        response = await client.delete("/api/v1/categories/999999")
+        response = await admin_client.delete("/api/v1/categories/999999")
 
         assert response.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_delete_category_with_force(self, client: AsyncClient):
+    async def test_delete_category_with_force(self, admin_client: AsyncClient):
         """Test force delete parameter."""
         # Create a category
-        create_response = await client.post(
+        create_response = await admin_client.post(
             "/api/v1/categories",
             json={"name": "Force Delete Test"}
         )
         created = create_response.json()
 
         # Force delete it
-        response = await client.delete(
+        response = await admin_client.delete(
             f"/api/v1/categories/{created['id']}?force=true"
         )
 
@@ -383,9 +383,9 @@ class TestErrorHandling:
         assert response.status_code in [200, 422]
 
     @pytest.mark.asyncio
-    async def test_create_category_with_extra_fields(self, client: AsyncClient):
+    async def test_create_category_with_extra_fields(self, admin_client: AsyncClient):
         """Test creating category with extra fields ignores them."""
-        response = await client.post(
+        response = await admin_client.post(
             "/api/v1/categories",
             json={
                 "name": "Extra Fields Test",
@@ -404,10 +404,10 @@ class TestEndToEndWorkflow:
     """End-to-end workflow tests."""
 
     @pytest.mark.asyncio
-    async def test_full_crud_workflow(self, client: AsyncClient):
+    async def test_full_crud_workflow(self, admin_client: AsyncClient):
         """Test complete CRUD workflow: create → read → update → delete."""
         # 1. Create
-        create_response = await client.post(
+        create_response = await admin_client.post(
             "/api/v1/categories",
             json={"name": "E2E Test Category", "description": "End to end test"}
         )
@@ -416,18 +416,18 @@ class TestEndToEndWorkflow:
         category_id = created["id"]
 
         # 2. Read (single)
-        get_response = await client.get(f"/api/v1/categories/{category_id}")
+        get_response = await admin_client.get(f"/api/v1/categories/{category_id}")
         assert get_response.status_code == 200
         assert get_response.json()["name"] == "E2E Test Category"
 
         # 3. Read (list)
-        list_response = await client.get("/api/v1/categories")
+        list_response = await admin_client.get("/api/v1/categories")
         assert list_response.status_code == 200
         category_ids = [cat["id"] for cat in list_response.json()]
         assert category_id in category_ids
 
         # 4. Update
-        update_response = await client.put(
+        update_response = await admin_client.put(
             f"/api/v1/categories/{category_id}",
             json={"name": "E2E Updated", "description": "Updated description"}
         )
@@ -435,15 +435,15 @@ class TestEndToEndWorkflow:
         assert update_response.json()["name"] == "E2E Updated"
 
         # 5. Verify update
-        get_updated = await client.get(f"/api/v1/categories/{category_id}")
+        get_updated = await admin_client.get(f"/api/v1/categories/{category_id}")
         assert get_updated.json()["name"] == "E2E Updated"
 
         # 6. Delete
-        delete_response = await client.delete(f"/api/v1/categories/{category_id}")
+        delete_response = await admin_client.delete(f"/api/v1/categories/{category_id}")
         assert delete_response.status_code == 204
 
         # 7. Verify deletion
-        get_deleted = await client.get(f"/api/v1/categories/{category_id}")
+        get_deleted = await admin_client.get(f"/api/v1/categories/{category_id}")
         assert get_deleted.status_code == 404
 
     @pytest.mark.asyncio
@@ -464,28 +464,28 @@ class TestEndToEndWorkflow:
             assert single_stats.json()["category_id"] == first_cat["category_id"]
 
     @pytest.mark.asyncio
-    async def test_mapping_workflow(self, client: AsyncClient):
+    async def test_mapping_workflow(self, admin_client: AsyncClient):
         """Test mapping utilities workflow."""
         # 1. Create a new category
-        create_response = await client.post(
+        create_response = await admin_client.post(
             "/api/v1/categories",
             json={"name": "Mapping Test Category"}
         )
         created = create_response.json()
 
         # 2. Get ID-to-name mapping
-        id_to_name = await client.get("/api/v1/categories/mapping/id-to-name")
+        id_to_name = await admin_client.get("/api/v1/categories/mapping/id-to-name")
         assert id_to_name.status_code == 200
         assert "Mapping Test Category" in id_to_name.json().values()
 
         # 3. Get name-to-ID mapping
-        name_to_id = await client.get("/api/v1/categories/mapping/name-to-id")
+        name_to_id = await admin_client.get("/api/v1/categories/mapping/name-to-id")
         assert name_to_id.status_code == 200
         assert "Mapping Test Category" in name_to_id.json().keys()
         assert name_to_id.json()["Mapping Test Category"] == created["id"]
 
         # Cleanup
-        await client.delete(f"/api/v1/categories/{created['id']}")
+        await admin_client.delete(f"/api/v1/categories/{created['id']}")
 
 
 # Summary:

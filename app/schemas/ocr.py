@@ -112,7 +112,8 @@ class OCRRequest(BaseModel):
     Request schema for OCR processing.
     """
 
-    pdf_path: str = Field(..., min_length=1, description="Path to PDF file")
+    file_id: str = Field(
+        ..., min_length=1, description="Identifiant du fichier uploadé (jamais un chemin serveur)")
     language: str = Field(
         default="fra+eng",
         description="Tesseract language codes (e.g., 'fra', 'eng', 'fra+eng')",
@@ -138,7 +139,7 @@ class OCRRequest(BaseModel):
     class Config:
         json_schema_extra = {
             "example": {
-                "pdf_path": "/path/to/document.pdf",
+                "file_id": "/path/to/document.pdf",
                 "language": "fra+eng",
                 "dpi": 300,
                 "timeout_seconds": 60,
@@ -149,10 +150,11 @@ class OCRRequest(BaseModel):
 class PDFTypeDetectionRequest(BaseModel):
     """Request schema for PDF type detection only."""
 
-    pdf_path: str = Field(..., min_length=1, description="Path to PDF file")
+    file_id: str = Field(
+        ..., min_length=1, description="Identifiant du fichier uploadé (jamais un chemin serveur)")
 
     class Config:
-        json_schema_extra = {"example": {"pdf_path": "/path/to/document.pdf"}}
+        json_schema_extra = {"example": {"file_id": "/path/to/document.pdf"}}
 
 
 # ============================================================================

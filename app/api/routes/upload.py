@@ -15,11 +15,13 @@ import logging
 from pathlib import Path
 from typing import Dict
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import Depends, APIRouter, File, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 
 from app.schemas.file_upload import FileUploadResult, UploadServiceHealth
 from app.services.file_upload_service import FileUploadError, FileUploadService
+from app.core.auth import get_current_admin_user
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +191,10 @@ async def get_upload_status(file_id: str) -> Dict:
     summary="Delete uploaded file",
     description="Delete an uploaded file from temporary storage.",
 )
-async def delete_upload(file_id: str) -> Dict:
+async def delete_upload(
+    file_id: str,
+    current_admin: User = Depends(get_current_admin_user),
+) -> Dict:
     """
     Delete an uploaded file.
 
@@ -233,7 +238,10 @@ async def delete_upload(file_id: str) -> Dict:
     summary="Cleanup old files",
     description="Remove files older than specified hours (default: 24h).",
 )
-async def cleanup_old_files(max_age_hours: int = 24) -> Dict:
+async def cleanup_old_files(
+    max_age_hours: int = 24,
+    current_admin: User = Depends(get_current_admin_user),
+) -> Dict:
     """
     Cleanup old uploaded files.
 

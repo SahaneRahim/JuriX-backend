@@ -23,6 +23,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.auth import get_current_admin_user
+from app.models.user import User
 from app.core.database import get_db, AsyncSessionLocal
 from app.models.law import Category, Law
 from app.schemas.law import (
@@ -54,17 +56,10 @@ router = APIRouter(tags=["Laws"])
 # ==================== DEPENDENCIES ====================
 
 
-# TODO: Implement authentication
-# For now, this is a placeholder
-async def get_current_admin_user():
-    """
-    Dependency for admin authentication.
-
-    TODO: Implement actual authentication with JWT tokens.
-    For now, returns a mock admin user.
-    """
-    # In production, verify JWT token and check admin role
-    return {"id": 1, "role": "admin"}
+# L'authentification reelle vit dans app/core/auth.py (JWT + bcrypt + roles).
+# Un stub renvoyant {"id": 1, "role": "admin"} occupait cette place : les quatre
+# endpoints d'administration ci-dessous etaient donc ouverts a tous.
+# get_current_admin_user est importe en tete de fichier.
 
 
 # ==================== PUBLIC ENDPOINTS ====================
@@ -502,7 +497,7 @@ async def get_law_pdf_page_image(
 async def ingest_law(
     request: LawIngestRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
 ):
     """
     Ingest a new law from an uploaded file.
@@ -632,7 +627,7 @@ async def ingest_law(
 async def create_law(
     law: LawCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
 ):
     """
     Create a new law (admin only).
@@ -709,7 +704,7 @@ async def update_law(
     law_id: int,
     law_update: LawUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
 ):
     """
     Update an existing law (admin only).
@@ -771,7 +766,7 @@ async def update_law(
 async def delete_law(
     law_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
 ):
     """
     Delete a law (admin only).

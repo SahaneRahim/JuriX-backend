@@ -14,6 +14,7 @@ Date: 2026-01-11
 
 import hashlib
 import logging
+import re
 import uuid
 from pathlib import Path
 from typing import Optional, Tuple
@@ -353,3 +354,51 @@ def get_mime_type(file_type: str) -> str:
         raise ValueError(f"Unsupported file type: {file_type}")
     
     return MIME_TYPES[file_type]
+
+
+# ==================== RESOLUTION SECURISEE DES FICHIERS ====================
+
+_FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def resolve_upload_path(file_id: str) -> Path:
+    """
+    Résout un identifiant de fichier en chemin, à l'intérieur du répertoire d'upload.
+
+    Motivation : `/api/v1/ocr/detect` et `/api/v1/ocr/process` acceptaient un
+    `pdf_path` arbitraire — un chemin du système de fichiers du serveur — et se
+    contentaient d'un `.exists()`. N'importe qui pouvait donc énumérer les
+    fichiers de la machine (404 contre 500) et se faire renvoyer le texte de tout
+    document lisible par Tesseract. L'authentification seule ne suffit pas : un
+    jeton d'administration volé rouvrirait la faille.
+
+    Trois barrières indépendantes :
+      1. le motif rejette `..`, `/`, `%2f`, les chemins absolus et les octets nuls
+         AVANT tout accès au disque ;
+      2. `resolve()` + `is_relative_to` bloquent les évasions par lien symbolique ;
+      3. `is_file()` écarte les répertoires et les fichiers spéciaux.
+
+    Args:
+        file_id: Identifiant du fichier, sans extension
+
+    Returns:
+        Chemin absolu du fichier
+
+    Raises:
+        ValueError: identifiant invalide ou chemin sortant du répertoire
+        FileNotFoundError: aucun fichier correspondant
+    """
+    if not _FILE_ID_RE.match(file_id or ""):
+        raise ValueError(f"Identifiant de fichier invalide : {file_id!r}")
+
+    from app.services.file_upload_service import get_upload_service
+
+    root = get_upload_service().storage_path.resolve()
+    for extension in (".pdf", ".docx"):
+        candidate = (root / f"{file_id}{extension}").resolve()
+        if not candidate.is_relative_to(root):
+            raise ValueError("Le chemin sort du répertoire d'upload")
+        if candidate.is_file():
+            return candidate
+
+    raise FileNotFoundError(file_id)

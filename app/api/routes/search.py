@@ -26,6 +26,8 @@ from app.schemas.search import (
     SearchStats,
 )
 from app.services.search_service import SearchService, SearchServiceError
+from app.core.auth import get_current_admin_user
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -345,7 +347,8 @@ async def find_article(
     # dependencies=[Depends(require_admin)]
 )
 async def reindex_all(
-    background_tasks: BackgroundTasks, search_service: SearchService = Depends(get_search_service)
+    background_tasks: BackgroundTasks, search_service: SearchService = Depends(get_search_service),
+    current_admin: User = Depends(get_current_admin_user),
 ) -> ReindexResponse:
     """
     Reconstruit les tsvector de toutes les lois publiées (admin uniquement).
@@ -434,7 +437,10 @@ async def reindex_all(
     response_model=SearchStats,
     status_code=status.HTTP_200_OK,
 )
-async def search_stats(db: AsyncSession = Depends(get_db)) -> SearchStats:
+async def search_stats(
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin_user),
+) -> SearchStats:
     """
     Statistiques d'indexation (administrateurs).
 

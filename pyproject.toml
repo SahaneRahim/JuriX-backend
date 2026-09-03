@@ -25,7 +25,8 @@ pgvector = "^0.2.3"
 
 # Security
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}
-passlib = {extras = ["bcrypt"], version = "^1.7.4"}
+# bcrypt direct : passlib est incompatible avec bcrypt >= 4.1
+bcrypt = ">=4.0,<6.0"
 python-multipart = "^0.0.6"
 
 # (Meilisearch replaced by PostgreSQL tsvector + pg_trgm)

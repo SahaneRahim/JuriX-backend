@@ -21,6 +21,8 @@ from app.core.database import AsyncSessionLocal, get_db
 from app.models.law import Law
 from app.tasks.process_law import process_law_async
 from app.core.config import settings
+from app.core.auth import get_current_admin_user
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +91,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 async def batch_upload(
     files: List[UploadFile] = File(...),
     session_id: str | None = None,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin_user),
 ):
     """
     Batch upload multiple PDF files.
@@ -241,7 +244,8 @@ async def process_batch(laws: List[dict], session_id: str) -> None:
 
                 law.status = "processing"
                 law.processing_progress = 0
-                law.processing_started_at = datetime.now(timezone.utc)
+                # UTC naif : la colonne est un DateTime sans fuseau.
+                law.processing_started_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 await db.commit()
 
             await manager.send_progress(session_id, {
@@ -305,7 +309,8 @@ async def process_batch(laws: List[dict], session_id: str) -> None:
 @router.get("/status")
 async def get_batch_status(
     status: str | None = None,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_admin: User = Depends(get_current_admin_user),
 ):
     """
     Get all laws with optional status filter.
