@@ -142,6 +142,33 @@ python scripts/regenerate_embeddings.py --reindex               # index en masse
 Tant que le backfill n'est pas terminé, la recherche sémantique ne renvoie rien
 et le mode hybride dégrade en recherche plein texte.
 
+### Re-ranking
+
+Les chunks remontés passent par `app/services/reranker.py` avant d'être tronqués
+et mis en cache. L'étage 1 est lexical (numéro d'article demandé, densité des
+termes, expression exacte, titre de loi, pénalité des formules d'exécution) :
+sans dépendance, sans réseau, actif par défaut. L'étage 2 fait noter les 20
+meilleurs chunks par Gemini ; il ajoute un appel facturé sur le chemin critique,
+reste désactivé (`RERANK_LLM_ENABLED`) et dégrade toujours vers l'étage 1.
+
+### Mesure
+
+`RRF_K`, `TEXT_WEIGHT` et `SEMANTIC_WEIGHT` ne sont **pas** calibrés sur ce
+corpus. Le harnais qui les calibre :
+
+```bash
+python -m scripts.eval.generate_eval_set --sample 120   # puis RELECTURE
+python -m scripts.eval.validate_slicing --dim 768       # 40 appels
+python -m scripts.eval.run_eval --dims 3072 1536 768    # la dimension vaut-elle son coût ?
+python -m scripts.eval.run_eval --sweep rrf             # les poids
+```
+
+Le jeu d'évaluation est committé sous `tests/fixtures/eval/`, les résultats de
+run vont dans `data/eval_runs/` (ignoré). Un item non relu ou un corpus qui a
+bougé depuis la génération font **échouer** la mesure plutôt que produire des
+chiffres faux. Avec 60 questions, l'erreur type est d'environ 6 points : un
+écart de 2 points entre deux configurations n'est pas un résultat.
+
 ## Tests
 
 La suite tourne sur un **vrai PostgreSQL** — le cœur du produit est du SQL
