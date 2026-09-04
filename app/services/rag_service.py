@@ -18,7 +18,11 @@ import uuid
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from sqlalchemy import desc, select
+# `text` est indispensable a _fallback_search. Il etait importe localement
+# dans la fonction avant sa reecriture ; sans lui, chaque appel levait un
+# NameError avale par le except de la fonction, et le repli multilingue
+# ne renvoyait jamais rien.
+from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 

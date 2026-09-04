@@ -22,11 +22,33 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-3-flash"
     GEMINI_EMBEDDING_MODEL: str = "models/gemini-embedding-001"
-    # Dimension demandee a l'API (output_dimensionality). Le modele sort 3072
-    # nativement, mais pgvector n'indexe pas au-dela de 2000 : a 1536 l'index
-    # HNSW redevient possible. Doit rester egal a la dimension declaree sur
-    # Article.embedding et a celle de la migration e4f5a6b7c8d9.
-    EMBEDDING_DIM: int = 1536
+    # Dimension demandee a l'API (output_dimensionality) : la sortie native du
+    # modele, sans troncature. Le plafond de 2000 dimensions de pgvector ne
+    # s'applique qu'au type `vector` ; l'index est pose sur une expression
+    # `halfvec(3072)`, qui monte a 4000 (migration f5a6b7c8d9e0). On garde donc
+    # la pleine precision en stockage et un index utilisable.
+    # Doit rester egal a la dimension declaree sur Article.embedding.
+    EMBEDDING_DIM: int = 3072
+
+    # ---- Re-ranking des chunks (app/services/reranker.py) ----
+    # Etage 1 : traits lexicaux, sans reseau ni dependance. Quelques
+    # millisecondes, actif par defaut.
+    RERANK_ENABLED: bool = True
+    # Etage 2 : notation des meilleurs chunks par Gemini. Ajoute un appel
+    # facture et 400 a 900 ms sur le chemin critique, d'ou le defaut a False :
+    # a n'activer qu'apres l'avoir vu gagner sur le lot d'evaluation tenu a
+    # l'ecart.
+    RERANK_LLM_ENABLED: bool = False
+    RERANK_LLM_TOP_N: int = 20
+    RERANK_LLM_TIMEOUT_S: float = 4.0
+
+    # ---- Fusion hybride ----
+    # Valeurs par defaut NON calibrees sur ce corpus : RRF_K = 60 vient du
+    # papier d'origine sur des runs TREC. A remplacer par les valeurs issues
+    # de scripts/eval/run_eval.py, en citant le fichier de run en commentaire.
+    RRF_K: int = 60
+    TEXT_WEIGHT: float = 0.4
+    SEMANTIC_WEIGHT: float = 0.6
 
     # LlamaParse (PDF extraction OCR)
     LLAMA_CLOUD_API_KEY: str = ""

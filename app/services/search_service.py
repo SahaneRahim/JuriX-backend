@@ -351,6 +351,130 @@ class SearchService:
             logger.error(f"❌ Text search failed: {e}")
             raise TextSearchError(f"Échec recherche textuelle: {e}") from e
 
+    # Sur-echantillonnage avant le reclassement exact. L'etage ANN travaille en
+    # fp16 (halfvec) : l'erreur induite sur un score cosinus est de l'ordre de
+    # 1e-3, assez pour permuter des quasi-ex-aequo, pas pour deplacer un chunk
+    # pertinent de cent places. Un facteur 8 avec un plancher a 100 couvre
+    # largement. Valeurs a calibrer avec scripts/eval/run_eval.py.
+    ANN_CANDIDATE_MULTIPLIER = 8
+    ANN_MIN_CANDIDATES = 100
+    ANN_MAX_CANDIDATES = 500
+
+    def _ann_candidates(self, limit: int) -> int:
+        """Nombre de candidats a extraire de l'index avant reclassement exact."""
+        return min(
+            max(limit * self.ANN_CANDIDATE_MULTIPLIER, self.ANN_MIN_CANDIDATES),
+            self.ANN_MAX_CANDIDATES,
+        )
+
+    def _build_semantic_statement(
+        self,
+        query_vector: List[float],
+        filters: Optional[SearchFilters],
+        limit: int,
+        offset: int,
+    ):
+        """
+        Enonce de la recherche semantique, en DEUX etages.
+
+        Etage 1, dans la sous-requete : parcours de l'index HNSW, qui est pose
+        sur l'expression `embedding::halfvec(3072)` — le type `vector` n'est
+        indexable que jusqu'a 2000 dimensions, `halfvec` jusqu'a 4000. On en
+        tire `candidates` lignes.
+
+        Etage 2, a l'exterieur : reclassement de ces candidats a la distance
+        fp32 EXACTE. Le fp16 ne sert qu'a selectionner, jamais a classer.
+
+        Quatre details portent tout le dispositif, et chacun a une variante
+        fausse qui a l'air correcte :
+
+        - La distance exacte est projetee DANS la sous-requete. Calculee a
+          l'exterieur, la sous-requete devrait remonter articles.embedding,
+          soit 12 Ko par candidat traversant le plan.
+        - ORDER BY porte sur l'EXPRESSION, jamais sur l'alias : le
+          planificateur apparie l'index sur l'arbre d'expression.
+        - Le typmod doit etre present des deux cotes. `embedding::halfvec` sans
+          `(3072)` est un noeud d'expression different et n'apparie aucun index.
+        - L'offset ne s'applique qu'a l'exterieur : le poser a l'interieur
+          jetterait les meilleurs candidats avant le reclassement.
+
+        Extrait dans une methode pour qu'un test puisse le compiler sans base.
+        """
+        from sqlalchemy import cast, literal
+        from pgvector.sqlalchemy import HALFVEC, Vector
+
+        dim = EmbeddingService.EMBEDDING_DIM
+        candidates = self._ann_candidates(limit)
+
+        ann_distance = cast(Article.embedding, HALFVEC(dim)).cosine_distance(
+            literal(query_vector, HALFVEC(dim))
+        )
+        exact_distance = Article.embedding.cosine_distance(
+            literal(query_vector, Vector(dim))
+        )
+
+        inner = (
+            select(
+                Article.id.label("article_id"),
+                Article.number,
+                Article.title.label("article_title"),
+                Article.section,
+                Article.page_number,
+                Article.content,
+                Article.law_id,
+                Law.reference,
+                Law.title.label("law_title"),
+                Law.type,
+                Law.language,
+                Law.status,
+                Law.category_id,
+                Law.publication_date,
+                Category.name.label("category_name"),
+                exact_distance.label("distance"),
+            )
+            .select_from(Article)
+            .join(Law, Law.id == Article.law_id)
+            .outerjoin(Category, Category.id == Law.category_id)
+            .where(Article.embedding.isnot(None))
+        )
+        inner = self._apply_filters_pgvector(inner, filters)
+        inner = inner.order_by(ann_distance).limit(candidates).subquery("ann")
+
+        return select(inner).order_by(inner.c.distance).limit(limit).offset(offset)
+
+    async def _apply_hnsw_settings(self, candidates: int, filtered: bool) -> None:
+        """
+        Reglages de session du parcours HNSW.
+
+        hnsw.ef_search vaut 40 par defaut : un parcours non iteratif ne rend
+        JAMAIS plus de lignes que cette valeur. Demander 200 candidats sans le
+        relever revient a en reclasser 40 — le sur-echantillonnage devient
+        decoratif.
+
+        SET n'accepte pas de parametre lie : la valeur est interpolee APRES
+        passage par int(), jamais une saisie.
+
+        Les deux reglages sont sous try : ils n'existent qu'a partir de
+        pgvector 0.8, et un serveur plus ancien doit degrader, pas renvoyer 500.
+        SET LOCAL exige une transaction ouverte — l'AsyncSession en ouvre une au
+        premier execute — et ne vaut que jusqu'a la fin de celle-ci.
+        """
+        ef_search = int(min(max(40, candidates), 1000))
+        try:
+            await self.db.execute(text(f"SET LOCAL hnsw.ef_search = {ef_search}"))
+        except Exception as err:
+            logger.debug(f"hnsw.ef_search indisponible: {err}")
+
+        if filtered:
+            # Sous filtre, PostgreSQL elague APRES le parcours du graphe et peut
+            # rendre moins de lignes que demande. iterative_scan rescanne.
+            try:
+                await self.db.execute(
+                    text("SET LOCAL hnsw.iterative_scan = 'relaxed_order'")
+                )
+            except Exception as err:
+                logger.debug(f"hnsw.iterative_scan indisponible: {err}")
+
     async def semantic_chunks(
         self,
         query: str,
@@ -359,17 +483,17 @@ class SearchService:
         offset: int = 0,
     ) -> List[ChunkResult]:
         """
-        Recherche semantique pgvector, au niveau article.
+        Recherche semantique pgvector, au niveau article, en deux etages.
 
-        Trois differences avec la version precedente, toutes necessaires :
+        Trois differences avec la version d'origine, toutes necessaires :
 
         - Une ligne par ARTICLE. Le `func.max(...) GROUP BY Law.*` d'avant
           calculait bien la distance article par article, puis jetait l'article
           gagnant : le resultat ne portait ni son identite ni son texte.
-        - `Article.embedding.cosine_distance(...)` et non
-          `func.cosine_distance(...)`. Seule la premiere forme compile en `<=>`,
-          l'operateur que l'index HNSW indexe ; la forme fonction produit un
-          appel que le planificateur ne peut pas y rattacher, index ou pas.
+        - L'index est parcouru via `embedding::halfvec(3072)` puis les
+          candidats sont reclasses a la distance fp32 exacte. La forme
+          `func.cosine_distance(...)` d'origine compilait en un APPEL DE
+          FONCTION que le planificateur ne peut rattacher a aucun index.
         - Le score est borne. `1 - distance` peut etre negatif avec de vrais
           vecteurs (composantes negatives), et relevance_score est declare
           ge=0.0 : la reponse levait alors une ValidationError. Les fixtures de
@@ -398,56 +522,10 @@ class SearchService:
             # convertisseur pgvector attend une liste ou un ndarray.
             query_vector = query_embedding.tolist()
 
-            from sqlalchemy import literal
-            from pgvector.sqlalchemy import Vector
+            candidates = self._ann_candidates(limit)
+            await self._apply_hnsw_settings(candidates, filters is not None)
 
-            distance = Article.embedding.cosine_distance(
-                literal(query_vector, Vector(EmbeddingService.EMBEDDING_DIM))
-            )
-
-            stmt = (
-                select(
-                    Article.id.label("article_id"),
-                    Article.number,
-                    Article.title.label("article_title"),
-                    Article.section,
-                    Article.page_number,
-                    Article.content,
-                    Article.law_id,
-                    Law.reference,
-                    Law.title.label("law_title"),
-                    Law.type,
-                    Law.language,
-                    Law.status,
-                    Law.category_id,
-                    Law.publication_date,
-                    Category.name.label("category_name"),
-                    distance.label("distance"),
-                )
-                .select_from(Article)
-                .join(Law, Law.id == Article.law_id)
-                .outerjoin(Category, Category.id == Law.category_id)
-                .where(Article.embedding.isnot(None))
-            )
-
-            stmt = self._apply_filters_pgvector(stmt, filters)
-            # ORDER BY sur l'EXPRESSION et non sur son alias : c'est ce que le
-            # planificateur rattache a l'index HNSW.
-            stmt = stmt.order_by(distance).limit(limit).offset(offset)
-
-            if filters is not None:
-                # Sous filtre, PostgreSQL elague apres le parcours ANN et peut
-                # rendre moins de lignes que demande. iterative_scan rescanne
-                # jusqu'a completer. Sous try : la directive n'existe qu'a
-                # partir de pgvector 0.8, un serveur plus ancien doit degrader
-                # et non renvoyer 500.
-                try:
-                    await self.db.execute(
-                        text("SET LOCAL hnsw.iterative_scan = 'relaxed_order'")
-                    )
-                except Exception as scan_err:
-                    logger.debug(f"hnsw.iterative_scan indisponible: {scan_err}")
-
+            stmt = self._build_semantic_statement(query_vector, filters, limit, offset)
             result = await self.db.execute(stmt)
             rows = result.all()
 
@@ -469,6 +547,9 @@ class SearchService:
                     category_id=row.category_id,
                     category_name=row.category_name,
                     publication_date=row.publication_date,
+                    # Score issu de la distance EXACTE, celle qui a servi au
+                    # tri : un appelant qui re-trierait sur le score doit
+                    # retrouver le meme ordre.
                     relevance_score=max(0.0, min(1.0, 1.0 - float(row.distance))),
                     source="semantic",
                 )
@@ -476,7 +557,10 @@ class SearchService:
             ]
 
             elapsed_ms = int((time.time() - start_time) * 1000)
-            logger.info(f"🧠 Semantic search: {len(chunks)} chunks in {elapsed_ms}ms")
+            logger.info(
+                f"🧠 Semantic search: {len(chunks)} chunks "
+                f"({candidates} candidats ANN) in {elapsed_ms}ms"
+            )
             return chunks
 
         except Exception as e:

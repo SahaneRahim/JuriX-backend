@@ -1,12 +1,12 @@
 """
 Service de génération d'embeddings vectoriels pour recherche sémantique.
 
-Ce service utilise Gemini API pour générer des embeddings 1536-dim
+Ce service utilise Gemini API pour générer des embeddings 3072-dim
 multilingues (FR/EN) avec cache PostgreSQL pour optimiser les performances.
 
 Architecture:
 - Model: models/gemini-embedding-001 (Gemini API)
-- Dimensions: 1536 (settings.EMBEDDING_DIM, indexable par pgvector)
+- Dimensions: 3072 (settings.EMBEDDING_DIM ; index HNSW via une expression halfvec)
 - Cache: Table embedding_cache PostgreSQL avec TTL 7 jours (cache en base)
 - Performance: <300ms single, <2s batch(10)
 
@@ -44,9 +44,10 @@ class EmbeddingService:
     Utilise Gemini API avec cache PostgreSQL (table embedding_cache).
     Supporte FR/EN, normalisation L2 automatique.
 
-    Dimension : settings.EMBEDDING_DIM (1536), demandée à l'API via
-    output_dimensionality. gemini-embedding-001 sort 3072 nativement, mais
-    pgvector n'indexe pas au-dela de 2000 dimensions.
+    Dimension : settings.EMBEDDING_DIM (3072), demandée à l'API via
+    output_dimensionality. C'est la sortie native du modèle ; le plafond
+    d'indexation de 2000 dimensions de pgvector est contourné par un index sur
+    une expression halfvec, pas par une troncature du vecteur.
 
     Attributes:
         EMBEDDING_MODEL: Nom du modèle Gemini
@@ -62,7 +63,10 @@ class EmbeddingService:
     NATIVE_EMBEDDING_DIM = 3072
     # Version de la cle de cache. A incrementer si la facon de construire les
     # vecteurs change sans que le modele ni la dimension ne changent.
-    CACHE_KEY_VERSION = "v2"
+    # v3 : la normalisation est devenue inconditionnelle, donc le vecteur
+    # produit pour un meme (modele, dimension, tache, texte) a change. C'est
+    # exactement le cas que cette constante existe pour couvrir.
+    CACHE_KEY_VERSION = "v3"
     CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 jours
     MAX_TEXT_LENGTH = 10000
     MAX_RETRIES = 3
@@ -341,8 +345,8 @@ class EmbeddingService:
                 if row:
                     cached = np.array(json.loads(row[0]), dtype=np.float32)
                     # Garde de dimension : une entree ecrite sous une autre
-                    # configuration (3072 avant la bascule) doit etre ignoree,
-                    # pas servie. Sinon la colonne vector(1536) rejette
+                    # configuration (1536 avant la bascule) doit etre ignoree,
+                    # pas servie. Sinon la colonne vector rejette
                     # l'insertion, ou pire, la comparaison est silencieusement
                     # fausse.
                     if cached.ndim != 1 or cached.shape[0] != self.EMBEDDING_DIM:
@@ -446,7 +450,7 @@ class EmbeddingService:
 
                 # Garde de dimension, absente de ce chemin alors que le chemin
                 # unitaire l'avait : un lot mal dimensionne allait directement
-                # en base et cassait l'insertion vector(1536).
+                # en base et cassait l'insertion dans la colonne vector.
                 bad = [e.shape[0] for e in new_embeddings if e.shape[0] != self.EMBEDDING_DIM]
                 if bad:
                     raise EmbeddingServiceError(
@@ -500,8 +504,8 @@ class EmbeddingService:
         Clé de cache SHA-256.
 
         Contient le modèle, la DIMENSION et le type de tâche, pas seulement le
-        texte : sans la dimension, un vecteur 3072 écrit avant la bascule
-        serait resservi sous configuration 1536, et sans le type de tâche un
+        texte : sans la dimension, un vecteur écrit sous une autre dimension
+        serait resservi tel quel, et sans le type de tâche un
         même texte encodé comme document ou comme question partagerait une
         entrée alors que les vecteurs diffèrent.
 
@@ -521,16 +525,22 @@ class EmbeddingService:
 
     def _normalize(self, embedding: np.ndarray, requested: bool = True) -> np.ndarray:
         """
-        Normalisation L2.
+        Normalisation L2, INCONDITIONNELLE.
 
-        Appliquée d'office sous la dimension native : l'API ne normalise que la
-        sortie pleine (3072), les troncatures Matryoshka sortent avec une norme
-        quelconque. Or l'opérateur `<=>` de pgvector et le produit scalaire de
-        similarity() supposent des vecteurs unitaires — un vecteur non normalisé
-        donne des scores faux, pas une erreur.
+        Le parametre `requested` est conserve pour les appelants existants mais
+        volontairement ignore. Trois raisons :
+
+        1. Tous les consommateurs supposent une norme de 1. similarity() est un
+           np.dot nu, et le score `1 - distance` borne a [0, 1] ne vaut que sur
+           la sphere unite. Cette garantie ne doit pas dependre d'un reglage.
+        2. Cela ne coute rien. A la dimension native, l'API renvoie deja un
+           vecteur unitaire : l'operation est alors un no-op de quelques
+           microsecondes. Sous la dimension native, la troncature Matryoshka
+           sort avec une norme quelconque et la normalisation est obligatoire.
+        3. Aucun appelant n'a besoin du vecteur brut : le seul
+           normalize=False du code est health_check(), qui ne regarde que la
+           forme.
         """
-        if not requested and self.EMBEDDING_DIM >= self.NATIVE_EMBEDDING_DIM:
-            return embedding
         norm = float(np.linalg.norm(embedding))
         return embedding / norm if norm > 0 else embedding
 

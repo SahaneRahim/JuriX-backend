@@ -238,3 +238,62 @@ class TestEventLoop:
 
         assert result["response"] == "réponse"
         assert seen["thread"] != loop_thread
+
+
+class TestFallbackSearch:
+    """
+    Repli multilingue : recherche d'un article precis quand la recherche
+    generale ne rend rien.
+
+    Cette fonction utilise `text(...)` sans que le module l'importe : chaque
+    appel levait un NameError, avale par son propre except, et le repli n'a
+    jamais rien renvoye. Un test d'integration est le seul moyen de s'en
+    apercevoir, l'exception etant masquee.
+    """
+
+    @pytest.fixture
+    async def constitution(self, db_session):
+        from app.models.law import Article, Law
+
+        law = Law(
+            reference="CONST-1996",
+            title="Constitution de la République du Cameroun",
+            content="Constitution.",
+            type="constitution",
+            language="fr",
+            status="published",
+        )
+        db_session.add(law)
+        await db_session.flush()
+        db_session.add(Article(
+            law_id=law.id,
+            number="8",
+            content="Le Président de la République est le Chef de l'État.",
+            order=8,
+        ))
+        await db_session.commit()
+        return law
+
+    @pytest.mark.asyncio
+    async def test_finds_the_article_in_the_named_document(self, db_session, constitution):
+        service = RAGService.__new__(RAGService)
+        service.db = db_session
+        service.llm = AsyncMock()
+        service.search_service = MagicMock()
+
+        chunks = await service._fallback_search("Que dit l'article 8 de la constitution ?")
+
+        assert chunks, "le repli doit trouver l'article 8 de la constitution"
+        assert chunks[0].number == "8"
+        assert chunks[0].article_id is not None
+        assert "Chef de l'État" in chunks[0].content
+        assert chunks[0].source == "fallback"
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_without_an_article_number(self, db_session, constitution):
+        service = RAGService.__new__(RAGService)
+        service.db = db_session
+        service.llm = AsyncMock()
+        service.search_service = MagicMock()
+
+        assert await service._fallback_search("Parle-moi du droit du travail") == []

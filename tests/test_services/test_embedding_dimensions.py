@@ -68,7 +68,9 @@ class TestDimension:
 
         config = recorder["configs"][-1]
         assert config.output_dimensionality == EmbeddingService.EMBEDDING_DIM
-        assert EmbeddingService.EMBEDDING_DIM == 1536
+        # Valeur absolue et non derivee : le but est de remarquer un changement
+        # accidentel de dimension, pas de le suivre.
+        assert EmbeddingService.EMBEDDING_DIM == 3072
 
     def test_embedding_has_configured_dimension(self, service):
         embedding = service.generate_embedding("Article premier")
@@ -107,9 +109,14 @@ class TestNormalisation:
 
     def test_normalisation_applies_even_when_not_requested(self, service):
         """
-        normalize=False ne doit PAS produire un vecteur non unitaire sous la
-        dimension native : l'API ne normalise que la sortie pleine, et tout le
-        calcul de distance en aval suppose une norme de 1.
+        La normalisation est INCONDITIONNELLE, a toute dimension y compris la
+        native.
+
+        Une version precedente la sautait quand normalize=False a la dimension
+        native, en supposant que l'API renvoie deja un vecteur unitaire. C'est
+        vrai de l'API, mais ca fait dependre d'un reglage une garantie dont tout
+        l'aval depend : similarity() est un np.dot nu, et le score
+        1 - distance borne a [0, 1] ne vaut que sur la sphere unite.
         """
         embedding = service.generate_embedding("Test", normalize=False)
 
@@ -119,15 +126,17 @@ class TestNormalisation:
 class TestCacheKey:
 
     def test_key_isolates_dimension(self, service):
-        key_1536 = service._cache_key("texte", EmbeddingService.TASK_DOCUMENT)
+        key_native = service._cache_key("texte", EmbeddingService.TASK_DOCUMENT)
         original = EmbeddingService.EMBEDDING_DIM
         try:
-            service.EMBEDDING_DIM = 3072
-            key_3072 = service._cache_key("texte", EmbeddingService.TASK_DOCUMENT)
+            # Une dimension differente de celle configuree, sinon les deux cles
+            # sont identiques et le test ne verifie rien.
+            service.EMBEDDING_DIM = 768
+            key_768 = service._cache_key("texte", EmbeddingService.TASK_DOCUMENT)
         finally:
             service.EMBEDDING_DIM = original
 
-        assert key_1536 != key_3072
+        assert key_native != key_768
 
     def test_key_isolates_task_type(self, service):
         as_document = service._cache_key("texte", EmbeddingService.TASK_DOCUMENT)
@@ -151,9 +160,9 @@ class TestCacheRead:
     @pytest.mark.asyncio
     async def test_cache_read_rejects_wrong_dimension(self, recorder, db_session):
         """
-        Une entree ecrite sous l'ancienne dimension doit etre ignoree, pas
-        servie : elle serait rejetee par la colonne vector(1536), ou pire,
-        comparee de travers.
+        Une entree ecrite sous une autre dimension (ici 1536, la configuration
+        precedente) doit etre ignoree, pas servie : elle serait rejetee par la
+        colonne, ou pire, comparee de travers.
         """
         from sqlalchemy import text as sql_text
 
@@ -165,7 +174,7 @@ class TestCacheRead:
                 "INSERT INTO embedding_cache (text_hash, embedding_json, expires_at) "
                 "VALUES (:key, :data, now() + interval '1 day')"
             ),
-            {"key": key, "data": json.dumps([0.1] * 3072)},
+            {"key": key, "data": json.dumps([0.1] * 1536)},
         )
         await db_session.commit()
 

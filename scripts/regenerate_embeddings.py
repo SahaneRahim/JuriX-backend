@@ -1,9 +1,9 @@
 """
 Regenere les embeddings des articles.
 
-A lancer apres la migration e4f5a6b7c8d9 : elle remet la colonne
-`articles.embedding` a NULL en la passant de vector(3072) a vector(1536), donc
-tous les vecteurs existants doivent etre recalcules. Tant que le backfill n'est
+A lancer apres la migration f5a6b7c8d9e0 : elle remet la colonne
+`articles.embedding` a NULL en la repassant en vector(3072), donc tous les
+vecteurs existants doivent etre recalcules. Tant que le backfill n'est
 pas termine, la recherche semantique ne renvoie rien et l'hybride degrade en
 recherche plein texte.
 
@@ -120,7 +120,10 @@ def _write_batch(session, ids: List[int], embeddings) -> None:
     """
     sql = text("UPDATE articles SET embedding = CAST(:embedding AS vector) WHERE id = :id")
     for article_id, embedding in zip(ids, embeddings):
-        literal = "[" + ",".join(f"{v:.7f}" for v in embedding.tolist()) + "]"
+        # %.6g et non %.7f : a 3072 composantes, le format fixe produit
+        # ~31 Ko de texte de requete par UPDATE, pour une precision au-dela de
+        # ce que fp32 represente.
+        literal = "[" + ",".join(f"{v:.6g}" for v in embedding.tolist()) + "]"
         session.execute(sql, {"embedding": literal, "id": article_id})
 
 
@@ -148,11 +151,16 @@ def reindex(session) -> None:
     donc sur zero ligne. Apres un backfill, une reconstruction en masse donne un
     graphe de meilleure qualite que les insertions incrementales. CONCURRENTLY
     exige l'autocommit, d'ou la connexion dediee.
+
+    maintenance_work_mem n'est pas decoratif ici : le graphe HNSW de 20 000
+    vecteurs halfvec(3072) pese environ 130 Mo, contre 64 Mo de defaut serveur.
+    En dessous, pgvector bascule sur une construction disque bien plus lente.
+    A relever au-dela de ~40 000 articles.
     """
     logger.info("Reconstruction de l'index HNSW (peut etre long)...")
     with sync_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.execute(text("SET maintenance_work_mem = '512MB'"))
-        conn.execute(text("REINDEX INDEX CONCURRENTLY idx_articles_embedding_hnsw"))
+        conn.execute(text("REINDEX INDEX CONCURRENTLY idx_articles_embedding_hnsw_halfvec"))
     logger.info("Index reconstruit")
 
 

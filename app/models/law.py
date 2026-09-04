@@ -193,7 +193,7 @@ class Article(Base):
         number: Numéro de l'article (ex: "1er", "2", "3bis")
         title: Titre optionnel de l'article
         content: Contenu textuel de l'article
-        embedding: Vecteur d'embedding (1536 dimensions) pour recherche sémantique
+        embedding: Vecteur d'embedding (3072 dimensions) pour recherche sémantique
         order: Ordre dans la loi (pour tri)
         created_at: Date de création
         law: Relation vers la loi parent
@@ -219,11 +219,13 @@ class Article(Base):
     content = Column(Text, nullable=False)
 
     # pgvector embedding for semantic search.
-    # 1536 dimensions et non les 3072 natifs de gemini-embedding-001 : au-dessus
-    # de 2000, pgvector refuse tout index HNSW ou IVFFlat. Voir la migration
-    # e4f5a6b7c8d9. La dimension est aussi declaree dans settings.EMBEDDING_DIM,
-    # les deux doivent rester d'accord.
-    embedding = Column(Vector(1536), nullable=True)
+    # 3072 dimensions, la sortie native de gemini-embedding-001, stockee en
+    # fp32. Le plafond de 2000 dimensions de pgvector ne concerne que
+    # l'indexation du type `vector` : l'index HNSW est pose sur l'expression
+    # `embedding::halfvec(3072)`, indexable jusqu'a 4000 (migration
+    # f5a6b7c8d9e0). La dimension est aussi declaree dans
+    # settings.EMBEDDING_DIM, les deux doivent rester d'accord.
+    embedding = Column(Vector(3072), nullable=True)
 
     # Metadata
     order = Column(Integer, nullable=False)  # Position in law
