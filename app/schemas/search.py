@@ -235,6 +235,12 @@ class ChunkResult(BaseModel):
         "fts",
         description="Origine: fts | trigram | semantic | law_fts | priority | fallback"
     )
+    # Score du re-ranking, s'il a eu lieu. Champ SEPARE et non ecrasement de
+    # relevance_score : le score de recuperation reste inspectable, ce qui
+    # permet d'attribuer un ecart au re-ranking plutot qu'a la recherche.
+    rerank_score: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Score apres re-ranking, si applique"
+    )
 
     @property
     def fusion_key(self) -> tuple:

@@ -26,6 +26,7 @@ from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from app.core.config import settings
 from app.models.conversation import Conversation, Message
 from app.schemas.rag import Citation, RAGRequest, RAGResponse
 from app.schemas.search import ChunkResult, SearchFilters, SearchRequest
@@ -39,6 +40,8 @@ from app.services.prompts import (
     get_system_prompt,
 )
 from app.services.postgres_search_service import escape_like
+from app.services.reranker import rerank_with_llm
+from app.services.text_features import STOPWORDS
 from app.services.search_service import SearchService
 
 logger = logging.getLogger(__name__)
@@ -107,37 +110,11 @@ class RAGService:
         r"([A-ZÀ-Ý][^,\.]+)"
     )
     
-    # French and English stopwords to filter out for better search
-    STOPWORDS = {
-        # French
-        "le", "la", "les", "un", "une", "des", "de", "du", "d", "l",
-        "ce", "cette", "ces", "mon", "ma", "mes", "ton", "ta", "tes",
-        "son", "sa", "ses", "notre", "nos", "votre", "vos", "leur", "leurs",
-        "je", "tu", "il", "elle", "on", "nous", "vous", "ils", "elles",
-        "me", "te", "se", "lui", "y", "en", "qui", "que", "quoi", "dont", "où",
-        "et", "ou", "mais", "donc", "or", "ni", "car", "si", "quand", "comme",
-        "à", "au", "aux", "avec", "sans", "sous", "sur", "dans", "par", "pour",
-        "est", "sont", "être", "avoir", "fait", "faire", "dit", "dire",
-        "c", "qu", "n", "s", "m", "t",
-        "moi", "toi", "soi", "eux",
-        "ne", "pas", "plus", "moins", "très", "bien", "mal",
-        "tout", "tous", "toute", "toutes", "autre", "autres",
-        "quel", "quelle", "quels", "quelles",
-        "comment", "pourquoi", "quand", "combien",
-        "explique", "expliquer", "donne", "donner", "dis", "parle", "parler",
-        # English
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "could",
-        "should", "may", "might", "must", "shall", "can",
-        "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them",
-        "my", "your", "his", "its", "our", "their",
-        "this", "that", "these", "those",
-        "what", "which", "who", "whom", "whose", "where", "when", "why", "how",
-        "and", "or", "but", "if", "then", "so", "because",
-        "of", "to", "in", "on", "at", "by", "for", "with", "about", "from",
-        "explain", "tell", "give", "show", "describe",
-    }
-    
+    # Mots vides deplaces dans app/services/text_features.py : le re-ranking en
+    # a besoin aussi, et deux listes auraient diverge. L'attribut de classe est
+    # conserve, plusieurs appelants le lisent.
+    STOPWORDS = STOPWORDS
+
     @staticmethod
     def extract_keywords(question: str) -> str:
         """
@@ -469,6 +446,18 @@ class RAGService:
             f"📚 Retrieved {len(chunks)} chunks "
             f"in {search_response.search_time_ms}ms"
         )
+
+        # Etage 2 du re-ranking, optionnel. L'etage 1 a deja ete applique par
+        # SearchService ; celui-ci fait noter les meilleurs chunks par le
+        # modele. Desactive par defaut : il ajoute un appel facture et plusieurs
+        # centaines de millisecondes sur le chemin critique.
+        if settings.RERANK_LLM_ENABLED and chunks and self.llm is not None:
+            chunks = await rerank_with_llm(
+                question, chunks,
+                llm=self.llm,
+                top_n=settings.RERANK_LLM_TOP_N,
+                timeout=settings.RERANK_LLM_TIMEOUT_S,
+            )
 
         if chunks:
             first = chunks[0]

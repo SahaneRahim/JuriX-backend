@@ -416,3 +416,49 @@ class TestTwoStageSemantic:
         assert service._ann_candidates(8) == service.ANN_MIN_CANDIDATES
         assert service._ann_candidates(50) == 400
         assert service._ann_candidates(10_000) == service.ANN_MAX_CANDIDATES
+
+
+class TestRerankWiring:
+    """Le re-ranking doit s'appliquer AVANT la troncature et AVANT le cache."""
+
+    @pytest.mark.asyncio
+    async def test_rerank_applied_before_cache_write(self, db_session, corpus, monkeypatch):
+        """
+        Reclasser apres l'ecriture du cache laisserait cinq minutes de reponses
+        pre-reranking en circulation apres chaque deploiement.
+        """
+        from app.services import search_service as module
+
+        written = {}
+
+        async def _capture(db, key, payload, ttl_seconds=None):
+            written["payload"] = payload
+
+        monkeypatch.setattr(module, "store_in_pg_cache", _capture)
+
+        service = SearchService(db_session, use_cache=True)
+        service.embedding_service = None
+
+        response = await service.search(SearchRequest(
+            query="responsabilité dirigeants", mode="text", limit=5,
+        ))
+
+        assert written, "le cache doit avoir ete ecrit"
+        cached_ids = [c["article_id"] for c in written["payload"]["chunks"]]
+        assert cached_ids == [c.article_id for c in response.chunks]
+        assert all(c.rerank_score is not None for c in response.chunks)
+
+    @pytest.mark.asyncio
+    async def test_rerank_can_be_disabled(self, db_session, corpus, monkeypatch):
+        from app.services import search_service as module
+
+        monkeypatch.setattr(module.settings, "RERANK_ENABLED", False)
+
+        service = SearchService(db_session, use_cache=False)
+        service.embedding_service = None
+
+        response = await service.search(SearchRequest(
+            query="responsabilité dirigeants", mode="text", limit=5,
+        ))
+
+        assert all(c.rerank_score is None for c in response.chunks)

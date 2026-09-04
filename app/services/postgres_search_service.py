@@ -53,7 +53,7 @@ MAX_FTS_CHUNKS = 60
 # Version du schema de reponse mise en cache. A incrementer des que la forme de
 # SearchResponse change : sans elle, des reponses serialisees sous l'ancienne
 # forme (sans `chunks`) continueraient a etre servies pendant tout le TTL.
-CACHE_SCHEMA_VERSION = "v2"
+CACHE_SCHEMA_VERSION = "v3"
 
 
 def _make_cache_key(query: str, filters: Optional[SearchFilters], limit: int, offset: int) -> str:

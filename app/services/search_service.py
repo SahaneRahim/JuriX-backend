@@ -41,6 +41,7 @@ from app.schemas.search import (
     SearchStats,
 )
 from app.services.embedding_service import EmbeddingService, get_embedding_service
+from app.services.reranker import rerank_chunks
 from app.services.postgres_search_service import (
     get_from_pg_cache,
     store_in_pg_cache,
@@ -137,9 +138,13 @@ class SearchService:
 
     # Configuration
     CACHE_TTL_SECONDS = 300   # 5 minutes
-    RRF_K = 60                # Constante RRF fusion
-    TEXT_WEIGHT = 0.4         # Poids recherche textuelle
-    SEMANTIC_WEIGHT = 0.6     # Poids recherche sémantique
+    # Lues dans settings : ces trois valeurs seront calibrees sur le jeu
+    # d'evaluation, et l'exploitation doit pouvoir les changer sans redeployer.
+    # RRF_K = 60 vient du papier RRF d'origine, sur des runs TREC — ce n'est
+    # pas une mesure sur ce corpus.
+    RRF_K = settings.RRF_K
+    TEXT_WEIGHT = settings.TEXT_WEIGHT
+    SEMANTIC_WEIGHT = settings.SEMANTIC_WEIGHT
     MAX_RESULTS_PER_MODE = 20 # Limite avant fusion
 
     def __init__(self, db: AsyncSession, use_cache: bool = True):
@@ -227,6 +232,14 @@ class SearchService:
                 return SearchResponse(**cached_data)
 
         chunks = await self._execute_search_by_mode(request)
+
+        # Re-ranking AVANT la construction de la reponse, donc avant la
+        # troncature a `limit` ET avant l'ecriture du cache : reclasser apres
+        # coup laisserait cinq minutes de reponses pre-reranking en circulation,
+        # et reclasser apres troncature ne pourrait plus rien remonter.
+        if settings.RERANK_ENABLED and chunks:
+            chunks = rerank_chunks(request.query, chunks)
+
         elapsed_ms = int((time.time() - start_time) * 1000)
         response = self._build_search_response(request, chunks, elapsed_ms)
 

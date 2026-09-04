@@ -90,17 +90,26 @@ FORBIDDEN:
         system: Optional[str] = None,
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
+        response_mime_type: Optional[str] = None,
+        response_schema: Optional[Dict] = None,
         **kwargs
     ) -> Dict:
         """
         Generate a response from Gemini.
-        
+
         Args:
             prompt: User prompt/question with context
             system: Optional system prompt override
             temperature: Generation temperature (0.0-1.0)
             max_tokens: Maximum tokens to generate
-            
+            response_mime_type: "application/json" pour une sortie structuree
+            response_schema: schema JSON impose a la reponse
+
+        Ces deux derniers parametres sont EXPLICITES et non laisses a **kwargs :
+        tout ce qui tombait dans kwargs etait silencieusement ignore, si bien
+        qu'un appelant demandant du JSON structure recevait de la prose sans
+        aucun signal.
+
         Returns:
             Dict with 'response' key containing generated text
         """
@@ -111,11 +120,17 @@ FORBIDDEN:
             system_instruction = system or self.SYSTEM_INSTRUCTION
             
             # Create generation config
-            config = types.GenerateContentConfig(
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-                system_instruction=system_instruction
-            )
+            config_kwargs = {
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
+                "system_instruction": system_instruction,
+            }
+            if response_mime_type:
+                config_kwargs["response_mime_type"] = response_mime_type
+            if response_schema:
+                config_kwargs["response_schema"] = response_schema
+
+            config = types.GenerateContentConfig(**config_kwargs)
             
             # Deporte dans un thread : le client google-genai est SYNCHRONE.
             # Appele directement depuis cette coroutine, il gelait la boucle
