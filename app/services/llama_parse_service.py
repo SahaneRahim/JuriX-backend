@@ -142,6 +142,73 @@ def _strip_stamp_blocks(text: str) -> str:
     return re.sub(r"\n{4,}", "\n\n\n", cleaned).strip()
 
 
+# ==================== DECOUPE EN PAGES ====================
+
+# Saut de page emis par LlamaParse quand la reponse arrive en un seul bloc :
+# une ligne contenant EXACTEMENT trois tirets.
+#
+# Les trois contraintes sont mesurees, pas supposees (64 documents apparies a
+# leur PDF, 473 pages de verite terrain) :
+#   - ligne entiere         : `|---|---|`, separateur de tableau markdown, ne
+#                             peut pas declencher de coupure.
+#   - exactement trois      : `-{3,}` donnait 10 sur-decoupes et 44/64 exacts ;
+#                             `-{3}` en donne 3 et 51/64. Les suites plus
+#                             longues sont du contenu (soulignements, bordures
+#                             ASCII), jamais des sauts de page.
+_PAGE_BREAK = re.compile(r"\n-{3}[ \t]*(?=\n)")
+
+# Frontmatter YAML en tete de document. Ses deux delimiteurs sont des lignes de
+# trois tirets : sans ce retrait prealable, le delimiteur FERMANT serait pris
+# pour un saut de page et couperait le document en deux.
+_FRONTMATTER = re.compile(r"\A---[ \t]*\n.*?\n---[ \t]*(?=\n|\Z)", re.DOTALL)
+
+
+def _split_markdown_pages(markdown: str) -> List[str]:
+    """
+    Restitue la structure de pages d'un markdown recu en un seul bloc.
+
+    POURQUOI. `_pages_from` renvoyait `[md]` des que la reponse etait une
+    chaine, ce qui ecrasait la pagination de TOUT le document : les 849 articles
+    en base portaient tous `page_number = 1`. Les vraies coupures etaient
+    pourtant presentes dans le texte, simplement jamais exploitees.
+
+    RESULTAT MESURE sur 64 documents apparies a leur PDF (473 pages reelles) :
+    64 pages restituees avant, 411 apres, dont 51/64 documents au compte exact
+    et 58/64 a une page pres. Les 10 documents restants sont sous-decoupes
+    parce que LlamaParse n'a emis aucun separateur pour ces pages-la : c'est une
+    reconstruction heuristique, pas une source d'autorite. La pagination ne
+    devient exacte qu'avec un moteur qui renvoie un numero de page explicite.
+
+    Les pages vides sont CONSERVEES : `extract_text` numerote avant de filtrer
+    (`enumerate(..., start=1)` puis `if md.strip()`), donc supprimer une page
+    blanche ici decalerait tous les numeros suivants.
+
+    Repli prudent : si la coupure ne produit pas au moins deux pages non vides,
+    le document est rendu tel quel. Un texte sans saut de page reste donc une
+    page unique, comme avant.
+    """
+    # Le frontmatter est mis de cote AVANT la coupure : son delimiteur fermant
+    # est lui aussi une ligne de trois tirets, et couperait la premiere page.
+    front = _FRONTMATTER.match(markdown)
+    head, body = (front.group(0), markdown[front.end():]) if front else ("", markdown)
+
+    parts = _PAGE_BREAK.split(body)
+    if sum(1 for p in parts if p.strip()) < 2:
+        return [markdown]
+
+    # Un saut en tete ou en pied de document produit une page vide parasite,
+    # qui n'en est pas une. Les pages vides INTERIEURES, elles, sont gardees.
+    while parts and not parts[0].strip():
+        parts.pop(0)
+    while parts and not parts[-1].strip():
+        parts.pop()
+
+    pages = [p.strip("\n") for p in parts]
+    if head and pages:
+        pages[0] = f"{head}\n{pages[0]}".strip("\n")
+    return pages
+
+
 class LlamaParseService:
     """
     Client LlamaParse v2 pour l'extraction des PDF juridiques scannes.
@@ -382,7 +449,7 @@ class LlamaParseService:
                 (p.get("markdown", "") if isinstance(p, dict) else str(p)) for p in md
             ]
         if isinstance(md, str) and md.strip():
-            return [md]
+            return _split_markdown_pages(md)
 
         pages = data.get("pages")
         if isinstance(pages, list):
@@ -391,7 +458,7 @@ class LlamaParseService:
             ]
 
         full = data.get("markdown_full")
-        return [full] if isinstance(full, str) and full.strip() else []
+        return _split_markdown_pages(full) if isinstance(full, str) and full.strip() else []
 
     # ==================== DECOUPE DES GROS FICHIERS ====================
 

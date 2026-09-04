@@ -25,10 +25,12 @@ from pathlib import Path
 from typing import Any, Dict
 
 from sqlalchemy import select, text
+from sqlalchemy.exc import DataError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal, SyncSessionLocal
 from app.models.law import Article, Law
+from app.utils.chunk_refiner import DocumentContext, normalize_for_chunking, refine
 from app.utils.text_chunker import extract_articles, ArticleExtractionError
 
 logger = logging.getLogger(__name__)
@@ -208,6 +210,9 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None):
     # autant — la recherche plein texte fonctionne — mais l'anomalie est
     # tracee sur la ligne au lieu de disparaitre dans les journaux.
     embeddings_error = None
+    # articles_count compte TOUS les chunks, embeddings_count seulement les
+    # vectorisables : un document entierement fait de visas et de formules
+    # d'execution n'a legitimement aucun vecteur.
     if articles_count > 0 and embeddings_count == 0:
         embeddings_error = (
             f"Aucun embedding genere pour {articles_count} articles : "
@@ -422,7 +427,12 @@ def _split_and_save_articles(law_id: int, text: str) -> int:
     logger.info(f"📑 Extracting articles from law {law_id}")
 
     try:
-        extracted = extract_articles(text, strict=False, min_article_length=1)
+        # normalize_for_chunking AVANT le decoupage : LlamaParse rend du
+        # markdown, et "**ARTICLE 1ER**:" n'est pas reconnu par les motifs
+        # d'article, qui attendent "Article" en debut de ligne. Sans cette
+        # passe, des documents entiers ressortaient sans un seul article.
+        normalized = normalize_for_chunking(text)
+        extracted = extract_articles(normalized, strict=False, min_article_length=1)
         if not extracted:
             logger.warning(f"⚠️ No articles extracted from law {law_id}")
             return 0
@@ -430,9 +440,32 @@ def _split_and_save_articles(law_id: int, text: str) -> int:
         logger.info(f"📋 Found {len(extracted)} articles")
 
         with SyncSessionLocal() as session:
+            law = session.query(Law).filter(Law.id == law_id).first()
+            context = DocumentContext(
+                reference=(law.reference if law else "") or "",
+                title=(law.title if law else "") or "",
+                doc_type=(law.type if law else None),
+                date=law.publication_date.isoformat() if law and law.publication_date else None,
+                category=(law.category.name if law and law.category else None),
+                language=(law.language if law else "fr") or "fr",
+            )
+
+            # Raffinage : classe chaque chunk, decide ce qui merite un vecteur,
+            # et prepare embed_text (contenu prefixe de l'en-tete du document).
+            # Rien n'est supprime — un visa ou une formule d'execution reste
+            # consultable et cherchable en plein texte — mais il ne consomme
+            # plus d'appel d'embedding et ne pollue plus les resultats
+            # semantiques.
+            refined = refine(extracted, context)
+            logger.info(
+                f"🧹 Raffinage : {refined.stats.get('chunks_out')} chunks, "
+                f"{refined.stats.get('embeddable')} a vectoriser, "
+                f"natures={refined.stats.get('kinds')}"
+            )
+
             session.query(Article).filter(Article.law_id == law_id).delete()
 
-            for article_data in extracted:
+            for article_data in refined.chunks:
                 article = Article(
                     law_id=law_id,
                     number=str(article_data.get("number", "")),
@@ -441,18 +474,29 @@ def _split_and_save_articles(law_id: int, text: str) -> int:
                     content=article_data.get("content", ""),
                     order=article_data.get("position", 0),
                     page_number=article_data.get("page_number"),
+                    kind=article_data.get("kind"),
+                    embed=bool(article_data.get("embed", True)),
+                    embed_text=article_data.get("embed_text"),
                 )
                 session.add(article)
-                logger.debug(f"📄 Created Article {article.number}")
+                logger.debug(f"📄 Created Article {article.number} ({article.kind})")
 
             session.commit()
-            logger.info(f"✅ Saved {len(extracted)} articles for law {law_id}")
+            logger.info(f"✅ Saved {len(refined.chunks)} chunks for law {law_id}")
 
-        return len(extracted)
+        return len(refined.chunks)
 
     except ArticleExtractionError as e:
         logger.warning(f"⚠️ Article extraction failed: {e}")
         return 0
+    except DataError as e:
+        # Depassement de largeur de colonne. On RELEVE au lieu de rendre 0 :
+        # les articles existants ont deja ete supprimes plus haut, donc rendre 0
+        # laisserait la loi publiee avec zero article et sans autre trace qu'une
+        # ligne de log. Le handler de process_law_async la passe en 'refused' et
+        # ecrit la cause dans laws.processing_error, ou elle est interrogeable.
+        logger.error(f"❌ Article rejete par la base (largeur de colonne) : {e}")
+        raise
     except Exception as e:
         logger.error(f"❌ Error saving articles: {e}", exc_info=True)
         return 0
@@ -481,9 +525,18 @@ def _generate_article_embeddings(law_id: int) -> int:
         max_len = EmbeddingService.MAX_TEXT_LENGTH
 
         with SyncSessionLocal() as session:
-            articles = session.query(Article).filter_by(law_id=law_id).all()
+            # Seuls les chunks marques embed sont vectorises. Les visas, les
+            # formules d'execution et les fragments restent en base et
+            # cherchables en plein texte, mais ils ne consomment plus d'appel
+            # d'embedding et ne polluent plus les resultats semantiques.
+            articles = (
+                session.query(Article)
+                .filter_by(law_id=law_id)
+                .filter(Article.embed.is_(True))
+                .all()
+            )
             if not articles:
-                logger.warning(f"⚠️ No articles found for law {law_id}")
+                logger.warning(f"⚠️ No embeddable chunk for law {law_id}")
                 return 0
 
             logger.info(f"📄 Found {len(articles)} chunks to process")
@@ -496,7 +549,12 @@ def _generate_article_embeddings(law_id: int) -> int:
             # article indexe.
             texts = []
             for article in articles:
-                content = article.content or ""
+                # embed_text si le raffinage en a produit un : c'est le contenu
+                # prefixe de l'en-tete du document (reference, titre, date,
+                # categorie, section, page). Sans ce contexte, "Article 3.- La
+                # depense sera imputee sur le budget de l'Etat" est
+                # indistinguable des milliers d'articles identiques du corpus.
+                content = article.embed_text or article.content or ""
                 if len(content) > max_len:
                     logger.warning(
                         f"⚠️ Article {article.number} tronqué pour l'embedding "

@@ -127,6 +127,12 @@ async def law_row(db_session):
     return law
 
 
+# Articles de longueur REALISTE : le raffinage ecarte du vectoriel tout chunk
+# de moins de 120 caracteres, et c'est justifie — sur le corpus reel, 62 % des
+# chunks sous ce seuil sont des lignes de liste nominative ("100. DOURLAI
+# STANISLAS 0769502K"), des fragments de tableau ou des separateurs. Un
+# echantillon de test fait d'articles de 70 caracteres mesurerait donc le seuil,
+# pas le pipeline.
 SAMPLE_TEXT = """
 LOI N° 2024-500 DU 1 JUIN 2024
 PORTANT DISPOSITIONS DIVERSES
@@ -134,13 +140,19 @@ PORTANT DISPOSITIONS DIVERSES
 CHAPITRE I - DISPOSITIONS GÉNÉRALES
 
 Article 1. Objet
-La présente loi fixe les règles applicables aux sociétés commerciales.
+La présente loi fixe les règles applicables à la constitution, au fonctionnement
+et à la dissolution des sociétés commerciales exerçant sur le territoire de la
+République du Cameroun, sans préjudice des dispositions de l'Acte uniforme OHADA.
 
 Article 2. Champ d'application
-Elle s'applique sur l'ensemble du territoire national et concerne toutes les sociétés.
+Elle s'applique sur l'ensemble du territoire national et concerne toutes les
+sociétés commerciales immatriculées au registre du commerce et du crédit
+mobilier, quelle que soit la nationalité de leurs associés ou de leurs dirigeants.
 
 Article 3. Définitions
-Au sens de la présente loi, on entend par société toute personne morale immatriculée.
+Au sens de la présente loi, on entend par société commerciale toute personne
+morale constituée par deux ou plusieurs personnes qui conviennent d'affecter des
+biens à une activité en vue de partager le bénéfice qui pourra en résulter.
 """
 
 
@@ -214,8 +226,16 @@ class TestEmbeddingGeneration:
         rows = (await db_session.execute(
             select(Article).where(Article.law_id == law_row.id)
         )).scalars().all()
-        assert all(a.embedding is not None for a in rows)
-        assert len(rows[0].embedding) == EmbeddingService.EMBEDDING_DIM
+
+        # Seuls les chunks marques embed sont vectorises : les visas et les
+        # fragments restent en base, cherchables en plein texte, sans vecteur.
+        embeddable = [a for a in rows if a.embed]
+        skipped = [a for a in rows if not a.embed]
+
+        assert embeddable, "au moins un chunk doit etre vectorisable"
+        assert all(a.embedding is not None for a in embeddable)
+        assert all(a.embedding is None for a in skipped)
+        assert len(embeddable[0].embedding) == EmbeddingService.EMBEDDING_DIM
 
     @pytest.mark.asyncio
     async def test_overlong_article_does_not_zero_the_whole_law(
@@ -313,3 +333,96 @@ class TestCategoryPersistence:
         assert refreshed.category_id == 2
         assert refreshed.category_confidence == pytest.approx(0.8)
         assert refreshed.status == "published"
+
+
+class TestChunkRefinement:
+    """
+    chunk_refiner est enfin cable au pipeline.
+
+    Il existait, testé, appelé par personne. Il classe chaque chunk, decide ce
+    qui merite un vecteur et prepare le texte reellement envoye au modele. Rien
+    n'est supprime : un visa ou une formule d'execution reste consultable et
+    cherchable en plein texte, il ne consomme simplement plus d'appel
+    d'embedding et ne pollue plus les resultats semantiques.
+    """
+
+    @pytest.mark.asyncio
+    async def test_classifies_every_chunk(self, db_session, law_row):
+        from sqlalchemy import select
+
+        pl._split_and_save_articles(law_row.id, SAMPLE_TEXT)
+
+        rows = (await db_session.execute(
+            select(Article).where(Article.law_id == law_row.id)
+        )).scalars().all()
+
+        assert rows
+        assert all(a.kind for a in rows), "chaque chunk doit porter une nature"
+        assert {a.kind for a in rows} & {"article", "legal_basis", "fragment"}
+
+    @pytest.mark.asyncio
+    async def test_visas_are_kept_but_not_embedded(self, db_session, law_row):
+        """Le texte des visas reste consultable ; il ne part pas au vectoriel."""
+        from sqlalchemy import select
+
+        pl._split_and_save_articles(law_row.id, SAMPLE_TEXT)
+
+        rows = (await db_session.execute(
+            select(Article).where(Article.law_id == law_row.id)
+        )).scalars().all()
+
+        non_articles = [a for a in rows if a.kind in ("legal_basis", "preamble", "fragment")]
+        assert non_articles, "le preambule et les visas doivent etre conserves"
+        assert all(a.content for a in non_articles)
+        assert all(a.embed is False for a in non_articles)
+
+    @pytest.mark.asyncio
+    async def test_embed_text_carries_the_document_header(self, db_session, law_row):
+        """
+        Sans en-tete, "Article 3.- La depense sera imputee sur le budget de
+        l'Etat" est indistinguable des milliers d'articles identiques du corpus.
+        """
+        from sqlalchemy import select
+
+        pl._split_and_save_articles(law_row.id, SAMPLE_TEXT)
+
+        rows = (await db_session.execute(
+            select(Article).where(Article.law_id == law_row.id)
+        )).scalars().all()
+
+        embeddable = [a for a in rows if a.embed]
+        assert embeddable
+        for article in embeddable:
+            assert article.embed_text, "un chunk vectorisable doit avoir un embed_text"
+            assert law_row.reference in article.embed_text
+            # content reste INTACT : ce qui est affiche et cite ne change pas.
+            assert article.embed_text != article.content
+            assert article.content in article.embed_text
+
+    @pytest.mark.asyncio
+    async def test_markdown_emphasis_no_longer_hides_articles(self, db_session, law_row):
+        """
+        LlamaParse rend du markdown : "**ARTICLE 1ER**:" n'etait pas reconnu par
+        les motifs d'article, qui attendent "Article" en debut de ligne. Des
+        documents entiers ressortaient sans un seul article.
+        """
+        from sqlalchemy import select
+
+        markdown = """
+# LOI N° 2024-600 DU 2 JUIN 2024
+
+**ARTICLE 1ER**: La présente loi fixe le régime applicable aux établissements
+publics administratifs et aux entreprises du secteur public et parapublic.
+
+**ARTICLE 2**: Les dispositions de la présente loi s'appliquent sans prejudice
+des textes particuliers regissant certains etablissements.
+"""
+        count = pl._split_and_save_articles(law_row.id, markdown)
+
+        rows = (await db_session.execute(
+            select(Article).where(Article.law_id == law_row.id)
+        )).scalars().all()
+
+        assert count > 0
+        numbers = {a.number for a in rows}
+        assert "1" in numbers or "1ER" in {n.upper() for n in numbers}

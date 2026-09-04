@@ -14,6 +14,7 @@ import respx
 from app.services.llama_parse_service import (
     LlamaParseError,
     LlamaParseService,
+    _split_markdown_pages,
     _strip_stamp_blocks,
 )
 
@@ -199,3 +200,55 @@ class TestNormalisationDesReponses:
 
     def test_reponse_vide(self):
         assert LlamaParseService._pages_from({}) == []
+
+
+class TestDecoupeEnPages:
+    """
+    Restitution de la pagination quand la réponse arrive en un seul bloc.
+
+    Sans cette découpe, `_pages_from` renvoyait une page unique pour tout le
+    document : les 849 articles en base portaient tous `page_number = 1`, alors
+    que les vraies coupures étaient présentes dans le markdown.
+
+    Le seuil « exactement trois tirets » n'est pas arbitraire : mesuré sur 64
+    documents appariés à leur PDF (473 pages de vérité terrain), `-{3,}`
+    donnait 44/64 comptes exacts et 10 sur-découpes, `-{3}` en donne 51/64 et 3.
+    """
+
+    def test_saut_de_page_decoupe(self):
+        pages = _split_markdown_pages("Page un.\n\n---\nPage deux.\n\n---\nPage trois.")
+        assert pages == ["Page un.", "Page deux.", "Page trois."]
+
+    def test_separateur_de_tableau_ne_decoupe_pas(self):
+        # `|---|---|` contient des barres : la ligne entière est exigée.
+        markdown = "Avant\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nApres"
+        assert len(_split_markdown_pages(markdown)) == 1
+
+    def test_tirets_longs_ne_decoupent_pas(self):
+        # Soulignements et bordures ASCII : du contenu, jamais un saut de page.
+        assert len(_split_markdown_pages("A\n-----\nB")) == 1
+
+    def test_document_sans_saut_reste_une_page(self):
+        assert _split_markdown_pages("Un seul bloc.") == ["Un seul bloc."]
+
+    def test_page_vide_interieure_conservee(self):
+        # `extract_text` numérote AVANT de filtrer : supprimer une page blanche
+        # ici décalerait tous les numéros suivants.
+        assert _split_markdown_pages("A\n---\n\n---\nC") == ["A", "", "C"]
+
+    def test_sauts_aux_bords_ne_creent_pas_de_page_vide(self):
+        assert _split_markdown_pages("\n---\nA\n---\nB\n---\n") == ["A", "B"]
+
+    def test_frontmatter_yaml_ne_decoupe_pas(self):
+        # Le délimiteur fermant du frontmatter est lui aussi `---`.
+        assert len(_split_markdown_pages("---\ntitre: x\n---\nCorps unique.")) == 1
+
+    def test_frontmatter_reste_sur_la_premiere_page(self):
+        pages = _split_markdown_pages("---\nt: x\n---\nPage un\n---\nPage deux")
+        assert pages == ["---\nt: x\n---\nPage un", "Page deux"]
+
+    def test_texte_vide(self):
+        assert _split_markdown_pages("") == [""]
+
+    def test_applique_a_markdown_full(self):
+        assert LlamaParseService._pages_from({"markdown_full": "A\n---\nB"}) == ["A", "B"]

@@ -18,6 +18,8 @@ from datetime import datetime, date
 from typing import List, Optional
 
 from sqlalchemy import (
+    text,
+    Boolean,
     Column,
     Integer,
     String,
@@ -213,9 +215,17 @@ class Article(Base):
     )
 
     # Fields
-    number = Column(String(20), nullable=False)
+    # 64 et non 20 : le motif d'ordinaux composes de text_chunker produit des
+    # numeros comme 'QUATRE-VINGT-DIX-SEPTIEME' (25 caracteres). A 20, le commit
+    # levait StringDataRightTruncation et la loi perdait TOUS ses articles
+    # (migration c8d9e0f1a2b3).
+    number = Column(String(64), nullable=False)
     title = Column(String(200), nullable=True)
-    section = Column(String(300), nullable=True)  # TITRE/CHAPITRE section header
+    # Text et non String(300) : SECTION_PATTERNS capture `[^\n]*` et son `\s*`
+    # initial peut franchir un saut de ligne, donc la capture s'etend souvent
+    # sur deux lignes. Des en-tetes de plus de 450 caracteres sont courants sur
+    # du markdown. Aucune borne superieure n'etait defendable.
+    section = Column(Text, nullable=True)  # TITRE/CHAPITRE section header
     content = Column(Text, nullable=False)
 
     # pgvector embedding for semantic search.
@@ -226,6 +236,20 @@ class Article(Base):
     # f5a6b7c8d9e0). La dimension est aussi declaree dans
     # settings.EMBEDDING_DIM, les deux doivent rester d'accord.
     embedding = Column(Vector(3072), nullable=True)
+
+    # Classification produite par app/utils/chunk_refiner.py.
+    # kind : article | legal_basis | preamble | boilerplate | roster | table |
+    #        fragment | continuation
+    # embed : faut-il vectoriser ce chunk. Rien n'est supprime — un visa reste
+    #         consultable et cherchable en plein texte — mais il ne consomme
+    #         plus d'appel d'embedding et ne pollue plus les resultats
+    #         semantiques.
+    # embed_text : le texte REELLEMENT envoye au modele, prefixe de l'en-tete du
+    #         document. `content` reste intact : ce qui est affiche et cite ne
+    #         change pas.
+    kind = Column(String(30), nullable=True)
+    embed = Column(Boolean, nullable=False, server_default=text("true"), default=True)
+    embed_text = Column(Text, nullable=True)
 
     # Metadata
     order = Column(Integer, nullable=False)  # Position in law

@@ -117,6 +117,30 @@ exploitable) : la publier serait pire que de ne rien publier.
 Les extractions sont mises en cache par `sha256` : un fichier déjà traité n'est
 jamais repayé.
 
+## Découpage
+
+`app/utils/text_chunker.py` découpe le document en articles, puis
+`app/utils/chunk_refiner.py` classe chaque chunk et décide de son sort :
+
+| `kind` | vectorisé | pourquoi |
+|---|---|---|
+| `article` | oui | le texte normatif |
+| `legal_basis`, `preamble` | non | les visas ne répondent à aucune question |
+| `boilerplate` | non | « sera enregistré, publié au Journal Officiel », identique dans des milliers de décrets |
+| `roster` | non | listes nominatives, effondrées en un seul chunk |
+| `fragment` | non | moins de 120 caractères : 62 % du corpus sous ce seuil sont des lignes de tableau ou de liste |
+| `table`, `continuation` | selon la taille | découpés aux alinéas au-delà de 3 000 caractères |
+
+**Rien n'est supprimé.** Un chunk non vectorisé reste en base, affichable et
+trouvable en recherche plein texte — il ne consomme simplement pas d'appel
+d'embedding et n'encombre pas les résultats sémantiques.
+
+`embed_text` est le texte réellement envoyé au modèle : le contenu **préfixé de
+l'en-tête du document** (référence, titre, date, catégorie, section, page). Sans
+lui, « Article 3.- La dépense résultant des présentes dispositions sera imputée
+sur le budget de l'État » est indistinguable des milliers d'articles identiques
+du corpus. `content` reste intact : ce qui est affiché et cité ne change pas.
+
 ## Recherche et RAG
 
 La recherche renvoie des **chunks** — un article, pas un document. `SearchResult`

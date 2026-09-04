@@ -92,8 +92,24 @@ class TestDownload:
 
         disposition = response.headers["content-disposition"]
         assert disposition.startswith("attachment")
-        assert "decret-original.pdf" in disposition
         assert response.headers["content-type"] == "application/pdf"
+
+    @pytest.mark.asyncio
+    async def test_filename_is_built_on_the_title(self, client, law_with_file):
+        """
+        Le nom propose vient du TITRE, pas de original_filename.
+
+        original_filename est le nom du fichier aspire depuis prc.cm —
+        "10691_decret-n-2026-164-du-4-mai-2026-portant-..." — dont le prefixe
+        numerique est l'identifiant interne du site source.
+        """
+        from urllib.parse import unquote
+
+        response = await client.get(f"/api/v1/laws/{law_with_file.id}/download")
+
+        disposition = unquote(response.headers["content-disposition"])
+        assert "Décret de test avec fichier.pdf" in disposition
+        assert "decret-original.pdf" not in disposition
 
     @pytest.mark.asyncio
     async def test_law_without_file_gives_404(self, client, db_session):
