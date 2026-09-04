@@ -32,6 +32,32 @@ from app.core.database import SyncSessionLocal
 logger = logging.getLogger(__name__)
 
 
+def _is_daily_quota_error(error: Exception) -> bool:
+    """
+    Reconnait un depassement de quota JOURNALIER.
+
+    Google renvoie 429 aussi bien pour un quota par minute que par jour ; seul
+    le quotaId les distingue. Le premier se rejoue avec profit apres quelques
+    secondes, le second jamais avant sa reinitialisation (minuit, heure du
+    Pacifique).
+    """
+    message = str(error)
+    if "429" not in message and "RESOURCE_EXHAUSTED" not in message:
+        return False
+    return "PerDay" in message or "per day" in message.lower()
+
+
+class QuotaExhaustedError(Exception):
+    """
+    Quota JOURNALIER epuise.
+
+    Distinguee des autres erreurs parce qu'elle ne se rejoue pas : un quota
+    "PerDay" ne se recharge pas en trente secondes, et reessayer ne fait que
+    bruler du temps avant d'echouer quand meme. Le delai suggere par Google
+    (retryDelay ~30 s) ne vaut que pour les quotas par MINUTE.
+    """
+
+
 class EmbeddingServiceError(Exception):
     """Exception levée lors d'erreurs de génération d'embeddings."""
     pass
@@ -207,6 +233,11 @@ class EmbeddingService:
                 return embedding
 
             except Exception as e:
+                if _is_daily_quota_error(e):
+                    raise QuotaExhaustedError(
+                        f"Quota journalier d'embeddings epuise: {e}"
+                    ) from e
+
                 if attempt < self.MAX_RETRIES - 1:
                     logger.warning(f"⚠️ Tentative {attempt + 1} échouée, retry: {e}")
                     time.sleep(self.RETRY_DELAY * (attempt + 1))
@@ -482,6 +513,15 @@ class EmbeddingService:
                 return
 
             except Exception as e:
+                # Un quota JOURNALIER ne se recharge pas pendant la boucle :
+                # insister ne fait que perdre trois fois le delai avant
+                # d'echouer de toute facon. On leve tout de suite, avec un type
+                # distinct pour que l'appelant puisse s'arreter proprement.
+                if _is_daily_quota_error(e):
+                    raise QuotaExhaustedError(
+                        f"Quota journalier d'embeddings epuise: {e}"
+                    ) from e
+
                 if attempt < max_retries - 1:
                     wait_time = retry_delay * (attempt + 1)
                     logger.warning(

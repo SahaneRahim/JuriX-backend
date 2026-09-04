@@ -247,3 +247,62 @@ class TestRequestTimeout:
         assert service.client._api_client._http_options.timeout == (
             settings.GEMINI_TIMEOUT_S * 1000
         )
+
+
+class TestDailyQuota:
+    """
+    Un quota JOURNALIER ne se rejoue pas.
+
+    Google renvoie 429 aussi bien pour un quota par minute que par jour, et
+    suggere un retryDelay d'une trentaine de secondes dans les deux cas. Pour un
+    quota journalier ce delai est trompeur : reessayer trois fois brule une
+    minute avant d'echouer de toute facon, et le lot suivant recommence. Seul le
+    quotaId permet de trancher.
+    """
+
+    def test_recognises_a_daily_quota(self):
+        from app.services.embedding_service import _is_daily_quota_error
+
+        error = Exception(
+            "429 RESOURCE_EXHAUSTED {'quotaId': "
+            "'EmbedContentRequestsPerDayPerUserPerProjectPerModel-FreeTier'}"
+        )
+
+        assert _is_daily_quota_error(error) is True
+
+    def test_a_per_minute_quota_stays_retryable(self):
+        from app.services.embedding_service import _is_daily_quota_error
+
+        error = Exception(
+            "429 RESOURCE_EXHAUSTED {'quotaId': 'EmbedContentRequestsPerMinutePerProject'}"
+        )
+
+        assert _is_daily_quota_error(error) is False
+
+    def test_other_errors_are_not_quota(self):
+        from app.services.embedding_service import _is_daily_quota_error
+
+        assert _is_daily_quota_error(Exception("500 INTERNAL")) is False
+        assert _is_daily_quota_error(Exception("401 UNAUTHENTICATED")) is False
+
+    def test_batch_raises_immediately_without_retrying(self, service, recorder, monkeypatch):
+        """Aucune tentative supplementaire : on leve au premier 429 journalier."""
+        import app.services.embedding_service as module
+        from app.services.embedding_service import QuotaExhaustedError
+
+        calls = {"n": 0}
+
+        def _always_quota(**kwargs):
+            calls["n"] += 1
+            raise RuntimeError(
+                "429 RESOURCE_EXHAUSTED {'quotaId': "
+                "'EmbedContentRequestsPerDayPerUserPerProjectPerModel-FreeTier'}"
+            )
+
+        monkeypatch.setattr(service.client.models, "embed_content", _always_quota)
+        monkeypatch.setattr(module.time, "sleep", lambda *_: None)
+
+        with pytest.raises(QuotaExhaustedError):
+            service.generate_batch_embeddings(["a", "b"])
+
+        assert calls["n"] == 1, "un quota journalier ne doit pas etre rejoue"

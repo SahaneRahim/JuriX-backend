@@ -468,7 +468,11 @@ def _generate_article_embeddings(law_id: int) -> int:
     """
     assert isinstance(law_id, int) and law_id > 0
 
-    from app.services.embedding_service import EmbeddingService, EmbeddingServiceError
+    from app.services.embedding_service import (
+        EmbeddingService,
+        EmbeddingServiceError,
+        QuotaExhaustedError,
+    )
 
     logger.info(f"🔢 Generating embeddings for law {law_id} chunks...")
 
@@ -516,6 +520,15 @@ def _generate_article_embeddings(law_id: int) -> int:
             logger.info(f"✅ Generated {success_count}/{len(articles)} embeddings for law {law_id}")
             return success_count
 
+    except QuotaExhaustedError as e:
+        # Distinguee d'une panne : le document est correctement decoupe et
+        # indexe en plein texte, seuls les vecteurs manquent. Ils se rattrapent
+        # avec scripts/regenerate_embeddings.py une fois le quota reinitialise.
+        logger.error(
+            f"❌ Quota journalier epuise : {e}. "
+            f"Relancer scripts/regenerate_embeddings.py --all apres reinitialisation."
+        )
+        return 0
     except EmbeddingServiceError as e:
         logger.error(f"❌ Embedding service error: {e}")
         return 0

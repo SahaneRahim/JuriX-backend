@@ -33,6 +33,7 @@ from app.core.database import SyncSessionLocal, sync_engine  # noqa: E402
 from app.services.embedding_service import (  # noqa: E402
     EmbeddingService,
     EmbeddingServiceError,
+    QuotaExhaustedError,
 )
 
 logger = logging.getLogger("regenerate_embeddings")
@@ -232,6 +233,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 session.commit()
                 processed += len(batch)
                 logger.info("%s/%s traite(s)", processed, remaining)
+            except QuotaExhaustedError as exc:
+                # Le quota journalier ne se recharge pas : continuer ferait
+                # echouer tous les lots suivants, un par un, pour rien. On
+                # s'arrete en disant exactement ou on en est.
+                session.rollback()
+                remaining = _count_remaining(session, law_ids, args.force)
+                logger.error(
+                    "Quota journalier epuise apres %s article(s) traite(s). "
+                    "Il en reste %s. Le quota se reinitialise a minuit, heure du "
+                    "Pacifique ; relancer la meme commande reprendra ou elle "
+                    "s'est arretee. Detail : %s",
+                    processed, remaining, exc,
+                )
+                return 2
             except Exception as exc:
                 session.rollback()
                 ids = [r["id"] for r in batch]
