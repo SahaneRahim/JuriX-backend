@@ -14,6 +14,7 @@ Date: 2026-01-11
 
 import logging
 import time
+from pathlib import Path
 from typing import List, Optional, cast
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -33,6 +34,7 @@ from app.schemas.law import (
     LawUpdate,
 )
 from app.services.file_upload_service import get_upload_service
+from app.utils.file_utils import resolve_upload_path
 from app.services.search_service import invalidate_search_cache
 from app.tasks.process_law import delete_from_search_index
 
@@ -189,6 +191,34 @@ async def get_law(
         )
 
 
+def _law_file_path(law: Law) -> Path:
+    """
+    Chemin du fichier d'origine d'une loi, resolu UNE seule fois.
+
+    Les cinq endpoints qui servent un PDF repetaient la meme construction a la
+    main, avec un repli qui joignait `law.file_id` au repertoire d'upload sans
+    aucune verification : ni motif, ni resolve(), ni confinement. Ce n'etait pas
+    exploitable — la valeur vient de la base et non de la requete — mais c'etait
+    cinq copies de la faiblesse que resolve_upload_path a ete ecrite pour
+    fermer, et elle n'etait utilisee que par les routes OCR.
+
+    Raises:
+        HTTPException: 404 si la loi n'a pas de fichier, si l'identifiant ne
+            respecte pas le motif, ou si le fichier est absent du disque.
+    """
+    if not law.file_id:
+        raise HTTPException(status_code=404, detail="No source file found for this law")
+
+    try:
+        return resolve_upload_path(law.file_id)
+    except ValueError as exc:
+        # Identifiant hors motif ou chemin sortant du repertoire d'upload.
+        logger.warning(f"⚠️ file_id invalide pour la loi {law.id}: {exc}")
+        raise HTTPException(status_code=404, detail="File not found on server") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="File not found on server") from exc
+
+
 @router.get("/{law_id}/download")
 async def download_law_file(
     law_id: int,
@@ -205,34 +235,15 @@ async def download_law_file(
     if not law.file_id:
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
-    upload_service = get_upload_service()
-    
-    # Try to find file with extension
-    file_path = None
-    # Use stored filename or construct one
-    filename = law.original_filename or f"{law.reference}.pdf"
-    
-    # Check for PDF or DOCX using file_id
-    for ext in [".pdf", ".docx"]:
-        p = upload_service.storage_path / f"{law.file_id}{ext}"
-        if p.exists():
-            file_path = p
-            break
-            
-    if not file_path:
-         # Fallback: maybe file_id IS the filename (legacy behavior?)
-         # Or maybe stored without extension? 
-         p = upload_service.storage_path / law.file_id
-         if p.exists():
-             file_path = p
-         else:
-             raise HTTPException(status_code=404, detail="File not found on server")
+    file_path = _law_file_path(law)
 
     return FileResponse(
         path=str(file_path), 
         filename=str(cast(str, law.original_filename) or file_path.name),
         media_type="application/pdf" if file_path.suffix == ".pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        content_disposition_type="inline"
+        # attachment et non inline : un bouton nomme "Telecharger" doit
+        # enregistrer le fichier, pas l'afficher dans l'onglet.
+        content_disposition_type="attachment"
     )
 
 
@@ -258,22 +269,7 @@ async def get_law_pdf_data(
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
     from app.services.file_upload_service import get_upload_service
-    upload_service = get_upload_service()
-    
-    # Find the file
-    file_path = None
-    for ext in [".pdf", ".docx"]:
-        p = upload_service.storage_path / f"{law.file_id}{ext}"
-        if p.exists():
-            file_path = p
-            break
-            
-    if not file_path:
-        p = upload_service.storage_path / law.file_id
-        if p.exists():
-            file_path = p
-        else:
-            raise HTTPException(status_code=404, detail="File not found on server")
+    file_path = _law_file_path(law)
 
     # Read file and encode to Base64
     with open(str(file_path), "rb") as f:
@@ -315,22 +311,7 @@ async def get_law_pdf_stream(
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
     from app.services.file_upload_service import get_upload_service
-    upload_service = get_upload_service()
-    
-    # Find the file
-    file_path = None
-    for ext in [".pdf", ".docx"]:
-        p = upload_service.storage_path / f"{law.file_id}{ext}"
-        if p.exists():
-            file_path = p
-            break
-            
-    if not file_path:
-        p = upload_service.storage_path / law.file_id
-        if p.exists():
-            file_path = p
-        else:
-            raise HTTPException(status_code=404, detail="File not found on server")
+    file_path = _law_file_path(law)
 
     # Read file content
     with open(str(file_path), "rb") as f:
@@ -372,22 +353,7 @@ async def get_law_pdf_info(
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
     from app.services.file_upload_service import get_upload_service
-    upload_service = get_upload_service()
-    
-    # Find the file
-    file_path = None
-    for ext in [".pdf", ".docx"]:
-        p = upload_service.storage_path / f"{law.file_id}{ext}"
-        if p.exists():
-            file_path = p
-            break
-            
-    if not file_path:
-        p = upload_service.storage_path / law.file_id
-        if p.exists():
-            file_path = p
-        else:
-            raise HTTPException(status_code=404, detail="File not found on server")
+    file_path = _law_file_path(law)
 
     # Get page count
     try:
@@ -438,22 +404,7 @@ async def get_law_pdf_page_image(
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
     from app.services.file_upload_service import get_upload_service
-    upload_service = get_upload_service()
-    
-    # Find the file
-    file_path = None
-    for ext in [".pdf", ".docx"]:
-        p = upload_service.storage_path / f"{law.file_id}{ext}"
-        if p.exists():
-            file_path = p
-            break
-            
-    if not file_path:
-        p = upload_service.storage_path / law.file_id
-        if p.exists():
-            file_path = p
-        else:
-            raise HTTPException(status_code=404, detail="File not found on server")
+    file_path = _law_file_path(law)
 
     # Convert page to image using Poppler
     try:
