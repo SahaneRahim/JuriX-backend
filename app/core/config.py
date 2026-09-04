@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     # Doit rester egal a la dimension declaree sur Article.embedding.
     EMBEDDING_DIM: int = 3072
 
+    # Delai maximal d'un appel Gemini, en SECONDES. Sans lui, le client
+    # n'impose AUCUN delai : une prise reseau qui ne repond plus bloque
+    # indefiniment, sans exception, donc sans declencher la moindre reprise.
+    # Observe en conditions reelles : une ingestion figee 40 minutes sur un
+    # appel d'embeddings, processus vivant, zero UC consommee.
+    GEMINI_TIMEOUT_S: int = 120
+
     # ---- Re-ranking des chunks (app/services/reranker.py) ----
     # Etage 1 : traits lexicaux, sans reseau ni dependance. Quelques
     # millisecondes, actif par defaut.

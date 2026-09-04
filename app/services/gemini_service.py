@@ -80,7 +80,12 @@ FORBIDDEN:
             )
         
         # Initialize client with API key
-        self.client = genai.Client(api_key=self.api_key)
+        # Meme delai que le service d'embeddings : sans http_options, un appel
+        # de generation peut bloquer la boucle d'evenements indefiniment.
+        self.client = genai.Client(
+            api_key=self.api_key,
+            http_options=types.HttpOptions(timeout=settings.GEMINI_TIMEOUT_S * 1000),
+        )
         
         logger.info(f"✅ GeminiService initialized: model={self.model_name}")
     

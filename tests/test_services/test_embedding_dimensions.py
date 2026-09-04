@@ -214,3 +214,36 @@ class TestOffLoop:
         await service.generate_embedding_async("Une question")
 
         assert recorder["configs"][-1].task_type == EmbeddingService.TASK_QUERY
+
+
+class TestRequestTimeout:
+    """
+    Le client Gemini doit imposer un delai maximal.
+
+    Sans http_options, le client attend indefiniment. Observe en conditions
+    reelles pendant l'ingestion du corpus : le processus est reste 40 minutes
+    endormi sur une lecture de prise reseau, vivant, sans consommer d'UC.
+    Aucune exception n'etant levee, la boucle de reprise du service ne se
+    declenchait jamais — un blocage silencieux et sans fin.
+    """
+
+    def test_embedding_client_has_a_timeout(self):
+        # Sans la doublure `recorder` : c'est le VRAI client qu'on inspecte.
+        # Sa construction n'ouvre aucune connexion.
+        from app.core.config import settings
+
+        service = EmbeddingService(use_cache=False)
+        configured = service.client._api_client._http_options.timeout
+
+        assert configured == settings.GEMINI_TIMEOUT_S * 1000  # millisecondes
+        assert configured > 0
+
+    def test_generation_client_has_a_timeout(self):
+        from app.core.config import settings
+        from app.services.gemini_service import GeminiService
+
+        service = GeminiService()
+
+        assert service.client._api_client._http_options.timeout == (
+            settings.GEMINI_TIMEOUT_S * 1000
+        )

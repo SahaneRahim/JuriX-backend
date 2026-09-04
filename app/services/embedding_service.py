@@ -106,7 +106,17 @@ class EmbeddingService:
             # google-generativeai et celui-ci ne peuvent pas cohabiter : le
             # projet declarait l'ancien alors que gemini_service.py importe
             # le nouveau, ce qui empechait l'application de demarrer.
-            self.client = genai.Client(api_key=api_key)
+            # http_options impose un delai maximal. Sans lui le client attend
+            # indefiniment : une ingestion est restee figee 40 minutes sur un
+            # appel d'embeddings, le processus endormi sur une lecture de
+            # prise reseau. Aucune exception n'etant levee, la boucle de
+            # reprise juste en dessous ne se declenchait jamais.
+            self.client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(
+                    timeout=settings.GEMINI_TIMEOUT_S * 1000  # en millisecondes
+                ),
+            )
             logger.info(f"✅ Gemini API configurée (model: {self.EMBEDDING_MODEL})")
         except Exception as e:
             logger.error(f"❌ Échec configuration Gemini API: {e}")
