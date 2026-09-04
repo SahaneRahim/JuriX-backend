@@ -503,3 +503,48 @@ class TestSuggestions:
 
         assert response.status_code == 200
         assert response.json()["suggestions"] == []
+
+
+class TestAndOrFallback:
+    """
+    websearch_to_tsquery relie les mots par ET.
+
+    "obligations dirigeants societe" exige les TROIS mots dans le meme article,
+    ce qu'aucun article ne satisfait souvent, alors que des dizaines parlent de
+    societes. Sans second essai en OU, la recherche tombait directement au
+    niveau LOI : le RAG recevait un document entier sans identite d'article, et
+    la citation sortait sans numero.
+    """
+
+    def test_rewrites_a_word_sequence(self):
+        from app.services.postgres_search_service import _as_any_terms
+
+        assert _as_any_terms("obligations dirigeants societe") == (
+            "obligations OR dirigeants OR societe"
+        )
+
+    def test_leaves_explicit_operators_alone(self):
+        from app.services.postgres_search_service import _as_any_terms
+
+        assert _as_any_terms('"expression exacte"') == '"expression exacte"'
+        assert _as_any_terms("dirigeants -societe") == "dirigeants -societe"
+        assert _as_any_terms("dirigeants OR societe") == "dirigeants OR societe"
+
+    def test_leaves_single_words_alone(self):
+        from app.services.postgres_search_service import _as_any_terms
+
+        assert _as_any_terms("dirigeants") == "dirigeants"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_or_before_the_law_level(self, db_session, corpus):
+        """
+        Une requete dont les mots ne coexistent dans aucun article doit quand
+        meme rendre des ARTICLES, pas une loi entiere.
+        """
+        chunks = await search_articles_pg(
+            db_session, "responsabilité prescription dirigeants", None, 15, 0
+        )
+
+        assert chunks, "le repli en OU doit rendre des articles"
+        assert all(c.article_id is not None for c in chunks)
+        assert all(c.source in ("fts", "trigram") for c in chunks)

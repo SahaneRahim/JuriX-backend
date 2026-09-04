@@ -710,7 +710,11 @@ class SearchService:
                     relevance_score=c.relevance_score,
                 )
                 for c in entry["chunks"][:3]
+                # PREAMBULE et LEGAL_BASIS sont des pseudo-numeros donnes par le
+                # decoupeur au texte hors articles : les exposer comme des
+                # articles ferait afficher "Article LEGAL_BASIS" au front.
                 if c.article_id is not None and c.number
+                and c.number.upper() not in ("PREAMBULE", "LEGAL_BASIS")
             ]
 
             results.append(SearchResult(

@@ -297,3 +297,55 @@ class TestFallbackSearch:
         service.search_service = MagicMock()
 
         assert await service._fallback_search("Parle-moi du droit du travail") == []
+
+
+class TestPseudoArticleNumbers:
+    """
+    PREAMBULE et LEGAL_BASIS ne sont pas des numeros d'article.
+
+    Ce sont les pseudo-numeros que le decoupeur attribue au preambule et aux
+    visas pour ne perdre aucun caractere du document. Presentes tels quels, ils
+    ressortaient en "Article LEGAL_BASIS" dans le contexte du modele et dans les
+    citations affichees a l'utilisateur — invitant a citer un article qui
+    n'existe pas.
+    """
+
+    def test_context_labels_the_legal_basis(self):
+        from app.services.prompts import format_chunk_block
+
+        chunk = _chunk(1, "LEGAL_BASIS", "Vu la Constitution ;")
+
+        block = format_chunk_block(chunk, 1)
+
+        assert "Visas et base légale" in block
+        assert "Article LEGAL_BASIS" not in block
+
+    def test_context_keeps_real_article_numbers(self):
+        from app.services.prompts import format_chunk_block
+
+        block = format_chunk_block(_chunk(1, "39", "Contenu."), 1)
+
+        assert "Article 39" in block
+
+    def test_citation_drops_the_pseudo_number(self, rag_service):
+        chunks = [_chunk(61, "LEGAL_BASIS", "Vu la Constitution et la loi.")]
+
+        sources = rag_service._create_sources_from_results(chunks, "une question")
+
+        assert sources[0].article_number is None
+        # L'identifiant, lui, reste : le chunk existe bien en base.
+        assert sources[0].article_id == 61
+
+    def test_search_result_omits_pseudo_articles(self):
+        from app.services.search_service import SearchService
+
+        chunks = [
+            _chunk(61, "LEGAL_BASIS", "Vu la Constitution."),
+            _chunk(62, "39", "Article trente-neuf."),
+        ]
+
+        results = SearchService._chunks_to_search_results(chunks)
+
+        numbers = [a.number for a in results[0].matched_articles]
+        assert "39" in numbers
+        assert "LEGAL_BASIS" not in numbers

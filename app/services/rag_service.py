@@ -55,6 +55,19 @@ _ORDINAL_WORDS = {
 }
 
 
+# Pseudo-numeros produits par text_chunker pour le texte hors articles
+# (preambule, visas). Ce ne sont pas des numeros d'article et ils ne doivent
+# jamais apparaitre comme tels dans une citation.
+_PSEUDO_ARTICLE_NUMBERS = {"PREAMBULE", "LEGAL_BASIS"}
+
+
+def _citable_article_number(number: Optional[str]) -> Optional[str]:
+    """Numero d'article citable, ou None pour un pseudo-numero."""
+    if not number or number.upper() in _PSEUDO_ARTICLE_NUMBERS:
+        return None
+    return number
+
+
 def _normalize_article_number(number: str) -> str:
     """
     Normalise un numero d'article pour comparaison.
@@ -960,7 +973,7 @@ class RAGService:
                     law_id=chunk.law_id,
                     law_reference=chunk.reference,
                     law_title=chunk.law_title,
-                    article_number=chunk.number or article_num,
+                    article_number=_citable_article_number(chunk.number) or article_num,
                     article_id=chunk.article_id,
                     excerpt=excerpt or "Voir document complet pour détails",
                     relevance_score=chunk.relevance_score,
@@ -1014,7 +1027,7 @@ class RAGService:
                     law_id=chunk.law_id,
                     law_reference=chunk.reference,
                     law_title=chunk.law_title,
-                    article_number=chunk.number,
+                    article_number=_citable_article_number(chunk.number),
                     article_id=chunk.article_id,
                     excerpt=excerpt or "Contenu du document",
                     relevance_score=chunk.relevance_score,

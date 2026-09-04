@@ -236,6 +236,12 @@ Instructions:
 # Budget de contexte. ~24 000 caracteres valent environ 6 000 jetons : de quoi
 # tenir plusieurs articles entiers tout en laissant la place a la question, a
 # l'historique et aux 1 000 jetons de reponse.
+# Pseudo-numeros produits par text_chunker pour le texte hors articles.
+_SPECIAL_CHUNK_LABELS = {
+    "PREAMBULE": "Préambule",
+    "LEGAL_BASIS": "Visas et base légale",
+}
+
 CONTEXT_MAX_CHARS = 24_000
 CONTEXT_MAX_CHARS_PER_CHUNK = 6_000
 CONTEXT_TRUNCATION_MARK = "\n[…]"
@@ -274,8 +280,14 @@ def format_chunk_block(chunk, index: int) -> str:
     lines = [header]
 
     if chunk.number:
-        article_line = f"Article {chunk.number}"
-        if chunk.article_title:
+        # PREAMBULE et LEGAL_BASIS ne sont pas des numeros d'article : ce sont
+        # les pseudo-numeros que le decoupeur donne au preambule et aux visas
+        # pour ne perdre aucun caractere du document. Les annoncer comme
+        # "Article LEGAL_BASIS" inviterait le modele a citer un article qui
+        # n'existe pas.
+        label = _SPECIAL_CHUNK_LABELS.get(chunk.number.upper())
+        article_line = label if label else f"Article {chunk.number}"
+        if chunk.article_title and not label:
             article_line += f" — {chunk.article_title}"
         lines.append(article_line)
 

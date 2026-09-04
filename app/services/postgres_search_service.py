@@ -192,11 +192,45 @@ async def search_articles_pg(
     results = await _fts_articles_query(db, query, filters, limit, offset)
 
     if not results:
+        # websearch_to_tsquery relie les mots par ET : "obligations dirigeants
+        # societe" exige les TROIS dans le meme article, ce qu'aucun article ne
+        # satisfait souvent — alors que 56 articles parlent de societes. Sans ce
+        # second essai en OU, la recherche tombait directement au niveau LOI, et
+        # le RAG recevait un document entier sans identite d'article : la
+        # citation sortait donc sans numero d'article.
+        any_terms = _as_any_terms(query)
+        if any_terms != query:
+            logger.debug(f"FTS ET a 0 resultat, essai en OU pour: {query[:40]}")
+            results = await _fts_articles_query(db, any_terms, filters, limit, offset)
+
+    if not results:
         logger.debug(f"FTS returned 0, trying trigram fallback for: {query[:40]}")
         results = await _trigram_articles_query(db, query, filters, limit, offset)
 
     logger.info(f"📝 PG articles search: {len(results)} chunks for '{query[:40]}'")
     return results
+
+
+def _as_any_terms(query: str) -> str:
+    """
+    Reecrit "a b c" en "a OR b OR c" pour websearch_to_tsquery.
+
+    Le classement reste assure par ts_rank_cd, qui favorise naturellement les
+    articles portant le plus de termes : passer en OU elargit le rappel sans
+    mettre au meme niveau un article qui contient tout et un qui contient un
+    seul mot.
+
+    Les operateurs deja presents dans la saisie (guillemets, OR, -) sont
+    respectes : on ne reecrit qu'une suite de mots simples.
+    """
+    cleaned = query.strip()
+    if any(ch in cleaned for ch in '"-') or " OR " in cleaned.upper():
+        return cleaned
+
+    terms = [t for t in cleaned.split() if len(t) > 1]
+    if len(terms) < 2:
+        return cleaned
+    return " OR ".join(terms)
 
 
 async def _fts_articles_query(

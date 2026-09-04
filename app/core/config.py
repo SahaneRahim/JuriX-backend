@@ -20,7 +20,15 @@ class Settings(BaseSettings):
 
     # Gemini API (LLM for RAG)
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-3-flash"
+    # "gemini-3-flash" n'existe PAS : l'API repond 404 NOT_FOUND. Le RAG ne
+    # pouvait donc pas produire une seule reponse — chaque appel echouait avant
+    # meme d'atteindre le modele. Verifie contre ListModels sur ce compte :
+    # gemini-2.5-flash repond 404 lui aussi, seuls les modeles ci-dessous
+    # acceptent generateContent.
+    #   gemini-3-flash-preview   (retenu : le plus capable disponible ici)
+    #   gemini-3.1-flash-lite    (repli stable si l'apercu est retire)
+    #   gemini-2.5-flash-lite
+    GEMINI_MODEL: str = "gemini-3-flash-preview"
     GEMINI_EMBEDDING_MODEL: str = "models/gemini-embedding-001"
     # Dimension demandee a l'API (output_dimensionality) : la sortie native du
     # modele, sans troncature. Le plafond de 2000 dimensions de pgvector ne
