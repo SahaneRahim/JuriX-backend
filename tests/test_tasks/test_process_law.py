@@ -256,3 +256,60 @@ class TestFtsUpdate:
             {"id": law_row.id},
         )
         assert result.scalar() > 0
+
+
+class TestCategoryPersistence:
+    """
+    Le classifieur tournait sur chaque document et son resultat etait jete.
+
+    _classify_category ne renvoyait qu'un NOM de categorie, et
+    _update_law_metadata n'avait donc rien a ecrire dans laws.category_id :
+    toutes les lois restaient sans categorie et les pages de categorie du front
+    etaient vides, alors que la classification avait bien eu lieu.
+    """
+
+    def test_classifier_returns_the_category_id(self):
+        result = pl._classify_category(
+            "La présente loi fixe le régime des sociétés commerciales et du "
+            "registre du commerce au Cameroun."
+        )
+
+        assert "category_id" in result
+        assert "category" in result
+        assert "confidence" in result
+
+    def test_fallback_leaves_the_id_null(self, monkeypatch):
+        """Sans identifiant fiable, mieux vaut aucune categorie qu'une fausse."""
+        import app.services.document_classifier as classifier_module
+
+        class _Broken:
+            def __init__(self, *a, **k):
+                raise RuntimeError("modele absent")
+
+        monkeypatch.setattr(classifier_module, "DocumentClassifier", _Broken)
+
+        result = pl._classify_category("texte fiscal sur l'impôt")
+
+        assert result["category_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_metadata_update_writes_the_category(self, db_session, law_row):
+        from sqlalchemy import select
+
+        pl._update_law_metadata(
+            law_row.id,
+            language="fr",
+            language_confidence=0.9,
+            category="Droit Commercial",
+            category_confidence=0.8,
+            category_id=2,
+        )
+
+        refreshed = (await db_session.execute(
+            select(Law).where(Law.id == law_row.id)
+        )).scalar_one()
+        await db_session.refresh(refreshed)
+
+        assert refreshed.category_id == 2
+        assert refreshed.category_confidence == pytest.approx(0.8)
+        assert refreshed.status == "published"

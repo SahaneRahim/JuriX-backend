@@ -51,12 +51,18 @@ _MONTHS = {
     "octobre": 10, "novembre": 11, "decembre": 12, "décembre": 12,
 }
 
+# Les valeurs de droite doivent appartenir a la liste close de
+# LawResponse.type (app/schemas/law.py), ACCENTS COMPRIS. Une seule ligne au
+# type invalide fait echouer la serialisation de TOUTE la reponse de
+# GET /api/v1/laws/ : la liste entiere repond 500 a cause d'un document.
 _TYPES = (
-    ("constitution", "constitution"),
     ("ordonnance", "ordonnance"),
-    ("arrete", "arrete"), ("arrêté", "arrete"),
-    ("decision", "decision"), ("décision", "decision"),
-    ("decret", "decret"), ("décret", "decret"),
+    ("arrete", "arrêté"), ("arrêté", "arrêté"),
+    ("decision", "décision"), ("décision", "décision"),
+    ("decret", "décret"), ("décret", "décret"),
+    ("circulaire", "circulaire"),
+    ("instruction", "instruction"),
+    ("constitution", "loi"),
     ("loi", "loi"),
 )
 

@@ -221,6 +221,7 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None):
         language=language_result["language"],
         language_confidence=language_result["confidence"],
         category=category_result["category"],
+        category_id=category_result.get("category_id"),
         category_confidence=category_result["confidence"],
         title=extracted_title,
         processing_error=embeddings_error,
@@ -393,15 +394,22 @@ def _classify_category(text: str) -> Dict[str, Any]:
         if results:
             cat_id, confidence, _ = results[0]
             category_name = classifier.get_category_name(cat_id)
-            return {"category": category_name, "confidence": confidence}
-        return {"category": "Autre", "confidence": 0.0}
+            # L'IDENTIFIANT est renvoye avec le nom : seul le nom l'etait, et
+            # _update_law_metadata n'avait donc rien a ecrire dans
+            # laws.category_id. Le classifieur tournait sur chaque document et
+            # son resultat etait jete — toutes les lois restaient sans
+            # categorie, et les pages de categorie vides.
+            return {"category": category_name, "category_id": cat_id, "confidence": confidence}
+        return {"category": "Autre", "category_id": None, "confidence": 0.0}
     except Exception as e:
         logger.warning(f"⚠️ Category classification failed, using fallback: {e}")
+        # Le repli ne connait pas d'identifiant : la categorie restera nulle,
+        # ce qui est plus honnete qu'un rattachement arbitraire.
         if "fiscal" in text.lower() or "impôt" in text.lower():
-            return {"category": "Droit Fiscal", "confidence": 0.70}
+            return {"category": "Droit Fiscal", "category_id": None, "confidence": 0.70}
         elif "pénal" in text.lower() or "crime" in text.lower():
-            return {"category": "Droit Pénal", "confidence": 0.70}
-        return {"category": "Droit Civil", "confidence": 0.70}
+            return {"category": "Droit Pénal", "category_id": None, "confidence": 0.70}
+        return {"category": "Droit Civil", "category_id": None, "confidence": 0.70}
 
 
 def _split_and_save_articles(law_id: int, text: str) -> int:
@@ -522,6 +530,7 @@ def _update_law_metadata(
     language_confidence: float,
     category: str,
     category_confidence: float,
+    category_id: int = None,
     title: str = None,
     processing_error: str = None,
 ) -> None:
@@ -532,6 +541,11 @@ def _update_law_metadata(
             law.language = language
             law.detected_language = language
             law.language_confidence = language_confidence
+            law.category_confidence = category_confidence
+            # Ecriture de la categorie : le classifieur produisait un resultat
+            # que personne n'enregistrait.
+            if category_id is not None:
+                law.category_id = category_id
             law.status = "published"
             law.processing_error = processing_error
             if title:

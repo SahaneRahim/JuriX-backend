@@ -462,3 +462,44 @@ class TestRerankWiring:
         ))
 
         assert all(c.rerank_score is None for c in response.chunks)
+
+
+class TestSuggestions:
+    """
+    /search/suggest renvoyait une liste vide pour a peu pres toute saisie.
+
+    Deux causes cumulees : similarity() compare la requete au titre ENTIER (un
+    mot de dix caracteres contre un titre de quatre-vingt-dix plafonne vers 0,13,
+    tres sous le seuil de 0,3), et la branche prefixe ne pouvait rien rattraper
+    puisqu'aucun titre ne commence par le mot cherche. S'y ajoutait la sensibilite
+    aux accents, alors que personne ne tape "société" avec son accent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_finds_a_word_inside_a_long_title(self, client, corpus):
+        response = await client.get("/api/v1/search/suggest?q=commerciales&limit=5")
+
+        assert response.status_code == 200
+        suggestions = response.json()["suggestions"]
+        assert suggestions, "un mot present au milieu du titre doit suggerer"
+        assert any("commerciales" in s["title"].lower() for s in suggestions)
+
+    @pytest.mark.asyncio
+    async def test_is_accent_insensitive(self, client, corpus):
+        """"societes" sans accent doit trouver "sociétés"."""
+        accented = await client.get("/api/v1/search/suggest?q=sociétés&limit=5")
+        plain = await client.get("/api/v1/search/suggest?q=societes&limit=5")
+
+        assert accented.status_code == plain.status_code == 200
+        assert plain.json()["suggestions"], "la saisie sans accents doit suggerer"
+        assert (
+            {s["id"] for s in plain.json()["suggestions"]}
+            == {s["id"] for s in accented.json()["suggestions"]}
+        )
+
+    @pytest.mark.asyncio
+    async def test_short_query_returns_nothing(self, client, corpus):
+        response = await client.get("/api/v1/search/suggest?q=a&limit=5")
+
+        assert response.status_code == 200
+        assert response.json()["suggestions"] == []

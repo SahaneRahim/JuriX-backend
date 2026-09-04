@@ -205,14 +205,36 @@ async def suggest(
     limit = min(limit, 10)
     start_time = time.time()
 
+    # word_similarity et l'operateur %>, et NON similarity et % :
+    # similarity() compare la requete au titre ENTIER. Sur ce corpus, un titre
+    # fait 90 caracteres ("Decret N°2025/206 du 19 mai 2025 portant nomination
+    # d'un membre du Conseil...") et le mot cherche une dizaine : la similarite
+    # plafonne autour de 0,13, tres en dessous du seuil de 0,3, et l'endpoint
+    # renvoyait donc une liste VIDE pour a peu pres toute saisie. La branche
+    # prefixe ne rattrapait rien : aucun titre ne commence par le mot cherche.
+    # word_similarity mesure la requete contre le MEILLEUR extrait du titre —
+    # elle vaut 1,0 pour "nomination" dans ce meme titre. L'operateur %> est
+    # celui que gin_trgm_ops sait accelerer (verifie sur pg_amop).
+    # immutable_unaccent des DEUX cotes (migration a6b7c8d9e0f1) : le francais
+    # juridique est plein d'accents que personne ne tape. Mesure sur le corpus :
+    # word_similarity('societe', <titre contenant "societe" accentue>) = 0,500,
+    # sous le seuil de 0,6 — donc aucune suggestion ; deplie, elle vaut 1,000.
+    # Les index trigrammes portent sur la meme expression, sinon chaque frappe
+    # balaierait la table.
     sql = text("""
         SELECT id, title, reference,
-               GREATEST(similarity(title, :q), similarity(reference, :q)) AS score,
-               (title ILIKE :prefix OR reference ILIKE :prefix) AS is_prefix
+               GREATEST(
+                   word_similarity(immutable_unaccent(:q), immutable_unaccent(title)),
+                   word_similarity(immutable_unaccent(:q), immutable_unaccent(reference))
+               ) AS score,
+               (immutable_unaccent(title) ILIKE immutable_unaccent(:prefix)
+                OR immutable_unaccent(reference) ILIKE immutable_unaccent(:prefix)) AS is_prefix
         FROM laws
         WHERE status = 'published'
-          AND (title ILIKE :prefix OR reference ILIKE :prefix
-               OR title % :q OR reference % :q)
+          AND (immutable_unaccent(title) ILIKE immutable_unaccent(:prefix)
+               OR immutable_unaccent(reference) ILIKE immutable_unaccent(:prefix)
+               OR immutable_unaccent(title) %> immutable_unaccent(:q)
+               OR immutable_unaccent(reference) %> immutable_unaccent(:q))
         ORDER BY is_prefix DESC, score DESC, title ASC
         LIMIT :limit
     """)
