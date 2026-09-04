@@ -187,18 +187,37 @@ FORBIDDEN:
                 system_instruction=system_instruction
             )
             
-            # Stream content
-            response_stream = self.client.models.generate_content_stream(
+            # client.aio : la surface ASYNCHRONE native de google-genai.
+            # La version synchrone bloquait la boucle d'evenements a chaque
+            # morceau recu — sur une reponse de plusieurs secondes, le serveur
+            # ne traitait plus aucune autre requete pendant tout le flux, ce qui
+            # annule l'interet meme du streaming. Un deport par thread ne
+            # convient pas ici : il faudrait un pont de file d'attente pour
+            # reinjecter chaque morceau dans la boucle, la ou le client async
+            # fait exactement cela nativement.
+            response_stream = await self.client.aio.models.generate_content_stream(
                 model=self.model_name,
                 contents=prompt,
                 config=config
             )
-            
-            for chunk in response_stream:
+
+            produced = 0
+            async for chunk in response_stream:
                 if chunk.text:
+                    produced += 1
                     yield chunk.text
-                    
-            logger.info("✅ Streaming complete")
+
+            if produced == 0:
+                # Arrive quand max_output_tokens est trop serre pour un modele
+                # a raisonnement : le budget est consomme avant le premier
+                # caractere de reponse. Le client recoit un flux vide, sans
+                # erreur — sans cette trace, le silence est indechiffrable.
+                logger.warning(
+                    f"⚠️ Flux vide (max_tokens={max_tokens}) : budget "
+                    f"probablement epuise par le raisonnement du modele"
+                )
+
+            logger.info(f"✅ Streaming complete ({produced} morceaux)")
             
         except Exception as e:
             logger.error(f"❌ Gemini streaming error: {e}")

@@ -13,6 +13,7 @@ Date: 2026-01-11
 """
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import List, Optional, cast
@@ -191,6 +192,37 @@ async def get_law(
         )
 
 
+def _download_filename(law: Law, file_path: Path) -> str:
+    """
+    Nom de fichier propose a l'utilisateur, construit sur le TITRE du document.
+
+    original_filename est le nom du fichier tel qu'aspire depuis prc.cm :
+    "10691_decret-n-2026-164-du-4-mai-2026-portant-approbation-des-statuts-...".
+    Le prefixe numerique est l'identifiant interne du site source et les tirets
+    remplacent une ponctuation qui existait — cela n'a aucun sens pour qui
+    telecharge le texte.
+
+    Le titre est donc repris tel quel, accents compris (Content-Disposition
+    encode l'UTF-8 via filename*, RFC 5987), en ne retirant que les caracteres
+    interdits dans un nom de fichier.
+    """
+    title = (law.title or "").strip()
+    if not title:
+        title = law.reference or file_path.stem
+
+    # Caracteres interdits par les systemes de fichiers courants, plus les
+    # caracteres de controle. Le reste, accents inclus, est conserve.
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", title)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+
+    # 150 caracteres : sous la limite de 255 octets de la plupart des systemes,
+    # meme apres encodage UTF-8 des accents.
+    if len(cleaned) > 150:
+        cleaned = cleaned[:150].rstrip()
+
+    return f"{cleaned or 'document'}{file_path.suffix or '.pdf'}"
+
+
 def _law_file_path(law: Law) -> Path:
     """
     Chemin du fichier d'origine d'une loi, resolu UNE seule fois.
@@ -239,7 +271,7 @@ async def download_law_file(
 
     return FileResponse(
         path=str(file_path), 
-        filename=str(cast(str, law.original_filename) or file_path.name),
+        filename=_download_filename(law, file_path),
         media_type="application/pdf" if file_path.suffix == ".pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         # attachment et non inline : un bouton nomme "Telecharger" doit
         # enregistrer le fichier, pas l'afficher dans l'onglet.

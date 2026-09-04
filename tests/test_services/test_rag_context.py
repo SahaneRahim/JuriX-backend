@@ -349,3 +349,100 @@ class TestPseudoArticleNumbers:
         numbers = [a.number for a in results[0].matched_articles]
         assert "39" in numbers
         assert "LEGAL_BASIS" not in numbers
+
+
+class TestStreaming:
+    """
+    Le flux passe par la surface asynchrone native du client.
+
+    La version synchrone bloquait la boucle d'evenements a chaque morceau recu :
+    sur une reponse de plusieurs secondes, le serveur ne traitait plus aucune
+    autre requete pendant tout le flux — ce qui annule l'interet meme du
+    streaming.
+    """
+
+    @pytest.mark.asyncio
+    async def test_uses_the_async_client(self, monkeypatch):
+        import asyncio
+
+        from app.services.gemini_service import GeminiService
+
+        service = GeminiService.__new__(GeminiService)
+        service.model_name = "test-model"
+        service.SYSTEM_INSTRUCTION = "sys"
+
+        class _Chunk:
+            def __init__(self, text):
+                self.text = text
+
+        async def _stream(**kwargs):
+            async def _gen():
+                for piece in ("Selon ", "l'article 161, ", "les dirigeants..."):
+                    await asyncio.sleep(0)
+                    yield _Chunk(piece)
+            return _gen()
+
+        sync_called = {"n": 0}
+
+        def _sync_stream(**kwargs):
+            sync_called["n"] += 1
+            raise AssertionError("la surface synchrone ne doit plus etre utilisee")
+
+        service.client = type("C", (), {
+            "aio": type("A", (), {"models": type("M", (), {
+                "generate_content_stream": staticmethod(_stream)})()})(),
+            "models": type("M2", (), {
+                "generate_content_stream": staticmethod(_sync_stream)})(),
+        })()
+
+        pieces = [chunk async for chunk in service.generate_stream(prompt="q")]
+
+        assert "".join(pieces) == "Selon l'article 161, les dirigeants..."
+        assert sync_called["n"] == 0
+
+    @pytest.mark.asyncio
+    async def test_does_not_block_the_event_loop(self):
+        """
+        Une autre tache doit continuer a s'executer PENDANT le flux.
+
+        C'est la propriete que la version synchrone violait, et qu'aucun test
+        d'egalite de texte ne peut detecter.
+        """
+        import asyncio
+
+        from app.services.gemini_service import GeminiService
+
+        service = GeminiService.__new__(GeminiService)
+        service.model_name = "test-model"
+        service.SYSTEM_INSTRUCTION = "sys"
+
+        class _Chunk:
+            def __init__(self, text):
+                self.text = text
+
+        async def _stream(**kwargs):
+            async def _gen():
+                for i in range(5):
+                    await asyncio.sleep(0.01)
+                    yield _Chunk(f"morceau{i} ")
+            return _gen()
+
+        service.client = type("C", (), {
+            "aio": type("A", (), {"models": type("M", (), {
+                "generate_content_stream": staticmethod(_stream)})()})()
+        })()
+
+        ticks = 0
+
+        async def _other_work():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.005)
+                ticks += 1
+
+        task = asyncio.create_task(_other_work())
+        pieces = [chunk async for chunk in service.generate_stream(prompt="q")]
+        task.cancel()
+
+        assert len(pieces) == 5
+        assert ticks > 3, "la boucle etait bloquee pendant le flux"
