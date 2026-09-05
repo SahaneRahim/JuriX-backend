@@ -16,17 +16,12 @@ Author: JuriX Team
 Version: 3.0.0 (PostgreSQL natif)
 """
 
-import asyncio
-import hashlib
-import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
 
 from app.core.config import settings
 from app.models.law import Article, Category, Law
@@ -38,7 +33,6 @@ from app.schemas.search import (
     SearchRequest,
     SearchResponse,
     SearchResult,
-    SearchStats,
 )
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.reranker import rerank_chunks
@@ -56,7 +50,6 @@ from app.services.postgres_search_service import (
     search_titles_trgm_pg,
     update_law_search_vector,
     remove_law_search_index,
-    cleanup_expired_cache,
     _make_cache_key,
 )
 
@@ -923,22 +916,9 @@ class SearchService:
             logger.error(f"❌ Reindexing failed: {e}")
             raise IndexingError(f"Échec réindexation: {e}") from e
 
-    async def invalidate_cache(self) -> int:
-        """
-        Invalide tout le cache PostgreSQL de recherche.
-
-        Returns:
-            Nombre d'entrées supprimées
-        """
-        try:
-            result = await self.db.execute(text("DELETE FROM query_cache"))
-            deleted = getattr(result, "rowcount", 0)
-            await self.db.commit()
-            logger.info(f"🗑️ PG cache invalidated: {deleted} entries deleted")
-            return deleted
-        except Exception as e:
-            logger.warning(f"⚠️ Cache invalidation error: {e}")
-            return 0
+    # SearchService.invalidate_cache() a ete retiree : aucun appelant, et son
+    # corps etait le jumeau exact de `invalidate_search_cache` plus bas dans ce
+    # meme fichier, au message de journal pres.
 
     # ==================== PRIVATE HELPERS ====================
 

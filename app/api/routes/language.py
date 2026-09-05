@@ -11,7 +11,7 @@ Usage:
         -d '{"text": "Article 1. La présente loi..."}'
 """
 
-from typing import Dict, Any
+from typing import Dict
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status

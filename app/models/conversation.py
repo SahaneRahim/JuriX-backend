@@ -4,7 +4,7 @@ Database models for RAG conversation tracking.
 Stores conversation sessions and individual messages with sources and metadata.
 """
 
-from datetime import date, datetime
+from datetime import datetime
 
 from sqlalchemy import (
     JSON,

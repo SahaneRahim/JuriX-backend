@@ -34,7 +34,6 @@ from app.utils.file_utils import (
     ensure_storage_directory,
     generate_unique_filename,
     get_file_hash,
-    get_file_size_mb,
     get_mime_type,
     is_file_size_valid,
     is_valid_docx,

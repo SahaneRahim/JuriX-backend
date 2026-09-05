@@ -39,7 +39,6 @@ from app.services.gemini_service import (
 from app.services.prompts import (
     CONTEXT_TEMPLATE,
     NO_RESULTS_MESSAGE,
-    SYSTEM_PROMPTS,
     build_context_string,
     format_conversation_history,
     get_system_prompt,

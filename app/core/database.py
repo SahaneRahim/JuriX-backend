@@ -125,42 +125,12 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             logger.debug("🗑️  Session DB fermée")
 
 
-async def init_db() -> None:
-    """
-    Initialise les tables de la base de données.
-
-    Crée toutes les tables définies dans les modèles SQLAlchemy
-    si elles n'existent pas déjà.
-
-    Note:
-        En production, utiliser Alembic pour les migrations.
-        Cette fonction est principalement pour les tests.
-
-    Example:
-        >>> # Dans les tests
-        >>> await init_db()
-    """
-    async with engine.begin() as conn:
-        logger.info("🚀 Initialisation des tables de la base de données...")
-        await conn.run_sync(Base.metadata.create_all)
-        logger.info("✅ Tables créées avec succès")
 
 
-async def drop_db() -> None:
-    """
-    Supprime toutes les tables de la base de données.
-
-    ⚠️  ATTENTION: Cette fonction est destructive!
-    Utilisée uniquement pour les tests.
-
-    Example:
-        >>> # Nettoyage après tests
-        >>> await drop_db()
-    """
-    async with engine.begin() as conn:
-        logger.warning("⚠️  Suppression de toutes les tables...")
-        await conn.run_sync(Base.metadata.drop_all)
-        logger.info("✅ Tables supprimées")
+# init_db() et drop_db() ont ete retirees : elles appelaient
+# Base.metadata.create_all/drop_all, et n'etaient appelees par personne. Le
+# schema appartient a Alembic — deux sources de verite pour une meme structure
+# finissent toujours par diverger.
 
 
 async def close_db() -> None:

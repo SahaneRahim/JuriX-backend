@@ -21,10 +21,9 @@ Version: 3.0.0 (PostgreSQL natif)
 import asyncio
 import logging
 import time
-from pathlib import Path
 from typing import Any, Dict
 
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.exc import DataError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -313,7 +312,6 @@ def _extract_pdf_text(file_path) -> tuple:
     Raises:
         LlamaParseError: extraction impossible
     """
-    import asyncio
 
     from app.services.llama_parse_service import (
         LlamaParseError,

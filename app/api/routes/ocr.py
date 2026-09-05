@@ -11,10 +11,8 @@ Date: 2026-01-11
 """
 
 import logging
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import JSONResponse
 
 from app.schemas.ocr import (
     OCRRequest,

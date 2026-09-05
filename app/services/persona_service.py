@@ -14,18 +14,16 @@ Version: 2.1.0
 """
 
 import logging
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any
 from datetime import datetime, date, timedelta
 
-from sqlalchemy import select, func, and_, or_, desc, distinct
+from sqlalchemy import select, func, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.models.conversation import (
     Conversation, Message, PersonaStat, MessageFeedback, PersonaInteraction
 )
-from app.services.prompts import SYSTEM_PROMPTS
 
 # Configure logger
 logger = logging.getLogger(__name__)

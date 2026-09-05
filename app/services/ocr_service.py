@@ -19,7 +19,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from app.core.config import settings
 from app.schemas.ocr import (
@@ -31,7 +31,6 @@ from app.utils.ocr_utils import (
     assess_text_quality,
     clean_ocr_text,
     convert_pdf_to_images,
-    estimate_ocr_time,
     has_embedded_text,
     has_images,
     merge_text_blocks,
@@ -330,7 +329,12 @@ class OCRService:
         logger.info(f"🔍 OCR en cours: {pdf_path.name} ({language}, {dpi} DPI)")
 
         try:
-            import pytesseract
+            # Import volontaire, jamais utilise directement : il echoue tout de
+            # suite si pytesseract manque, AVANT la conversion du PDF en images
+            # qui coute plusieurs secondes par page. Sans lui, l'absence de la
+            # dependance se manifesterait beaucoup plus loin et beaucoup plus
+            # cher.
+            import pytesseract  # noqa: F401
 
             # 1. Convertir PDF en images
             images = convert_pdf_to_images(pdf_path, dpi=dpi)
@@ -453,7 +457,6 @@ class OCRService:
 
         # Vérifier Poppler (pdf2image)
         try:
-            from pdf2image import pdfinfo_from_path
 
             # Test simple
             status["poppler"] = {"available": True}

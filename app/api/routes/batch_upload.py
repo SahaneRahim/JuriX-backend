@@ -9,10 +9,9 @@ Handles:
 
 from fastapi import APIRouter, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
-from typing import List, Optional, cast
+from sqlalchemy import select
+from typing import List
 import asyncio
-import json
 import uuid
 import logging
 from datetime import datetime, timezone

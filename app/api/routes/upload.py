@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Dict
 
 from fastapi import Depends, APIRouter, File, HTTPException, UploadFile, status
-from fastapi.responses import JSONResponse
 
 from app.schemas.file_upload import FileUploadResult, UploadServiceHealth
 from app.services.file_upload_service import FileUploadError, FileUploadService

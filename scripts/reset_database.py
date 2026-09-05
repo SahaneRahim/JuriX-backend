@@ -6,8 +6,21 @@ Utilise la méthode la plus directe avec gestion d'erreurs complète.
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
-# Configuration
-DATABASE_URL = "postgresql://jurix:jurix_dev_password_change_in_prod@localhost:5432/jurix_db"
+# L'URL vient de Settings, pas d'une constante.
+#
+# Elle etait ecrite en dur ici, mot de passe compris, et pointait sur un port
+# (5432) et une base (`jurix_db`) qui n'existent pas : le script ne pouvait de
+# toute facon plus se connecter. Passer par Settings lui rend son utilite ET
+# retire le secret du depot.
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.core.config import settings  # noqa: E402
+
+# psycopg2 ne comprend pas le prefixe +asyncpg de SQLAlchemy.
+DATABASE_URL = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
 
 def reset_database_fixed():
     """Vide la base de données de manière robuste."""

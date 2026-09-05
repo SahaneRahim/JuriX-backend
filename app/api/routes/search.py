@@ -12,7 +12,6 @@ Version: 1.0.0
 
 import logging
 import time
-from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import text

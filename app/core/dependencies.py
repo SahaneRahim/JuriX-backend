@@ -15,9 +15,8 @@ Usage dans routes:
 import logging
 from functools import lru_cache
 
-from app.services.embedding_service import EmbeddingService, get_embedding_service
+from app.services.embedding_service import get_embedding_service
 from app.services.language_detector import LanguageDetector
-from app.services.search_service import SearchService
 
 logger = logging.getLogger(__name__)
 
@@ -45,44 +44,15 @@ def get_language_detector() -> LanguageDetector:
     return LanguageDetector()
 
 
-def clear_detector_cache():
-    """
-    Efface le cache du detector (force rechargement).
-
-    Utile pour:
-    - Tests (isolation entre tests)
-    - Mise à jour des modèles
-    - Debugging
-
-    Example:
-        >>> clear_detector_cache()
-        >>> detector = get_language_detector()  # Nouvelle instance
-    """
-    get_language_detector.cache_clear()
-    logger.info("🗑️  Cache LanguageDetector effacé")
 
 
-def clear_embedding_service_cache():
-    """
-    Efface le cache du service d'embeddings (force rechargement).
-
-    Utile pour:
-    - Tests (isolation entre tests)
-    - Mise à jour des modèles
-    - Debugging
-
-    Example:
-        >>> clear_embedding_service_cache()
-        >>> service = get_embedding_service()  # Nouvelle instance
-    """
-    get_embedding_service.cache_clear()
-    logger.info("🗑️  Cache EmbeddingService effacé")
+# clear_detector_cache() et clear_embedding_service_cache() ont ete retirees :
+# aucun appelant, ni en production ni dans les tests. Les caches @lru_cache
+# qu'elles vidaient vivent le temps du processus.
 
 
 # Exports for dependency injection
 __all__ = [
     "get_language_detector",
     "get_embedding_service",
-    "clear_detector_cache",
-    "clear_embedding_service_cache",
 ]

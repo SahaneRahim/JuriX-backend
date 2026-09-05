@@ -18,7 +18,6 @@ from datetime import datetime
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import joinedload
 
 from app.models.law import Category, Law
 from app.schemas.law import CategoryCreate, CategoryUpdate, CategoryResponse, CategoryStats

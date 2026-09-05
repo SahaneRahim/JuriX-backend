@@ -1,7 +1,6 @@
 """Configuration application - Toutes les variables d'environnement."""
 
 from pydantic_settings import BaseSettings
-from typing import Optional
 
 
 class Settings(BaseSettings):

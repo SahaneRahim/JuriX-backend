@@ -442,9 +442,3 @@ def get_gemini_service() -> GeminiService:
     return _gemini_service
 
 
-def clear_gemini_service_cache():
-    """Clear the singleton instance (for testing)."""
-    global _gemini_service
-    _gemini_service = None
-    get_gemini_service.cache_clear()
-    logger.info("🗑️ GeminiService cache cleared")

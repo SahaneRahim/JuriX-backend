@@ -424,31 +424,4 @@ def estimate_ocr_time(page_count: int, dpi: int = 300) -> int:
     return max(estimated_seconds, 1)
 
 
-def split_text_into_pages(text: str, page_markers: List[str] = None) -> List[str]:
-    """
-    Split OCR text back into pages if markers present.
-
-    Args:
-        text: Full OCR text
-        page_markers: List of page marker patterns
-
-    Returns:
-        List of text per page
-
-    Example:
-        >>> text = "Page 1 text\\n--- PAGE BREAK ---\\nPage 2 text"
-        >>> split_text_into_pages(text, ["--- PAGE BREAK ---"])
-        ['Page 1 text', 'Page 2 text']
-    """
-    if not page_markers:
-        # Default markers
-        page_markers = ["\f", "--- PAGE BREAK ---", "\n\n\n"]
-
-    pages = [text]
-
-    for marker in page_markers:
-        if marker in text:
-            pages = text.split(marker)
-            break
-
-    return [page.strip() for page in pages if page.strip()]
+# split_text_into_pages() a ete retiree : definie, documentee, jamais appelee.

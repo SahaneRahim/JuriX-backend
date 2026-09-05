@@ -18,8 +18,8 @@ import time
 from pathlib import Path
 from typing import List, Optional, cast
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
-from fastapi.responses import FileResponse, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,14 +28,13 @@ from sqlalchemy.orm import selectinload
 from app.core.auth import get_current_admin_user
 from app.models.user import User
 from app.core.database import get_db, AsyncSessionLocal
-from app.models.law import Category, Law
+from app.models.law import Law
 from app.schemas.law import (
     LawDetailResponse,
     LawCreate,
     LawResponse,
     LawUpdate,
 )
-from app.services.file_upload_service import get_upload_service
 from app.utils.file_utils import resolve_upload_path
 from app.services.search_service import invalidate_search_cache
 from app.tasks.process_law import delete_from_search_index
@@ -307,7 +306,6 @@ async def get_law_pdf_data(
     if not law.file_id:
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
-    from app.services.file_upload_service import get_upload_service
     file_path = _law_file_path(law)
 
     # Read file and encode to Base64
@@ -349,7 +347,6 @@ async def get_law_pdf_stream(
     if not law.file_id:
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
-    from app.services.file_upload_service import get_upload_service
     file_path = _law_file_path(law)
 
     # Read file content
@@ -391,7 +388,6 @@ async def get_law_pdf_info(
     if not law.file_id:
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
-    from app.services.file_upload_service import get_upload_service
     file_path = _law_file_path(law)
 
     # Get page count
@@ -442,7 +438,6 @@ async def get_law_pdf_page_image(
     if not law.file_id:
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
-    from app.services.file_upload_service import get_upload_service
     file_path = _law_file_path(law)
 
     # Convert page to image using Poppler

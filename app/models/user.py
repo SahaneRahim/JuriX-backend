@@ -8,7 +8,6 @@ Date: 2026-01-12
 """
 
 from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import Boolean, Column, DateTime, Integer, String
 from sqlalchemy.orm import relationship

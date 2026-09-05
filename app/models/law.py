@@ -14,8 +14,6 @@ Features v2.1:
 Author: JuriX Team
 """
 
-from datetime import datetime, date
-from typing import List, Optional
 
 from sqlalchemy import (
     text,
@@ -29,7 +27,6 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
-    JSON,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import relationship

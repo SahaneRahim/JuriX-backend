@@ -13,7 +13,7 @@ Date: 2026-01-11
 
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select, text

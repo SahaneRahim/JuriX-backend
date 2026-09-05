@@ -592,6 +592,3 @@ def get_llama_parse_service() -> LlamaParseService:
     return LlamaParseService()
 
 
-def clear_llama_parse_service_cache() -> None:
-    """Force la recreation du singleton (tests, rotation de cle)."""
-    get_llama_parse_service.cache_clear()

@@ -21,7 +21,7 @@ Version: 2.1.0
 """
 
 import logging
-from typing import List, Dict, Optional, Any
+from typing import List, Optional
 from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Path
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,8 +31,7 @@ from app.services.persona_service import (
     PersonaService,
     InvalidPersonaError,
     MessageNotFoundError,
-    FeedbackAlreadyExistsError,
-    PersonaServiceError
+    FeedbackAlreadyExistsError
 )
 from app.schemas.persona import (
     PersonaInfo,
@@ -42,10 +41,8 @@ from app.schemas.persona import (
     FeedbackStats,
     EngagementMetricsResponse,
     PopularQuestionsResponse,
-    PopularQuestion,
     PersonaComparisonResponse,
     TrendsResponse,
-    TrendPoint,
     UsageBreakdownResponse,
     HealthCheckResponse,
     ErrorResponse
