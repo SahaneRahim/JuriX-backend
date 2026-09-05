@@ -16,7 +16,7 @@ article, réponses citées via Gemini.
 | Recherche sémantique | `pgvector` + index HNSW, embeddings `gemini-embedding-001` tronqués à 1536 dim. |
 | Cache | tables `query_cache` et `embedding_cache` |
 | LLM | Gemini (`google-genai`) |
-| OCR | LlamaParse v2 |
+| Extraction PDF | Gemini multimodal |
 | Tâches de fond | `BackgroundTasks` FastAPI |
 
 Pas de Redis, pas de Meilisearch, pas de Celery : recherche, cache et files
@@ -82,7 +82,7 @@ Toutes les variables de `.env.example` sont réellement lues par
 |---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://…` — le driver asyncpg est obligatoire |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | LLM des réponses. Modèles Flash actuels : `gemini-3.8-flash`, `3.7`, `3.6`, `3.5` |
-| `LLAMA_CLOUD_API_KEY` / `LLAMA_PARSE_TIER` | OCR. `cost_effective` est le tier recommandé |
+| `PDF_EXTRACTION_PAGES_PER_CALL` | Pages envoyées par appel d'extraction (défaut 20) |
 | `SECRET_KEY` | Signature JWT. **Obligatoire hors développement** : l'application refuse de démarrer si la valeur du dépôt est conservée |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Valeurs par défaut de `scripts/create_admin.py` |
 
@@ -103,7 +103,7 @@ créés par `POST /api/v1/admin/users` ou par `scripts/create_admin.py`.
 ## Chaîne d'ingestion
 
 ```
-upload → LlamaParse → normalisation → découpage par article
+upload → extraction Gemini → normalisation → découpage par article
        → embeddings → tsvector (trigger) → published
 ```
 
@@ -111,14 +111,28 @@ Un document est créé en `processing`. Il passe à `published` en cas de succè
 à `refused` avec `processing_error` en cas d'échec — jamais de contenu
 partiellement extrait dans le corpus public.
 
-**Aucun repli dégradé.** LlamaParse réessaie 4 fois avec un délai croissant ;
-au-delà, l'ingestion échoue. La couche texte des PDF scannés du corpus a été
-mesurée à environ 20 % de rappel (filigrane inséré au milieu des phrases,
-cachets lus comme du charabia, un document sur cinq sans aucun texte
-exploitable) : la publier serait pire que de ne rien publier.
+**Aucun repli dégradé.** L'extraction réessaie trois fois sur une saturation du
+fournisseur (503), jamais sur un quota épuisé (429) ; au-delà, l'ingestion
+échoue. La couche texte des PDF scannés du corpus a été mesurée à environ 20 %
+de rappel (filigrane inséré au milieu des phrases, cachets lus comme du
+charabia, un document sur cinq sans aucun texte exploitable) : la publier serait
+pire que de ne rien publier.
 
-Les extractions sont mises en cache par `sha256` : un fichier déjà traité n'est
-jamais repayé.
+**Pagination.** Gemini rend un marqueur `<<PAGE:n>>` par page, ce que LlamaParse
+ne faisait pas — d'où des articles portant tous `page_number = 1`. C'est la
+raison du changement de moteur, pas le prix.
+
+**Refus de transcription.** Le modèle rend parfois `finish_reason=RECITATION`
+sur une page d'acte officiel dont la forme lui est familière : mesuré à une page
+de garde sur sept documents. Le refus est **par page** — le lot est alors rejoué
+page par page, et seule la page refusée est perdue, signalée dans
+`processing_error`. Reformuler la consigne n'y change rien (trois variantes
+essayées), réduire le lot non plus.
+
+**Quota.** Le palier gratuit plafonne à 20 appels de génération par jour et par
+modèle. Un document d'une page coûte un appel ; les 72 PDF locaux (481 pages) en
+coûtent 83. Le script de ré-extraction est reprenable : le cache `sha256` fait
+qu'un fichier déjà traité n'est jamais repayé.
 
 ## Découpage
 

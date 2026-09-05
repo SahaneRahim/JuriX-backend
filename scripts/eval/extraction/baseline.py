@@ -18,10 +18,15 @@ CE QU'IL MESURE, et pourquoi chaque mesure est la :
      compte d'articles est non nul, et rien ne signale l'echec. Le taux de
      PARA_ est donc le vrai indicateur de sante, pas articles_count > 0.
 
-  2. Le gain latent de normalize_for_chunking(). La fonction existe dans
-     app/utils/chunk_refiner.py, elle est testee, et elle n'est appelee nulle
-     part en production. On rejoue la detection de motif sur les caches OCR
-     deja payes, avec et sans elle, pour chiffrer ce que son cablage rapporte.
+  2. Le gain de normalize_for_chunking(). Elle EST desormais appelee en
+     production (app/tasks/process_law.py, avant extract_articles) — cette
+     docstring affirmait le contraire, ce qui etait vrai a l'ecriture et ne
+     l'est plus. On rejoue la detection de motif sur les caches deja payes,
+     avec et sans elle, pour chiffrer ce que son cablage rapporte.
+
+     ATTENTION : la metrique depend de _detect_article_pattern, qui a change
+     depuis. Rejouee aujourd'hui sur les MEMES caches, elle rend x1,05 la ou
+     phase0 relevait x3,52. Deux mesures ne se comparent qu'au meme commit.
 
   3. La couverture de pages. _pages_from renvoie une seule page quand la reponse
      de LlamaParse est une chaine, alors que le markdown contient les vraies

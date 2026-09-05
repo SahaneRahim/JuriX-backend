@@ -71,13 +71,17 @@ class Settings(BaseSettings):
     TEXT_WEIGHT: float = 0.4
     SEMANTIC_WEIGHT: float = 0.6
 
-    # LlamaParse (PDF extraction OCR)
-    LLAMA_CLOUD_API_KEY: str = ""
-    # Tier de parsing : fast(1cr) | cost_effective(3cr) | agentic(10cr) | agentic_plus(45cr)
-    # cost_effective est le meilleur rapport qualite/prix mesure sur le corpus prc.cm
-    LLAMA_PARSE_TIER: str = "cost_effective"
-    # Cache OCR par sha256 — evite de repayer l'extraction d'un fichier deja traite
+    # LLAMA_CLOUD_API_KEY et LLAMA_PARSE_TIER ont ete retires : l'extraction
+    # passe par Gemini (app/services/pdf_extraction_service.py), qui rend un
+    # numero de page explicite la ou LlamaParse n'en donnait aucun.
+    # Cache d'extraction par sha256 — evite de repayer un fichier deja traite
     OCR_CACHE_DIR: str = "./data/ocr_cache"
+    # Pages envoyees par appel a Gemini. La limite du modele est de 65 536
+    # jetons EN SORTIE ; a ~2400 caracteres par page, 20 pages produisent
+    # ~13 000 jetons, avec de la marge pour la reflexion interne. Le palier
+    # gratuit plafonnant a 20 appels par jour, agrandir le lot economise des
+    # appels — au risque de tronquer si les pages sont denses.
+    PDF_EXTRACTION_PAGES_PER_CALL: int = 20
 
     # CORS — comma-separated list of extra allowed origins for production
     # Example: https://jurix.vercel.app,https://www.jurix.cm

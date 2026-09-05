@@ -294,44 +294,53 @@ def _ingest_file_content(law_id: int, law, file_id: str):
 
 def _extract_pdf_text(file_path) -> tuple:
     """
-    Extrait le texte d'un PDF via LlamaParse. Aucun repli degrade.
+    Extrait le texte d'un PDF via Gemini multimodal. Aucun repli degrade.
 
-    Le repli precedent — LlamaParse -> Tesseract -> pypdf — etait dangereux :
-    pypdf renvoie la couche texte deja presente dans les PDF prc.cm, mesuree a
-    ~20% de rappel (filigrane injecte au milieu des phrases, cachets lus comme
-    du charabia, 21% des documents sans aucun texte exploitable). Le document
-    etait alors publie avec ce contenu et marque "completed", sans aucun signal.
+    Le repli LlamaParse -> Tesseract -> pypdf a ete supprime avant celui-ci, et
+    la raison tient toujours : pypdf renvoie la couche texte deja presente dans
+    les PDF prc.cm, mesuree a ~20% de rappel (filigrane injecte au milieu des
+    phrases, cachets lus comme du charabia, 21% des documents sans aucun texte
+    exploitable). Le document etait alors publie avec ce contenu et marque
+    "completed", sans aucun signal.
 
-    Desormais : LlamaParse fait ses 4 tentatives avec backoff exponentiel ; s'il
-    echoue, on leve. L'appelant marque le document "refused" avec l'erreur, et
-    il reste retraitable. Rien de degrade n'entre dans l'index.
+    Le moteur a change pour la PAGINATION. LlamaParse ne signalait pas ses
+    coupures de page : les 710 articles en base portaient tous
+    `page_number = 1`, et 271 pages de PDF ne donnaient que 27 pages extraites.
+    Gemini rend un numero de page explicite, verifie exact sur un lot median.
 
     Returns:
-        (texte, []) — la liste d'erreurs est conservee pour compatibilite d'appel
+        (texte, erreurs) — `erreurs` nomme les pages que le modele a refuse de
+        transcrire, le cas echeant. Le document reste publie sans elles : perdre
+        une page de garde vaut mieux que perdre les soixante-huit autres.
 
     Raises:
-        LlamaParseError: extraction impossible
+        PdfExtractionError: extraction impossible
     """
 
-    from app.services.llama_parse_service import (
-        LlamaParseError,
-        get_llama_parse_service,
+    from app.services.pdf_extraction_service import (
+        PdfExtractionError,
+        get_pdf_extractor,
     )
 
-    # get_llama_parse_service() et non LlamaParseService() : le singleton
-    # lru_cache existait mais etait contourne par une construction directe,
-    # ce qui recreait le client et perdait le cache a chaque document.
-    service = get_llama_parse_service()
+    service = get_pdf_extractor()
     if not service.is_available():
-        raise LlamaParseError(
-            "LLAMA_CLOUD_API_KEY absente : extraction impossible. "
+        raise PdfExtractionError(
+            "GEMINI_API_KEY absente : extraction impossible. "
             "Aucun repli degrade n'est utilise."
         )
 
-    logger.info(f"📄 Extraction LlamaParse : {file_path.name}")
+    logger.info(f"📄 Extraction Gemini : {file_path.name}")
     text = _run_blocking(service.extract_text(file_path))
-    logger.info(f"✅ LlamaParse : {len(text)} caracteres")
-    return text, []
+    logger.info(f"✅ Gemini : {len(text)} caracteres")
+
+    erreurs = []
+    if service.pages_refusees:
+        erreurs.append(
+            "Pages non transcrites (refus du modele) : "
+            + ", ".join(str(n) for n in service.pages_refusees)
+        )
+        logger.error(f"❌ {file_path.name} : {erreurs[0]}")
+    return text, erreurs
 
 
 def _extract_docx_text(file_path) -> tuple:
