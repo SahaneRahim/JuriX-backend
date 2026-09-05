@@ -32,6 +32,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.search import ChunkResult, SearchFilters
+from app.services.search_vectors import (
+    RANK_WEIGHTS,
+    REINDEX_ARTICLES_SQL,
+    REINDEX_LAWS_SQL,
+    TITLE_ONLY_WEIGHTS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +52,11 @@ MAX_FTS_RESULTS = 20
 # fusion comme le regroupement par loi ont besoin de matiere.
 MAX_FTS_CHUNKS = 60
 
+# Nombre maximal de chunks retenus PAR LOI. Cale sur ce que
+# `_chunks_to_search_results` expose reellement (`entry["chunks"][:3]`) : au-dela,
+# les lignes etaient recuperees, transportees, re-classees, puis jetees.
+MAX_CHUNKS_PER_LAW = 3
+
 
 # ==================== CACHE PostgreSQL ====================
 
@@ -53,7 +64,7 @@ MAX_FTS_CHUNKS = 60
 # Version du schema de reponse mise en cache. A incrementer des que la forme de
 # SearchResponse change : sans elle, des reponses serialisees sous l'ancienne
 # forme (sans `chunks`) continueraient a etre servies pendant tout le TTL.
-CACHE_SCHEMA_VERSION = "v3"
+CACHE_SCHEMA_VERSION = "v4"
 
 
 def _make_cache_key(query: str, filters: Optional[SearchFilters], limit: int, offset: int) -> str:
@@ -261,6 +272,7 @@ async def _fts_articles_query(
         "query": query,
         "limit": min(limit, MAX_FTS_CHUNKS),
         "offset": offset,
+        "per_law_cap": MAX_CHUNKS_PER_LAW,
     }
     where_extra = _law_filter_clauses(filters, params)
 
@@ -283,12 +295,41 @@ async def _fts_articles_query(
                 l.publication_date,
                 c.name            AS category_name,
                 ts_rank_cd(
+                    '{RANK_WEIGHTS}',
                     a.search_vector,
                     websearch_to_tsquery('french', :query)
                 ) + ts_rank_cd(
+                    '{RANK_WEIGHTS}',
                     a.search_vector,
                     websearch_to_tsquery('english', :query)
-                ) AS rank
+                ) AS rank,
+                -- Vrai si et seulement si un lexeme de POIDS A participe a la
+                -- correspondance, c'est-a-dire si le TITRE de la loi matche.
+                -- Ce n'est pas une heuristique : mesure sur le corpus, 5 titres
+                -- sur 5 detectes, 3 correspondances de corps sur 3 ecartees.
+                (
+                    ts_rank_cd('{TITLE_ONLY_WEIGHTS}', a.search_vector,
+                               websearch_to_tsquery('french', :query)) > 0
+                    OR
+                    ts_rank_cd('{TITLE_ONLY_WEIGHTS}', a.search_vector,
+                               websearch_to_tsquery('english', :query)) > 0
+                ) AS title_match,
+                -- PLAFOND PAR LOI. Sans lui, une seule loi prend tout le budget :
+                -- mesure sur le corpus, « avancement de grade » rendait 60 chunks
+                -- issus de la MEME loi, donc UN SEUL document affiche. Et le
+                -- probleme empire avec le titre de la loi en poids A, puisque
+                -- tous les articles d'une loi dont le titre correspond marquent
+                -- alors le meme score.
+                ROW_NUMBER() OVER (
+                    PARTITION BY a.law_id
+                    ORDER BY ts_rank_cd(
+                        '{RANK_WEIGHTS}', a.search_vector,
+                        websearch_to_tsquery('french', :query)
+                    ) + ts_rank_cd(
+                        '{RANK_WEIGHTS}', a.search_vector,
+                        websearch_to_tsquery('english', :query)
+                    ) DESC
+                ) AS law_rank
             FROM articles a
             JOIN laws l ON l.id = a.law_id
             LEFT JOIN categories c ON c.id = l.category_id
@@ -297,21 +338,25 @@ async def _fts_articles_query(
                 OR a.search_vector @@ websearch_to_tsquery('english', :query)
             )
             {where_extra}
+        ),
+        capped AS (
+            SELECT * FROM ranked
+            WHERE law_rank <= :per_law_cap
             ORDER BY rank DESC
             LIMIT :limit OFFSET :offset
         )
         SELECT
-            ranked.*,
+            capped.*,
             ts_headline(
-                (CASE WHEN ranked.language = 'en' THEN 'english' ELSE 'french' END)::regconfig,
-                ranked.content,
+                (CASE WHEN capped.language = 'en' THEN 'english' ELSE 'french' END)::regconfig,
+                capped.content,
                 websearch_to_tsquery(
-                    (CASE WHEN ranked.language = 'en' THEN 'english' ELSE 'french' END)::regconfig,
+                    (CASE WHEN capped.language = 'en' THEN 'english' ELSE 'french' END)::regconfig,
                     :query
                 ),
                 'StartSel=<mark>,StopSel=</mark>,MaxFragments=2,MaxWords=40,MinWords=20'
             ) AS excerpt
-        FROM ranked
+        FROM capped
         ORDER BY rank DESC
     """)
 
@@ -395,7 +440,12 @@ async def search_laws_pg(
 ) -> List[ChunkResult]:
     """
     Recherche full-text dans les lois (niveau document, pas article).
-    Utilise comme repli si search_articles_pg retourne 0 resultats.
+
+    Cette branche etait un REPLI, appele seulement quand la recherche d'articles
+    ne rendait rien. C'etait la cause du symptome « je cherche un mot du titre et
+    je vois des documents qui ne l'ont pas » : elle etait donc la seule a voir
+    `laws.title`, et elle ne s'executait jamais. Elle tourne desormais a chaque
+    recherche, et ses lignes portent `match_scope = "title"`.
 
     Les lignes produites portent `article_id = NULL` : elles ne designent aucun
     article. La colonne valait auparavant `l.id`, ce qui faisait entrer en
@@ -428,13 +478,30 @@ async def search_laws_pg(
             l.category_id,
             l.publication_date,
             c.name            AS category_name,
-            ts_rank_cd(
-                l.search_vector,
-                websearch_to_tsquery('french', :query)
-            ) + ts_rank_cd(
-                l.search_vector,
-                websearch_to_tsquery('english', :query)
-            ) AS rank
+            -- COALESCE : une ligne trouvee par le seul ILIKE a un rank NULL, et
+            -- PostgreSQL place les NULL EN TETE sous ORDER BY ... DESC. Sans ce
+            -- garde-fou, la correspondance la plus faible passait premiere.
+            COALESCE(
+                ts_rank_cd(
+                    '{RANK_WEIGHTS}',
+                    l.search_vector,
+                    websearch_to_tsquery('french', :query)
+                ) + ts_rank_cd(
+                    '{RANK_WEIGHTS}',
+                    l.search_vector,
+                    websearch_to_tsquery('english', :query)
+                ),
+                0.0
+            ) AS rank,
+            -- Cette branche interroge le titre : une correspondance de poids A,
+            -- ou a defaut un ILIKE sur le titre, est une correspondance de titre.
+            (
+                ts_rank_cd('{TITLE_ONLY_WEIGHTS}', l.search_vector,
+                           websearch_to_tsquery('french', :query)) > 0
+                OR ts_rank_cd('{TITLE_ONLY_WEIGHTS}', l.search_vector,
+                              websearch_to_tsquery('english', :query)) > 0
+                OR l.title ILIKE :ilike_query ESCAPE '\\'
+            ) AS title_match
         FROM laws l
         LEFT JOIN categories c ON c.id = l.category_id
         WHERE (
@@ -454,7 +521,7 @@ async def search_laws_pg(
         result = await db.execute(sql, params)
         rows = result.fetchall()
         logger.info(f"📚 PG laws search: {len(rows)} results for '{query[:40]}'")
-        return _rows_to_chunks(rows, source="law_fts")
+        return _rows_to_chunks(rows, source="title_fts")
     except Exception as e:
         logger.warning(f"⚠️ Laws FTS query failed: {e}")
         return []
@@ -558,10 +625,190 @@ def _rows_to_chunks(rows: Sequence[Any], source: str) -> List[ChunkResult]:
                 publication_date=getattr(row, "publication_date", None),
                 relevance_score=relevance_score,
                 source=source,
+                # `title_match` n'est produit que par les requetes qui savent le
+                # calculer ; ailleurs le defaut "body" s'applique, ce qui est la
+                # bonne reponse pour une correspondance de contenu.
+                match_scope="title" if getattr(row, "title_match", False) else "body",
             )
         )
 
     return chunks
+
+
+async def search_titles_trgm_pg(
+    db: AsyncSession,
+    query: str,
+    filters: Optional[SearchFilters],
+    limit: int,
+    threshold: float,
+) -> List[ChunkResult]:
+    """
+    Recherche floue sur le TITRE et la reference d'une loi.
+
+    C'est la tolerance aux fautes de frappe. Elle reprend exactement le SQL de
+    `/search/suggest` — meme operateur `%>`, meme `immutable_unaccent` des deux
+    cotes — de sorte que les index `idx_laws_title_unaccent_trgm` et
+    `idx_laws_reference_unaccent_trgm`, jusqu'ici au service de la seule
+    autocompletion, servent aussi la recherche.
+
+    Mesure sur le corpus : « nominaton » ne rend RIEN en plein texte et rend
+    exactement les 5 bons documents ici, sans un faux positif. Autres scores
+    releves : « code miner » 0,727 · « cod minier » 0,769 · « avancment » 0,615 ·
+    « fonciere » 0,333 (aucune correspondance, correctement).
+
+    Le seuil doit etre pose par `SET LOCAL` AVANT l'appel (voir
+    `apply_trigram_threshold`) : l'operateur `%>` filtre sur le reglage de
+    session, si bien qu'un predicat `word_similarity(...) >= 0.5` ajoute ici
+    serait du code mort — rien sous le defaut de 0,6 ne lui parviendrait.
+    """
+    params: Dict[str, Any] = {"query": query, "limit": limit}
+    where_extra = _law_filter_clauses(filters, params)
+
+    sql = text(f"""
+        SELECT
+            NULL::integer     AS article_id,
+            NULL::text        AS number,
+            NULL::text        AS article_title,
+            NULL::text        AS section,
+            NULL::integer     AS page_number,
+            l.content,
+            l.id              AS law_id,
+            l.reference,
+            l.title           AS law_title,
+            l.type,
+            l.language,
+            l.status,
+            l.category_id,
+            l.publication_date,
+            c.name            AS category_name,
+            TRUE              AS title_match,
+            GREATEST(
+                word_similarity(immutable_unaccent(:query), immutable_unaccent(l.title)),
+                word_similarity(immutable_unaccent(:query), immutable_unaccent(l.reference))
+            ) AS rank
+        FROM laws l
+        LEFT JOIN categories c ON c.id = l.category_id
+        WHERE (
+            immutable_unaccent(l.title) %> immutable_unaccent(:query)
+            OR immutable_unaccent(l.reference) %> immutable_unaccent(:query)
+        )
+        {where_extra}
+        ORDER BY rank DESC
+        LIMIT :limit
+    """)
+
+    try:
+        result = await db.execute(sql, params)
+        return _rows_to_chunks(result.fetchall(), source="title_trigram")
+    except Exception as e:
+        logger.warning(f"⚠️ Title trigram query failed: {e}")
+        return []
+
+
+async def resolve_law_by_hint(
+    db: AsyncSession,
+    hint: str,
+    filters: Optional[SearchFilters] = None,
+    limit: int = 3,
+) -> List[int]:
+    """
+    Lois designees par un indice de titre : « code minier », « constitution ».
+
+    Trois passes, la premiere qui rend quelque chose gagne :
+      1. ILIKE — l'utilisateur a ecrit le titre tel quel
+      2. FTS de poids A — les mots du titre, dans le desordre, stemmes
+      3. word_similarity — faute de frappe (« code miner » vaut 0,727)
+
+    L'ordre est celui de la certitude decroissante. Une correspondance exacte ne
+    doit jamais etre departagee par une correspondance floue.
+    """
+    hint = (hint or "").strip()
+    if len(hint) < 3:
+        return []
+
+    params: Dict[str, Any] = {"hint": hint, "limit": limit}
+    where_extra = _law_filter_clauses(filters, params, alias="l")
+
+    passes = (
+        "immutable_unaccent(l.title) ILIKE immutable_unaccent(:pattern) ESCAPE '\\'",
+        # f-string : sans elle, {TITLE_ONLY_WEIGHTS} partait litteralement dans
+        # le SQL et PostgreSQL rendait « invalid input syntax for type real ».
+        f"ts_rank_cd('{TITLE_ONLY_WEIGHTS}', l.search_vector,"
+        " websearch_to_tsquery('french', :hint)) > 0",
+        "word_similarity(immutable_unaccent(:hint), immutable_unaccent(l.title))"
+        " >= :threshold",
+    )
+    params["pattern"] = f"%{escape_like(hint)}%"
+    params["threshold"] = 0.4
+
+    for predicate in passes:
+        sql = text(f"""
+            SELECT l.id,
+                   word_similarity(immutable_unaccent(:hint), immutable_unaccent(l.title)) AS score
+            FROM laws l
+            WHERE ({predicate})
+            {where_extra}
+            ORDER BY score DESC, length(l.title) ASC
+            LIMIT :limit
+        """)
+        try:
+            rows = (await db.execute(sql, params)).fetchall()
+        except Exception as e:
+            logger.warning(f"⚠️ resolve_law_by_hint failed: {e}")
+            return []
+        if rows:
+            return [int(r.id) for r in rows]
+
+    return []
+
+
+async def find_article_in_laws(
+    db: AsyncSession, law_ids: List[int], number: str
+) -> Optional[int]:
+    """
+    Rend la premiere loi de `law_ids` qui contient un article de ce numero.
+
+    L'ordre de `law_ids` est celui de la certitude rendue par
+    `resolve_law_by_hint` : `array_position` le respecte au lieu de laisser
+    PostgreSQL choisir.
+    """
+    if not law_ids or not number:
+        return None
+    sql = text("""
+        SELECT a.law_id
+        FROM articles a
+        WHERE a.law_id = ANY(:law_ids)
+          AND upper(btrim(a.number, ' .:-')) = :number
+        ORDER BY array_position(:law_ids, a.law_id)
+        LIMIT 1
+    """)
+    try:
+        row = (await db.execute(sql, {"law_ids": law_ids, "number": number.upper()})).first()
+    except Exception as e:
+        logger.warning(f"⚠️ find_article_in_laws failed: {e}")
+        return None
+    return int(row.law_id) if row else None
+
+
+async def apply_trigram_threshold(db: AsyncSession, threshold: float) -> None:
+    """
+    Pose le seuil de `word_similarity` pour la transaction en cours.
+
+    Le defaut de session est 0,6 : sans ce reglage, « nominasion » (0,571) est
+    perdu alors que « nominaton » (0,700) passe — une tolerance aux fautes a
+    moitie.
+
+    Deux contraintes recopiees de `SearchService._apply_hnsw_settings`, qui fait
+    la meme chose pour `hnsw.ef_search` : SET n'accepte pas de parametre lie, la
+    valeur est donc interpolee APRES passage par float() et bornage ; et
+    SET LOCAL exige une transaction ouverte, que l'AsyncSession ouvre au premier
+    execute. Sous try : un seuil indisponible doit degrader, pas rendre un 500.
+    """
+    bounded = min(max(float(threshold), 0.1), 1.0)
+    try:
+        await db.execute(text(f"SET LOCAL pg_trgm.word_similarity_threshold = {bounded}"))
+    except Exception as err:  # pragma: no cover - depend du serveur
+        logger.debug(f"pg_trgm.word_similarity_threshold indisponible: {err}")
 
 
 async def update_law_search_vector(db: AsyncSession, law_id: int) -> None:
@@ -574,24 +821,11 @@ async def update_law_search_vector(db: AsyncSession, law_id: int) -> None:
         law_id: ID de la loi à réindexer
     """
     await db.execute(
-        text("""
-            UPDATE laws
-            SET search_vector =
-                to_tsvector('french', coalesce(title, '') || ' ' || coalesce(content, ''))
-                || to_tsvector('english', coalesce(title, '') || ' ' || coalesce(content, ''))
-            WHERE id = :law_id
-        """),
+        text(f"{REINDEX_LAWS_SQL} WHERE id = :law_id"),
         {"law_id": law_id},
     )
     await db.execute(
-        text("""
-            UPDATE articles
-            SET search_vector =
-                to_tsvector('french', coalesce(content, ''))
-                || to_tsvector('english', coalesce(content, ''))
-                || to_tsvector('simple', coalesce(number, ''))
-            WHERE law_id = :law_id
-        """),
+        text(f"{REINDEX_ARTICLES_SQL} AND a.law_id = :law_id"),
         {"law_id": law_id},
     )
     await db.commit()

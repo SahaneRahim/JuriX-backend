@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     # Valeurs par defaut NON calibrees sur ce corpus : RRF_K = 60 vient du
     # papier d'origine sur des runs TREC. A remplacer par les valeurs issues
     # de scripts/eval/run_eval.py, en citant le fichier de run en commentaire.
+    # Seuil de `word_similarity` pour la recherche floue sur les titres.
+    # Le defaut PostgreSQL est 0,6 : mesure sur le corpus, il laisse passer
+    # « nominaton » (0,700) mais perd « nominasion » (0,571). 0,5 rattrape les
+    # deux sans faire entrer un seul faux positif (« fonciere » plafonne a
+    # 0,333 et reste dehors).
+    TITLE_TRIGRAM_THRESHOLD: float = 0.5
+
     RRF_K: int = 60
     TEXT_WEIGHT: float = 0.4
     SEMANTIC_WEIGHT: float = 0.6

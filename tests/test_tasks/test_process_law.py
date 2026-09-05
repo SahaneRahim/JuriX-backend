@@ -20,6 +20,45 @@ from app.services.embedding_service import EmbeddingService
 from app.tasks import process_law as pl
 
 
+class _FakeSessionFactory:
+    """
+    Remplace SyncSessionLocal par une table `categories` en memoire.
+
+    `_classify_category` n'a besoin que de la correspondance nom -> identifiant :
+    la faire passer par une vraie base rendrait ces tests dependants de l'ordre
+    des migrations, alors que ce qu'ils verifient est justement que le code ne
+    depend PAS d'un ordre.
+    """
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __call__(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, *args, **kwargs):
+        rows = [(name, identifier) for name, identifier in self._rows.items()]
+
+        class _Result:
+            def all(self_inner):
+                return rows
+
+            def scalars(self_inner):
+                class _Scalars:
+                    def all(self_deep):
+                        return [name for name, _ in rows]
+
+                return _Scalars()
+
+        return _Result()
+
+
 # ==================== FONCTIONS PURES ====================
 
 
@@ -93,16 +132,13 @@ class TestFallbacks:
         assert result["language"] == "fr"
         assert 0.0 < result["confidence"] <= 1.0
 
-    def test_category_classification_falls_back_on_error(self, monkeypatch):
-        import app.services.document_classifier as classifier_module
+    def test_category_classification_always_returns_a_domain(self, monkeypatch):
+        """Le classifieur est une fonction pure : il rend toujours un domaine."""
+        monkeypatch.setattr(
+            pl, "SyncSessionLocal", _FakeSessionFactory({}), raising=True
+        )
 
-        class _Broken:
-            def __init__(self, *a, **k):
-                raise RuntimeError("modele absent")
-
-        monkeypatch.setattr(classifier_module, "DocumentClassifier", _Broken)
-
-        result = pl._classify_category("Texte quelconque")
+        result = pl._classify_category("Texte quelconque", "Contenu quelconque")
 
         assert "category" in result
         assert "confidence" in result
@@ -288,41 +324,83 @@ class TestCategoryPersistence:
     etaient vides, alors que la classification avait bien eu lieu.
     """
 
-    def test_classifier_returns_the_category_id(self):
+    def test_classifier_returns_the_category_id(self, monkeypatch):
+        from app.services.legal_domain_classifier import CANONICAL_DOMAINS
+
+        rows = {name.lower(): 1000 + offset for offset, name in enumerate(CANONICAL_DOMAINS)}
+        monkeypatch.setattr(pl, "SyncSessionLocal", _FakeSessionFactory(rows), raising=True)
+
         result = pl._classify_category(
+            "Décret portant approbation des statuts de la société SOCADEL",
             "La présente loi fixe le régime des sociétés commerciales et du "
-            "registre du commerce au Cameroun."
+            "registre du commerce au Cameroun.",
         )
 
-        assert "category_id" in result
-        assert "category" in result
-        assert "confidence" in result
+        assert result["category"] == "Droit des Affaires et OHADA"
+        assert result["category_id"] == rows["droit des affaires et ohada"]
+        assert 0.0 <= result["confidence"] <= 1.0
+        assert result["error"] is None
 
-    def test_fallback_leaves_the_id_null(self, monkeypatch):
-        """Sans identifiant fiable, mieux vaut aucune categorie qu'une fausse."""
-        import app.services.document_classifier as classifier_module
+    def test_missing_domain_leaves_the_id_null_and_reports_it(self, monkeypatch):
+        """
+        Sans ligne correspondante en base, mieux vaut aucune categorie qu'une
+        fausse : c'est l'invention d'un identifiant qui a produit le bug.
+        """
+        monkeypatch.setattr(
+            pl, "SyncSessionLocal", _FakeSessionFactory({}), raising=True
+        )
 
-        class _Broken:
-            def __init__(self, *a, **k):
-                raise RuntimeError("modele absent")
+        result = pl._classify_category(
+            "Loi portant Code Général des Impôts", "texte fiscal sur l'impôt"
+        )
 
-        monkeypatch.setattr(classifier_module, "DocumentClassifier", _Broken)
-
-        result = pl._classify_category("texte fiscal sur l'impôt")
-
+        assert result["category"] == "Finances Publiques et Fiscalité"
         assert result["category_id"] is None
+        assert result["suggested"] == []
+        assert "absent de la table categories" in result["error"]
+
+    def test_resolves_the_id_by_name_never_by_position(self, monkeypatch):
+        """
+        La table est semee dans l'ordre INVERSE : tout code qui resoudrait un
+        domaine par sa position designerait le mauvais identifiant.
+        """
+        from app.services.legal_domain_classifier import CANONICAL_DOMAINS
+
+        rows = {
+            name.lower(): 1000 + offset
+            for offset, name in enumerate(reversed(CANONICAL_DOMAINS))
+        }
+        monkeypatch.setattr(
+            pl, "SyncSessionLocal", _FakeSessionFactory(rows), raising=True
+        )
+
+        result = pl._classify_category(
+            "Décret portant nomination d'un Inspecteur Général", ""
+        )
+
+        assert result["category"] == "Fonction Publique"
+        assert result["category_id"] == rows["fonction publique"]
 
     @pytest.mark.asyncio
     async def test_metadata_update_writes_the_category(self, db_session, law_row):
         from sqlalchemy import select
 
+        from app.models.law import Category
+
+        # L'identifiant est LU en base par son nom. L'ecrire en dur (2) etait
+        # precisement la forme du bug d'origine, et cassait des que la fixture
+        # cessait d'attribuer les identifiants par position.
+        target = (await db_session.execute(
+            select(Category.id).where(Category.name == "Droit des Affaires et OHADA")
+        )).scalar_one()
+
         pl._update_law_metadata(
             law_row.id,
             language="fr",
             language_confidence=0.9,
-            category="Droit Commercial",
+            category="Droit des Affaires et OHADA",
             category_confidence=0.8,
-            category_id=2,
+            category_id=target,
         )
 
         refreshed = (await db_session.execute(
@@ -330,7 +408,7 @@ class TestCategoryPersistence:
         )).scalar_one()
         await db_session.refresh(refreshed)
 
-        assert refreshed.category_id == 2
+        assert refreshed.category_id == target
         assert refreshed.category_confidence == pytest.approx(0.8)
         assert refreshed.status == "published"
 

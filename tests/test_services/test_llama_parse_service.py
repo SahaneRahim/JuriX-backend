@@ -252,3 +252,54 @@ class TestDecoupeEnPages:
 
     def test_applique_a_markdown_full(self):
         assert LlamaParseService._pages_from({"markdown_full": "A\n---\nB"}) == ["A", "B"]
+
+
+class TestIntegriteDuCache:
+    """
+    Le cache ne doit jamais graver un échec, ni rejouer un format périmé.
+
+    Une liste vide comptait comme un HIT : une extraction ratée se gravait sur
+    disque et se rejouait indéfiniment sans jamais rappeler l'API. Le seul moyen
+    d'en sortir était d'effacer le fichier à la main.
+    """
+
+    def test_extraction_vide_non_gravee(self, service, tmp_path):
+        service._write_cache("vide", [])
+        assert service._cache_path("vide").exists() is False
+
+    def test_pages_blanches_non_gravees(self, service):
+        service._write_cache("blanc", ["", "   "])
+        assert service._cache_path("blanc").exists() is False
+
+    def test_entree_vide_sur_disque_est_un_miss(self, service):
+        service._cache_path("poison").write_text(
+            json.dumps({"schema": service.CACHE_SCHEMA, "tier": service.tier, "pages": []})
+        )
+        assert service._read_cache("poison") is None
+
+    def test_aller_retour(self, service):
+        service._write_cache("ok", ["page un", "page deux"])
+        assert service._read_cache("ok") == ["page un", "page deux"]
+
+    def test_cache_v1_redecoupe_sur_place_sans_rappeler_l_api(self, service):
+        # Le contenu d'une entrée v1 est valide et déjà payé : il est redécoupé
+        # localement, jamais re-extrait.
+        service._cache_path("v1").write_text(
+            json.dumps({"tier": service.tier, "pages": ["Page un\n---\nPage deux"]})
+        )
+        assert service._read_cache("v1") == ["Page un", "Page deux"]
+
+        # Et réécrit au format courant, donc redécoupé une seule fois.
+        payload = json.loads(service._cache_path("v1").read_text())
+        assert payload["schema"] == service.CACHE_SCHEMA
+        assert len(payload["pages"]) == 2
+
+    def test_cache_v1_vide_reste_un_miss(self, service):
+        service._cache_path("v1vide").write_text(
+            json.dumps({"tier": service.tier, "pages": []})
+        )
+        assert service._read_cache("v1vide") is None
+
+    def test_ecriture_atomique_sans_residu(self, service, tmp_path):
+        service._write_cache("atomique", ["contenu"])
+        assert list(service.cache_dir.glob("*.tmp")) == []

@@ -24,7 +24,7 @@ from datetime import date
 import time
 
 from app.services.language_detector import LanguageDetector
-from app.services.document_classifier import DocumentClassifier
+from app.services.legal_domain_classifier import CANONICAL_DOMAINS, LegalDomainClassifier
 from app.services.embedding_service import EmbeddingService
 from app.services.search_service import SearchService
 from app.services.rag_service import RAGService
@@ -80,7 +80,8 @@ Article 8. La responsabilité civile engage celui qui cause un dommage à autrui
 @pytest.mark.asyncio
 async def test_full_pipeline_integration(
     sample_legal_document,
-    async_db_session
+    async_db_session,
+    category_ids,
 ):
     """
     Test complete pipeline: upload → process → search → chat.
@@ -93,7 +94,7 @@ async def test_full_pipeline_integration(
 
     # Initialize services
     language_detector = LanguageDetector()
-    document_classifier = DocumentClassifier()
+    domain_classifier = LegalDomainClassifier()
     embedding_service = EmbeddingService(use_cache=False)
     search_service = SearchService(async_db_session)
     rag_service = RAGService(async_db_session)
@@ -107,14 +108,17 @@ async def test_full_pipeline_integration(
 
     # STEP 2: Document Classification
     print("\n2️⃣ Testing Document Classification...")
-    # classify renvoie une liste de tuples (category_id, confidence, method),
-    # pas un dictionnaire {"predictions": [...]}.
-    class_result = document_classifier.classify(sample_legal_document, top_k=3)
-    assert 1 <= len(class_result) <= 3
-    top_category_id, top_confidence, top_method = class_result[0]
-    assert isinstance(top_category_id, int) and top_category_id > 0
-    assert 0.0 <= top_confidence <= 1.0
-    print(f"   ✅ Classified as: category {top_category_id} ({top_confidence:.2%}, {top_method})")
+    # classify rend UN domaine, sous forme de NOM. L'ancienne version rendait
+    # un entier qui etait une position dans un dictionnaire Python, et que le
+    # pipeline ecrivait tel quel dans la cle etrangere laws.category_id.
+    class_result = domain_classifier.classify(
+        "Loi portant Code du Travail", sample_legal_document
+    )
+    assert class_result.domain in CANONICAL_DOMAINS
+    assert not isinstance(class_result.domain, int)
+    assert 0.0 <= class_result.confidence <= 1.0
+    print(f"   ✅ Classified as: {class_result.domain} "
+          f"({class_result.confidence:.2%}, {class_result.rule})")
 
     # STEP 3: Article Extraction
     print("\n3️⃣ Testing Article Extraction...")
@@ -130,7 +134,7 @@ async def test_full_pipeline_integration(
         reference="LOI-2024-001-TEST",
         title="Code Civil Camerounais - Test Pipeline",
         type="Loi",
-        category_id=1,  # Assuming category exists
+        category_id=category_ids["Droit Civil"],
         language="fr",
         content=sample_legal_document,
         publication_date=date(2024, 1, 15),

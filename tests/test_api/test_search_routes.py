@@ -45,10 +45,11 @@ from app.models.law import Article, Category, Law
 
 
 @pytest.fixture
-async def sample_laws(db_session):
+async def sample_laws(db_session, category_ids):
     """Create sample data for testing."""
-    # Categories : deja semees par la fixture db_session de conftest (ids 1-12).
-    # Les reinserer ici violait la contrainte d'unicite sur la cle primaire.
+    # Categories : deja semees par la fixture db_session de conftest. Leurs
+    # identifiants sont LUS (fixture category_ids), jamais supposes : la
+    # fixture les attribue volontairement dans le desordre.
     await db_session.flush()
 
     # Laws
@@ -61,7 +62,7 @@ async def sample_laws(db_session):
             type="loi",
             language="fr",
             status="published",
-            category_id=1,
+            category_id=category_ids["Droit Civil"],
             publication_date=date(2024, 1, 15),
             created_at=datetime(2024, 1, 15, 10, 0, 0)
         ),
@@ -73,7 +74,7 @@ async def sample_laws(db_session):
             type="loi",
             language="fr",
             status="published",
-            category_id=2,
+            category_id=category_ids["Droit Pénal"],
             publication_date=date(2024, 2, 20),
             created_at=datetime(2024, 2, 20, 10, 0, 0)
         ),

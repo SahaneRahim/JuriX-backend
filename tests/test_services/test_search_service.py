@@ -114,7 +114,7 @@ async def search_service(db_session, mock_embedding_service):
 
 
 @pytest.fixture
-async def sample_data(db_session):
+async def sample_data(db_session, category_ids):
     """
     Lois et articles d'exemple.
 
@@ -135,7 +135,7 @@ async def sample_data(db_session):
             type="loi",
             language="fr",
             status="published",
-            category_id=1,
+            category_id=category_ids["Droit Civil"],
             publication_date=date(2024, 1, 15),
             created_at=datetime(2024, 1, 15, 10, 0, 0)
         ),
@@ -147,7 +147,7 @@ async def sample_data(db_session):
             type="loi",
             language="fr",
             status="published",
-            category_id=2,
+            category_id=category_ids["Droit Pénal"],
             publication_date=date(2024, 2, 20),
             created_at=datetime(2024, 2, 20, 10, 0, 0)
         ),
@@ -159,7 +159,7 @@ async def sample_data(db_session):
             type="law",
             language="en",
             status="published",
-            category_id=3,
+            category_id=category_ids["Droit des Affaires et OHADA"],
             publication_date=date(2024, 3, 10),
             created_at=datetime(2024, 3, 10, 10, 0, 0)
         ),
@@ -258,18 +258,18 @@ class TestTextSearch:
             assert result.language == "fr"
 
     @pytest.mark.asyncio
-    async def test_text_search_typo_tolerance(self, search_service):
-        """Test that typos are handled gracefully."""
-        # Resultats semes en base par les fixtures
-        results = await search_service.text_search(
-            query="civi",  # Typo: civil
-            filters=None,
-            limit=15,
-            offset=0
-        )
-
-        assert isinstance(results, list)
-        # La recherche plein texte tolere la faute de frappe
+    # SUPPRIME : test_text_search_typo_tolerance.
+    #
+    # Son unique assertion etait `isinstance(results, list)`, vraie sur une
+    # liste vide. Elle ne demandait meme pas la fixture `sample_data`, et
+    # conftest purge la base entre deux tests : elle tournait donc sur une base
+    # VIDE et passait sur `[] == []`. Son commentaire — « Resultats semes en
+    # base par les fixtures » — etait faux.
+    #
+    # La tolerance aux fautes est desormais couverte par
+    # tests/test_services/test_title_priority.py::TestTypoTolerance, qui
+    # asserte les identifiants obtenus et verifie qu'une correspondance floue
+    # ne devance jamais une correspondance exacte.
 
     @pytest.mark.asyncio
     async def test_text_search_multilingual(self, search_service, sample_data):

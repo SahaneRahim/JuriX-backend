@@ -15,7 +15,7 @@ Date: 2026-01-10
 """
 
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Literal, Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -233,8 +233,20 @@ class ChunkResult(BaseModel):
     relevance_score: float = Field(0.0, ge=0.0, le=1.0, description="Score de pertinence")
     source: str = Field(
         "fts",
-        description="Origine: fts | trigram | semantic | law_fts | priority | fallback"
+        description=(
+            "Origine: fts | trigram | title_fts | title_trigram | semantic | "
+            "law_fts | priority | fallback"
+        )
     )
+    # Par quoi la correspondance passe. Calcule en SQL sur le POIDS des lexemes
+    # (poids A = titre), pas devine apres coup : une correspondance de titre et
+    # une correspondance de corps ne doivent pas se melanger dans la liste de
+    # resultats. Defaut "body" — un chunk dont on ne sait rien n'est pas un
+    # titre.
+    match_scope: Literal["title", "body"] = Field(
+        "body", description="Origine de la correspondance : title | body"
+    )
+
     # Score du re-ranking, s'il a eu lieu. Champ SEPARE et non ecrasement de
     # relevance_score : le score de recuperation reste inspectable, ce qui
     # permet d'attribuer un ecart au re-ranking plutot qu'a la recherche.
@@ -282,6 +294,14 @@ class SearchResult(BaseModel):
         le=1.0,
         description="Overall relevance score (0.0-1.0)"
     )
+    # Par quoi la correspondance passe. Calcule en SQL sur le POIDS des lexemes
+    # (poids A = titre), pas devine apres coup : une correspondance de titre et
+    # une correspondance de corps ne doivent pas se melanger dans la liste de
+    # resultats. Defaut "body" — un chunk dont on ne sait rien n'est pas un
+    # titre.
+    match_scope: Literal["title", "body"] = Field(
+        "body", description="Origine de la correspondance : title | body"
+    )
     matched_articles: List[ArticleMatch] = Field(
         default_factory=list,
         description="List of matched articles within this law"
@@ -328,6 +348,14 @@ class SearchResponse(BaseModel):
         description="Filters that were applied to this search"
     )
     # Article-specific navigation fields
+    target_law_id: Optional[int] = Field(
+        None,
+        description=(
+            "Loi a ouvrir quand direct_navigation est vrai. Champ explicite "
+            "plutot que results[0] : les resultats sont partitionnes titre/corps, "
+            "et lier la navigation a cet ordre la casserait au premier changement."
+        ),
+    )
     target_article: Optional[str] = Field(
         None,
         description="Article number/reference to scroll to (e.g., '5', 'PREMIER')"

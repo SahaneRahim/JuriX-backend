@@ -15,7 +15,6 @@ Usage dans routes:
 import logging
 from functools import lru_cache
 
-from app.services.document_classifier import DocumentClassifier
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.language_detector import LanguageDetector
 from app.services.search_service import SearchService
@@ -63,50 +62,6 @@ def clear_detector_cache():
     logger.info("🗑️  Cache LanguageDetector effacé")
 
 
-@lru_cache()
-def get_document_classifier() -> DocumentClassifier:
-    """
-    Factory pour DocumentClassifier (singleton).
-
-    Utilise @lru_cache pour créer une seule instance partagée
-    entre toutes les requêtes. Évite le rechargement des modèles
-    ML à chaque requête (Phase 3).
-
-    Returns:
-        Instance singleton de DocumentClassifier
-
-    Example:
-        >>> from fastapi import Depends
-        >>> classifier = Depends(get_document_classifier)
-    """
-    logger.info("📦 Création du singleton DocumentClassifier")
-    return DocumentClassifier()
-
-
-def clear_classifier_cache():
-    """
-    Efface le cache du classifier (force rechargement).
-
-    Utile pour:
-    - Tests (isolation entre tests)
-    - Mise à jour des modèles ML
-    - Debugging
-
-    Example:
-        >>> clear_classifier_cache()
-        >>> classifier = get_document_classifier()  # Nouvelle instance
-    """
-    get_document_classifier.cache_clear()
-    logger.info("🗑️  Cache DocumentClassifier effacé")
-
-
-# La fabrique vit dans app/services/embedding_service.py et est simplement
-# re-exportee ici : il y avait deux singletons concurrents, celui-ci et le
-# _embedding_service_instance prive de SearchService. Elle ne peut pas remonter
-# dans ce module — dependencies.py importe SearchService, qui importe
-# EmbeddingService : le cycle serait immediat.
-
-
 def clear_embedding_service_cache():
     """
     Efface le cache du service d'embeddings (force rechargement).
@@ -127,9 +82,7 @@ def clear_embedding_service_cache():
 # Exports for dependency injection
 __all__ = [
     "get_language_detector",
-    "get_document_classifier",
     "get_embedding_service",
     "clear_detector_cache",
-    "clear_classifier_cache",
     "clear_embedding_service_cache",
 ]

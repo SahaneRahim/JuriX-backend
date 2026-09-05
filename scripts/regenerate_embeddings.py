@@ -75,7 +75,11 @@ def _fetch_batch(session, law_ids, force: bool, cursor: int, size: int) -> List[
     `embedding IS NULL` au fur et a mesure, ce qui decale un OFFSET et fait
     sauter des articles.
     """
-    clauses = ["a.id > :cursor"]
+    # `a.embed IS TRUE` : le pipeline d'ingestion ne vectorise que les chunks
+    # que le raffineur a juges vectorisables (process_law._generate_article_embeddings).
+    # Sans ce filtre, ce script depensait du quota sur les visas, les formules
+    # d'execution et les fragments, que l'ingestion exclut deliberement.
+    clauses = ["a.id > :cursor", "a.embed IS TRUE"]
     params = {"cursor": cursor, "size": size}
 
     if not force:
@@ -85,7 +89,11 @@ def _fetch_batch(session, law_ids, force: bool, cursor: int, size: int) -> List[
         params["law_ids"] = list(law_ids)
 
     sql = text(f"""
-        SELECT a.id, a.law_id, a.number, a.content
+        -- coalesce(embed_text, content) : c'est EXACTEMENT ce qu'envoie
+        -- process_law._generate_article_embeddings. Vectoriser `content` ici
+        -- placerait le meme article a deux endroits differents de l'espace
+        -- d'embedding selon le chemin de code qui l'a ecrit.
+        SELECT a.id, a.law_id, a.number, coalesce(a.embed_text, a.content) AS content
         FROM articles a
         WHERE {' AND '.join(clauses)}
         ORDER BY a.id
@@ -100,7 +108,9 @@ def _fetch_batch(session, law_ids, force: bool, cursor: int, size: int) -> List[
 
 
 def _count_remaining(session, law_ids, force: bool) -> int:
-    clauses = ["TRUE"]
+    # Meme filtre que _fetch_batch, sinon la progression affichee ment : elle
+    # comptait des chunks que le lot suivant n'irait jamais chercher.
+    clauses = ["embed IS TRUE"]
     params = {}
     if not force:
         clauses.append("embedding IS NULL")

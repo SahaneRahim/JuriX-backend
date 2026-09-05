@@ -398,7 +398,16 @@ class TestMinimumArticleLength:
     """Test minimum article length filtering."""
 
     def test_short_articles_filtered_out(self):
-        """Test that articles below min_article_length are filtered."""
+        """
+        Les articles sous min_article_length sont ecartes.
+
+        Le seuil porte sur le contenu REELLEMENT conserve. Le titre n'est plus
+        retire du contenu (il y est copie, pas deplace), donc un article dont la
+        premiere ligne ressemble a un titre compte desormais cette ligne dans sa
+        longueur. Article 4 ("Very short\\ny", 12 caracteres) passe donc le seuil
+        de 10, alors qu'il tombait a 1 caractere quand le titre etait ampute.
+        C'est le comportement voulu : ces 12 caracteres sont du texte reel.
+        """
         text = """
         Article 1. Short
         x
@@ -416,10 +425,13 @@ class TestMinimumArticleLength:
         # Default min_article_length=10
         articles = extract_articles(text, strict=False)
 
-        # Only articles 2 and 3 should pass (articles 1 and 4 are too short)
-        assert len(articles) == 2
-        assert articles[0]['number'] == '2'
-        assert articles[1]['number'] == '3'
+        # Article 1 ("Short\nx", 7 caracteres) reste sous le seuil.
+        assert [a['number'] for a in articles] == ['2', '3', '4']
+
+        # Le titre est bien present dans le contenu, pas seulement dans `title`.
+        article_4 = articles[-1]
+        assert article_4['title'] == 'Very short'
+        assert 'Very short' in article_4['content']
 
     def test_custom_min_article_length(self):
         """Test custom min_article_length parameter."""
@@ -461,3 +473,132 @@ class TestMultiplePatterns:
 
         # Should extract all 3 (pattern detection picks most common)
         assert len(articles) == 3
+
+
+class TestConservationDuTexte:
+    """
+    Rien de ce qui est extrait ne doit disparaître entre le texte et les chunks.
+
+    Deux fuites silencieuses existaient, toutes deux reproduites ici :
+
+      1. Le texte situé entre un en-tête TITRE/CHAPITRE et l'article suivant
+         n'était rattaché à personne — ni à l'article précédent, borné par cet
+         en-tête, ni au suivant, dont le contenu ne commence qu'à son propre
+         motif. Sur les codes, où chaque titre s'ouvre par un paragraphe de
+         portée, et sur les annexes introduites par un CHAPITRE, la fin du
+         document disparaissait entièrement.
+
+      2. La première phrase d'un article partait dans `title`, champ qu'aucun
+         endpoint n'expose et que `search_service` ignore pour ses extraits.
+    """
+
+    def _tous_les_champs(self, chunks):
+        return " ".join(
+            str(c.get(champ) or "")
+            for c in chunks
+            for champ in ("title", "section", "content")
+        )
+
+    def test_chapeau_de_titre_conserve(self):
+        text = """Article 1.- Les dispositions generales s'appliquent a tous.
+TITRE II
+DES DISPOSITIONS PARTICULIERES
+Le present titre s'applique aux collectivites territoriales decentralisees.
+Article 2.- Autre disposition."""
+
+        chunks = extract_articles(text, strict=False, min_article_length=1)
+        contenus = " ".join(c["content"] for c in chunks)
+
+        assert "collectivites territoriales decentralisees" in contenus
+        # Émis comme chunk distinct : il n'appartient à aucun des deux articles.
+        assert any(c["number"].startswith("SECTION_") for c in chunks)
+
+    def test_annexe_apres_dernier_article_conservee(self):
+        text = """Article 2.- Le present decret sera enregistre.
+ANNEXE
+CHAPITRE I - LISTE DES BENEFICIAIRES
+Monsieur X, matricule 765 609-Y
+Texte tres important de l'annexe."""
+
+        chunks = extract_articles(text, strict=False, min_article_length=1)
+
+        assert "Monsieur X" in self._tous_les_champs(chunks)
+        assert "tres important" in " ".join(c["content"] for c in chunks)
+
+    def test_premiere_phrase_reste_dans_le_contenu(self):
+        text = """Article 1.
+La presente loi fixe le regime des marches publics.
+Elle s'applique a tous les contrats."""
+
+        article = extract_articles(text, strict=False, min_article_length=1)[0]
+
+        # Copiée dans `title`, PAS retirée du contenu.
+        assert article["title"] == "La presente loi fixe le regime des marches publics"
+        assert "La presente loi fixe le regime" in article["content"]
+        assert "Elle s'applique a tous les contrats" in article["content"]
+
+    def test_en_tete_de_section_sur_deux_lignes_conserve(self):
+        # SECTION_PATTERNS capture au-delà du saut de ligne : la seconde ligne
+        # de l'en-tête doit se retrouver dans `section`, jamais nulle part.
+        text = """Article 1.- Dispositions generales.
+TITRE II
+DES DISPOSITIONS PARTICULIERES
+Contenu du titre.
+Article 2.- Suite."""
+
+        chunks = extract_articles(text, strict=False, min_article_length=1)
+        assert "DES DISPOSITIONS PARTICULIERES" in self._tous_les_champs(chunks)
+
+class TestMarkdownArticleHeadings:
+    """
+    Les formes reellement produites par LlamaParse.
+
+    Le motif attendait `Article <numero>` en debut de ligne. Le corpus ecrit
+    `**ARTICLE 1er.**-` et parfois `**Article1er.-**` : emphase markdown avant
+    le mot, et parfois aucune espace avant le numero. Mesure sur les 27 lois de
+    la base : 8 avaient au moins un numero reconnu, contre 27 apres correction ;
+    et sur le seul Code Minier, 41 articles indexes contre 193 presents.
+
+    Ces tests assertent les NUMEROS, pas un decompte : un test qui compte les
+    chunks passe encore quand les numeros sont faux.
+    """
+
+    def _numbers(self, text):
+        return [c["number"] for c in extract_articles(text, strict=False, min_article_length=1)]
+
+    def test_bold_with_a_space(self):
+        text = ("**ARTICLE 1er.**- L'Abbé BELL Mathias est nommé Secrétaire Général "
+                "du Ministère des Finances pour un mandat de trois ans.\n\n"
+                "**ARTICLE 2.**- Le présent décret sera enregistré et publié au "
+                "Journal Officiel en français et en anglais.")
+        assert self._numbers(text) == ["1", "2"]
+
+    def test_bold_with_a_colon(self):
+        text = ("**Article 3** : Les Commissaires Divisionnaires de police sont "
+                "nommés par décret du Président de la République.\n\n"
+                "**Article 4** : La dépense résultant des présentes dispositions "
+                "est imputée sur le budget de l'Etat.")
+        assert self._numbers(text) == ["3", "4"]
+
+    def test_no_space_before_the_number(self):
+        text = ("Article1er.-  Monsieur NGOUNBE Zacharie est nommé Directeur des "
+                "Affaires Générales au Ministère de la Justice.")
+        assert self._numbers(text) == ["1"]
+
+    def test_an_inline_cross_reference_is_not_a_marker(self):
+        """
+        Le motif utilise [ \t]* et jamais \s* devant le mot : \s avale les sauts
+        de ligne et couperait un article a chaque renvoi interne.
+        """
+        text = ("Article 1 : Les dispositions du présent décret sont applicables "
+                "sur toute l'étendue du territoire national.\n"
+                "La présente mesure complète l'article 5 du décret antérieur, "
+                "lequel demeure applicable pour ses autres dispositions.")
+        assert self._numbers(text) == ["1"]
+
+    def test_classic_forms_are_untouched(self):
+        text = ("Article 1. Première disposition du texte, suffisamment longue "
+                "pour etre retenue par le decoupeur.\n\n"
+                "Article 2. Seconde disposition du texte, elle aussi de longueur "
+                "raisonnable pour le decoupage.")
+        assert self._numbers(text) == ["1", "2"]

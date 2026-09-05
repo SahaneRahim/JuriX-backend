@@ -28,6 +28,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DataError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
 from app.core.database import AsyncSessionLocal, SyncSessionLocal
 from app.models.law import Article, Law
 from app.utils.chunk_refiner import DocumentContext, normalize_for_chunking, refine
@@ -112,24 +113,11 @@ async def _update_fts_vectors_async(db: AsyncSession, law_id: int) -> None:
         law_id: ID de la loi à réindexer
     """
     await db.execute(
-        text("""
-            UPDATE laws
-            SET search_vector =
-                to_tsvector('french', coalesce(title, '') || ' ' || coalesce(content, ''))
-                || to_tsvector('english', coalesce(title, '') || ' ' || coalesce(content, ''))
-            WHERE id = :law_id
-        """),
+        text(f"{REINDEX_LAWS_SQL} WHERE id = :law_id"),
         {"law_id": law_id},
     )
     await db.execute(
-        text("""
-            UPDATE articles
-            SET search_vector =
-                to_tsvector('french', coalesce(content, ''))
-                || to_tsvector('english', coalesce(content, ''))
-                || to_tsvector('simple', coalesce(number, ''))
-            WHERE law_id = :law_id
-        """),
+        text(f"{REINDEX_ARTICLES_SQL} AND a.law_id = :law_id"),
         {"law_id": law_id},
     )
     logger.info(f"✅ FTS tsvectors updated for law {law_id}")
@@ -194,8 +182,15 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None):
     logger.info(f"🌍 Language: {language_result['language']} ({language_result['confidence']:.2%})")
 
     # Catégorie
-    category_result = _classify_category(text)
-    logger.info(f"📂 Category: {category_result['category']} ({category_result['confidence']:.2%})")
+    category_result = _classify_category(
+        extracted_title or getattr(law, "title", "") or "",
+        text,
+        getattr(law, "type", None),
+    )
+    logger.info(
+        f"📂 Category: {category_result['category']} "
+        f"({category_result['confidence']:.2%}, regle {category_result['rule']})"
+    )
 
     # Articles
     articles_count = _split_and_save_articles(law_id, text)
@@ -209,7 +204,7 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None):
     # introuvable par la recherche semantique. Le pipeline n'echoue pas pour
     # autant — la recherche plein texte fonctionne — mais l'anomalie est
     # tracee sur la ligne au lieu de disparaitre dans les journaux.
-    embeddings_error = None
+    embeddings_error = category_result.get("error")
     # articles_count compte TOUS les chunks, embeddings_count seulement les
     # vectorisables : un document entierement fait de visas et de formules
     # d'execution n'a legitimement aucun vecteur.
@@ -228,6 +223,7 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None):
         category=category_result["category"],
         category_id=category_result.get("category_id"),
         category_confidence=category_result["confidence"],
+        suggested_categories=category_result.get("suggested"),
         title=extracted_title,
         processing_error=embeddings_error,
     )
@@ -390,31 +386,53 @@ def _detect_language(text: str) -> Dict[str, Any]:
         return {"language": "en", "confidence": 0.75}
 
 
-def _classify_category(text: str) -> Dict[str, Any]:
-    """Classifie la catégorie du document."""
-    try:
-        from app.services.document_classifier import DocumentClassifier
-        classifier = DocumentClassifier()
-        results = classifier.classify(text)
-        if results:
-            cat_id, confidence, _ = results[0]
-            category_name = classifier.get_category_name(cat_id)
-            # L'IDENTIFIANT est renvoye avec le nom : seul le nom l'etait, et
-            # _update_law_metadata n'avait donc rien a ecrire dans
-            # laws.category_id. Le classifieur tournait sur chaque document et
-            # son resultat etait jete — toutes les lois restaient sans
-            # categorie, et les pages de categorie vides.
-            return {"category": category_name, "category_id": cat_id, "confidence": confidence}
-        return {"category": "Autre", "category_id": None, "confidence": 0.0}
-    except Exception as e:
-        logger.warning(f"⚠️ Category classification failed, using fallback: {e}")
-        # Le repli ne connait pas d'identifiant : la categorie restera nulle,
-        # ce qui est plus honnete qu'un rattachement arbitraire.
-        if "fiscal" in text.lower() or "impôt" in text.lower():
-            return {"category": "Droit Fiscal", "category_id": None, "confidence": 0.70}
-        elif "pénal" in text.lower() or "crime" in text.lower():
-            return {"category": "Droit Pénal", "category_id": None, "confidence": 0.70}
-        return {"category": "Droit Civil", "category_id": None, "confidence": 0.70}
+def _classify_category(title: str, text: str, doc_type: str = None) -> Dict[str, Any]:
+    """
+    Determine le domaine juridique du document et resout son identifiant.
+
+    Le TITRE est passe en premier parce qu'il est le signal decisif : mesure sur
+    les 2238 titres du corpus prc.cm, il tranche seul pour quatre documents sur
+    cinq. L'ancienne version ne recevait que `content`, et une Loi de finances
+    bourree de « president » et de « Vu la Constitution » finissait en Droit
+    Constitutionnel.
+
+    L'identifiant est resolu PAR LE NOM contre la table `categories`. Il n'est
+    plus, comme avant, une position dans un dictionnaire Python ecrite telle
+    quelle dans une cle etrangere.
+    """
+    from app.services.category_resolver import load_domain_map
+    from app.services.legal_domain_classifier import get_legal_domain_classifier
+
+    result = get_legal_domain_classifier().classify(title or "", text or "", doc_type)
+
+    with SyncSessionLocal() as session:
+        domain_map = load_domain_map(session)
+
+    category_id = domain_map.get(result.domain.lower())
+    # suggested_categories est declaree ARRAY(Integer) : ce sont des
+    # identifiants, pas des noms. Les domaines absents de la table sont omis
+    # plutot que remplaces par un identifiant invente.
+    suggested = [
+        domain_map[name.lower()]
+        for name in [result.domain, *(d for d, _ in result.runners_up)]
+        if name.lower() in domain_map
+    ]
+
+    error = None
+    if category_id is None:
+        # Pas de creation automatique de ligne : l'anomalie est tracee sur la
+        # loi plutot que masquee par une categorie inventee.
+        error = f"Domaine '{result.domain}' absent de la table categories"
+        logger.error("❌ %s", error)
+
+    return {
+        "category": result.domain,
+        "category_id": category_id,
+        "confidence": result.confidence,
+        "rule": result.rule,
+        "suggested": suggested,
+        "error": error,
+    }
 
 
 def _split_and_save_articles(law_id: int, text: str) -> int:
@@ -602,6 +620,7 @@ def _update_law_metadata(
     category: str,
     category_confidence: float,
     category_id: int = None,
+    suggested_categories=None,
     title: str = None,
     processing_error: str = None,
 ) -> None:
@@ -613,9 +632,15 @@ def _update_law_metadata(
             law.detected_language = language
             law.language_confidence = language_confidence
             law.category_confidence = category_confidence
-            # Ecriture de la categorie : le classifieur produisait un resultat
-            # que personne n'enregistrait.
-            if category_id is not None:
+            # La proposition de la machine est TOUJOURS enregistree, meme
+            # quand elle ne s'applique pas : la colonne etait declaree partout
+            # et ecrite nulle part depuis le debut du projet.
+            if suggested_categories:
+                law.suggested_categories = list(suggested_categories)
+            # Le pipeline ne remplit qu'une categorie NULLE. L'administrateur
+            # choisit une categorie a l'upload (routes/laws.py) et le pipeline
+            # l'ecrasait quelques secondes plus tard.
+            if category_id is not None and law.category_id is None:
                 law.category_id = category_id
             law.status = "published"
             law.processing_error = processing_error
@@ -746,22 +771,11 @@ def process_law_sync(law_id: int, file_id: str = None) -> Dict[str, Any]:
     try:
         with SyncSessionLocal() as session:
             session.execute(
-                text("""
-                    UPDATE laws SET search_vector =
-                        to_tsvector('french', coalesce(title,'') || ' ' || coalesce(content,''))
-                        || to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,''))
-                    WHERE id = :law_id
-                """),
+                text(f"{REINDEX_LAWS_SQL} WHERE id = :law_id"),
                 {"law_id": law_id},
             )
             session.execute(
-                text("""
-                    UPDATE articles SET search_vector =
-                        to_tsvector('french', coalesce(content,''))
-                        || to_tsvector('english', coalesce(content,''))
-                        || to_tsvector('simple', coalesce(number,''))
-                    WHERE law_id = :law_id
-                """),
+                text(f"{REINDEX_ARTICLES_SQL} AND a.law_id = :law_id"),
                 {"law_id": law_id},
             )
             session.commit()

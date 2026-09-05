@@ -25,7 +25,6 @@ from app.schemas.search import (
     SearchResponse,
     SearchStats,
 )
-from app.services.postgres_search_service import escape_like
 from app.services.search_service import SearchService, SearchServiceError
 from app.core.auth import get_current_admin_user
 from app.models.user import User
@@ -259,110 +258,15 @@ async def suggest(
     return {"suggestions": suggestions, "query": q, "search_time_ms": elapsed_ms}
 
 
-@router.get("/article", status_code=status.HTTP_200_OK)
-async def find_article(
-    q: str,
-    db: AsyncSession = Depends(get_db)
-) -> dict:
-    """
-    Recherche rapide d'article pour navigation directe (<2s).
-    
-    Détecte les références d'articles dans la query et retourne:
-    - law_id: ID du document contenant l'article
-    - article_num: Numéro de l'article trouvé
-    - direct_url: URL pour navigation directe
-    
-    Performance cible: <500ms
-    
-    Args:
-        q: Query contenant une référence d'article (ex: "article 5 de la constitution")
-        
-    Returns:
-        Résultat avec law_id et article_num pour navigation directe
-    """
-    from sqlalchemy import select, or_
-    from app.models.law import Law, Article
-    
-    start_time = time.time()
-    
-    # Parse article reference from query
-    article_num, doc_hint = _parse_article_reference(q.lower().strip())
-    
-    if not article_num:
-        return {
-            "found": False,
-            "error": "Aucune référence d'article détectée",
-            "query": q,
-            "search_time_ms": int((time.time() - start_time) * 1000)
-        }
-    
-    try:
-        # Search for the law by title hint
-        law_query = select(Law).where(Law.status == "published")
-        
-        if doc_hint:
-            # Metacaracteres echappes : un % ou un _ dans la saisie elargit
-            # sinon le motif au lieu d'etre cherche litteralement.
-            pattern = f"%{escape_like(doc_hint)}%"
-            law_query = law_query.where(
-                or_(
-                    Law.title.ilike(pattern, escape="\\"),
-                    Law.reference.ilike(pattern, escape="\\")
-                )
-            )
-        
-        result = await db.execute(law_query.limit(5))
-        laws = result.scalars().all()
-        
-        # Find article in these laws
-        for law in laws:
-            article_query = select(Article).where(
-                Article.law_id == law.id,
-                Article.number == article_num
-            ).limit(1)
-            
-            article_result = await db.execute(article_query)
-            article = article_result.scalar_one_or_none()
-            
-            if article:
-                search_time_ms = int((time.time() - start_time) * 1000)
-                logger.info(f"🎯 Found article {article.number} in law {law.id} in {search_time_ms}ms")
-                
-                page_number = _estimate_page_number(article)
-                
-                return {
-                    "found": True,
-                    "law_id": law.id,
-                    "law_title": law.title,
-                    "law_reference": law.reference,
-                    "article_num": article.number,
-                    "article_id": article.id,
-                    "article_order": article.order,
-                    "estimated_page": page_number,
-                    "direct_url": f"/laws/{law.id}?article={article.number}&page={page_number}",
-                    "query": q,
-                    "search_time_ms": search_time_ms
-                }
-        
-        # Article not found
-        search_time_ms = int((time.time() - start_time) * 1000)
-        return {
-            "found": False,
-            "error": f"Article {article_num} non trouvé dans '{doc_hint or 'tous les documents'}'",
-            "query": q,
-            "search_time_ms": search_time_ms
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Article search error: {e}")
-        return {
-            "found": False,
-            "error": str(e),
-            "query": q,
-            "search_time_ms": int((time.time() - start_time) * 1000)
-        }
-
-
+# SUPPRIME : GET /api/v1/search/article.
+#
+# Il levait NameError a CHAQUE appel — il invoquait deux fonctions qui
+# n'existaient nulle part dans ce module, `_parse_article_reference` (qui
+# est une methode de SearchService) et `_estimate_page_number` (qui n'existe
+# pas du tout). Aucun test ne le couvrait, aucun client ne l'appelait : c'est
+# ce qui lui a permis de survivre. Sa raison d'etre est reprise par
+# POST /search, qui rend `target_law_id`, `target_article` et
+# `direct_navigation`.
 
 @router.post(
     "/reindex",

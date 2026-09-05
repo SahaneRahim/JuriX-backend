@@ -39,6 +39,10 @@ class UserCreate(UserBase):
     """Schema for creating a new user."""
 
     password: str = Field(..., min_length=8, max_length=100)
+    # `admin.create_user` lit `payload.is_active`, or aucun schema de la chaine
+    # ne definissait ce champ : toute creation de compte levait un AttributeError
+    # et repondait 500. Le defaut True reproduit l'intention du code appelant.
+    is_active: bool = True
 
     @field_validator("password")
     @classmethod
@@ -61,6 +65,11 @@ class UserUpdate(BaseModel):
     full_name: Optional[str] = Field(None, max_length=255)
     password: Optional[str] = Field(None, min_length=8, max_length=100)
     is_active: Optional[bool] = None
+    # `admin.update_user` teste `"role" in changes` pour reserver le changement
+    # de role aux superadmins. Le champ n'existait pas ici : Pydantic l'ecartait
+    # en silence, donc AUCUN role n'etait modifiable et le garde-fou ne se
+    # declenchait jamais. Meme motif que UserBase.
+    role: Optional[str] = Field(None, pattern="^(user|admin|superadmin)$")
 
 
 class UserLogin(BaseModel):

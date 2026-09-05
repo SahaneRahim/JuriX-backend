@@ -39,17 +39,33 @@ class ExtractedArticle:
 # ((\d+(?:\.\d+)*)). Auparavant le '(?:\.\d+)*' etait HORS du groupe :
 # 'Article 1.1' et 'Article 1.2' etaient tous deux captures comme '1' et
 # fusionnaient avec l'article 1 — une erreur de citation sur une base juridique.
+# Prefixe commun a tous les motifs de marqueur d'article.
+#
+# `(?:^|\n)` ancre en debut de ligne, puis `[#>\-\*_]{0,4}` laisse passer la
+# decoration markdown produite par LlamaParse. Le corpus ecrit `**ARTICLE 1er.**-`
+# et `**Article 3** :` : l'ancien prefixe `(?:^|\n)\s*Article` echouait sur les
+# deux, les `**` s'intercalant entre le saut de ligne et le mot.
+#
+# `\s` est PROSCRIT ici : il avale les sauts de ligne et ferait correspondre un
+# « article 5 » cite en plein paragraphe, ce qui couperait un article en deux a
+# chaque renvoi interne.
+#
+# Mesure sur les 27 lois : 8 avaient au moins un numero reconnu, contre 27
+# apres ce changement ; 77 marqueurs contre 378. Sur le seul Code Minier,
+# 41 articles indexes contre 193 reellement presents.
+_MARKER_PREFIX = r'(?:^|\n)[ \t]*[#>\-\*_]{0,4}[ \t]*'
+
 ARTICLE_PATTERNS = [
     # === FRENCH PATTERNS ===
     # Article + number (1, 2, 3...) OR ordinals (1er, 1ère, 2ème, 3ème...) OR words (premier, première, deuxième...)
-    r'(?:^|\n)\s*Article\s+(?:' +
+    _MARKER_PREFIX + r'Article[ \t]*(?:' +
         r'(\d+(?:\.\d+)*)(?:er|ère|ème)?' +  # Article 1, Article 1er, Article 2ème, Article 1.1
         r'|' +
         r'(premier|première|deuxième|second|seconde|troisième|quatrième|cinquième|sixième|septième|huitième|neuvième|dixième)' +  # Article premier, Article deuxième...
     r')\s*[.:\-–]?\s*',
     
     # Art. (abbreviation) + number OR ordinals
-    r'(?:^|\n)\s*Art\.?\s+(?:' +
+    _MARKER_PREFIX + r'Art\.?[ \t]*(?:' +
         r'(\d+(?:\.\d+)*)(?:er|ère|ème)?' +  # Art. 1, Art. 1er, Art. 2ème
         r'|' +
         r'(premier|première|deuxième|second|seconde|troisième|quatrième|cinquième|sixième|septième|huitième|neuvième|dixième)' +  # Art. premier
@@ -57,33 +73,33 @@ ARTICLE_PATTERNS = [
     
     # === ENGLISH PATTERNS ===
     # Section + number OR words (one, first, second, third...)
-    r'(?:^|\n)\s*Section\s+(?:' +
+    _MARKER_PREFIX + r'Section[ \t]*(?:' +
         r'(\d+(?:\.\d+)*)' +  # Section 1, Section 1.1
         r'|' +
         r'(one|first|two|second|three|third|four|fourth|five|fifth|six|sixth|seven|seventh|eight|eighth|nine|ninth|ten|tenth)' +  # Section one, Section first
     r')\s*[.:\-–]?\s*',
     
     # Article (English style) + number OR words
-    r'(?:^|\n)\s*Article\s+(?:' +
+    _MARKER_PREFIX + r'Article[ \t]*(?:' +
         r'(\d+(?:\.\d+)*)' +  # Article 1 (English)
         r'|' +
         r'(one|first|two|second|three|third|four|fourth|five|fifth|six|sixth|seven|seventh|eight|eighth|nine|ninth|ten|tenth)' +  # Article one (English)
     r')\s*[.:\-–]?\s*',
     
     # Sec. (abbreviation, English) + number
-    r'(?:^|\n)\s*Sec\.?\s+(\d+(?:\.\d+)*)\s*[.:\-–]?\s*',
+    _MARKER_PREFIX + r'Sec\.?[ \t]*(\d+(?:\.\d+)*)\s*[.:\-–]?[ \t]*',
 
     # === NUMEROTATION CODIFIEE (Code Général des Impôts, CGI) ===
     # "Article L 94 septies.-", "Article L 94", "Art. M 12 bis"
     # Rencontre dans les lois de finances qui modifient le CGI.
-    r'(?:^|\n)\s*Art(?:icle|\.)?\s+([A-Z]\s*\d+(?:\s+(?:bis|ter|quater|quinquies|'
+    _MARKER_PREFIX + r'Art(?:icle|\.)?[ \t]*([A-Z][ \t]*\d+(?:[ \t]+(?:bis|ter|quater|quinquies|'
     r'sexies|septies|octies|novies|decies))?)\s*[.:\-–]?\s*',
 
     # === ORDINAUX COMPOSES (français) ===
     # "ARTICLE QUATRE-VINGT-SIXIÈME", "Article trente-et-unième"
     # La liste explicite ci-dessus s'arrête à "dixième" ; les lois de finances
     # numérotent leurs articles en toutes lettres bien au-delà.
-    r'(?:^|\n)\s*Article\s+((?:[A-Za-zÀ-ÿ]+-)+[A-Za-zÀ-ÿ]*(?:ièmes?|èmes?|iemes?|emes?))'
+    _MARKER_PREFIX + r'Article[ \t]*((?:[A-Za-zÀ-ÿ]+-)+[A-Za-zÀ-ÿ]*(?:ièmes?|èmes?|iemes?|emes?))'
     r'\s*[.:\-–]?\s*',
 ]
 
@@ -506,28 +522,54 @@ def _preprocess_text(text: str, preserve_formatting: bool) -> str:
     return text
 
 
-def _detect_article_pattern(text: str) -> re.Pattern:
-    """Detect which article pattern is most common."""
-    pattern_counts = {}
+# Part du meilleur motif au-dela de laquelle un motif secondaire est conserve.
+# 20 % : assez bas pour rattraper les documents qui melangent deux conventions
+# ("Article 1er" puis "Art. 2", frequent dans les lois de finances), assez haut
+# pour ne pas retenir un motif qui ne touche qu'une ligne isolee — un faux
+# positif coupe un article en deux, ce qui coute plus cher qu'un motif manque.
+_SECONDARY_PATTERN_RATIO = 0.20
 
-    for pattern_str in ARTICLE_PATTERNS:
-        pattern = re.compile(pattern_str, re.IGNORECASE | re.MULTILINE)
-        matches = pattern.findall(text)
-        pattern_counts[pattern_str] = len(matches)
 
-    # Use most common pattern
-    best_pattern_str = max(pattern_counts, key=pattern_counts.get)
+def _detect_article_pattern(text: str) -> Optional[re.Pattern]:
+    """
+    Compose l'expression de detection des articles a partir du texte.
 
-    if pattern_counts[best_pattern_str] == 0:
+    Auparavant un SEUL motif etait retenu, le plus frequent (`max()`). Un
+    document melangeant deux conventions perdait toutes les occurrences du motif
+    perdant : elles n'etaient pas detectees comme articles, donc absorbees dans
+    le chunk precedent ou, si elles precedaient le premier article reconnu, dans
+    LEGAL_BASIS. Reproduit sur un document ouvrant par "Article 1.-" puis
+    poursuivant en "Art. 2.-", "Art. 3.-", "Art. 4.-" : l'article 1 disparaissait
+    en tant qu'article.
+
+    Tous les motifs atteignant _SECONDARY_PATTERN_RATIO du meilleur sont donc
+    fusionnes en une alternance. Chaque branche garde ses propres groupes de
+    capture et l'appelant lit le premier groupe non nul, donc l'alternance ne
+    change pas la lecture du numero.
+    """
+    counts = {
+        pattern_str: len(
+            re.compile(pattern_str, re.IGNORECASE | re.MULTILINE).findall(text)
+        )
+        for pattern_str in ARTICLE_PATTERNS
+    }
+
+    best = max(counts.values())
+    if best == 0:
         logger.warning("⚠️ Aucun pattern d'article détecté.")
         return None
 
+    seuil = max(1, best * _SECONDARY_PATTERN_RATIO)
+    retenus = [p for p in ARTICLE_PATTERNS if counts[p] >= seuil]
+
     logger.info(
-        f"📋 Detected pattern: {best_pattern_str} "
-        f"({pattern_counts[best_pattern_str]} matches)"
+        f"📋 {len(retenus)} motif(s) retenu(s) sur {len(ARTICLE_PATTERNS)}, "
+        f"{sum(counts[p] for p in retenus)} occurrence(s)"
     )
 
-    return re.compile(best_pattern_str, re.IGNORECASE | re.MULTILINE)
+    # Les branches sont deja parenthesees et sans ancrage mutuellement exclusif ;
+    # l'alternance les essaie dans l'ordre de ARTICLE_PATTERNS.
+    return re.compile("|".join(retenus), re.IGNORECASE | re.MULTILINE)
 
 
 
@@ -587,7 +629,11 @@ def _split_by_pattern_with_sections(text: str, pattern: re.Pattern) -> List[Tupl
     
     # Track current section
     current_section = None
-    
+
+    # Numerotation des chapeaux de section emis (cf. plus bas). Compteur propre
+    # pour ne pas entrer en collision avec la numerotation des articles.
+    section_seq = 1
+
     for i, match in enumerate(article_matches):
         # Extract article number
         number = None
@@ -630,16 +676,37 @@ def _split_by_pattern_with_sections(text: str, pattern: re.Pattern) -> List[Tupl
         start = match.end()
         end = article_matches[i + 1].start() if i + 1 < len(article_matches) else len(text)
         content = text[start:end].strip()
-        
-        # Strip section headers from content (they belong between articles, not in content)
-        # Find first section header in content and cut before it
+
+        # Un en-tete de section trouve DANS le contenu marque la fin de
+        # l'article : ce qui suit appartient a la nouvelle section.
         section_in_content = section_pattern.search(content)
+        chapeau = ""
         if section_in_content:
-            # Cut content before the section header
+            chapeau = content[section_in_content.end():].strip()
             content = content[:section_in_content.start()].strip()
-        
+
         articles.append((number, content, current_section))
-    
+
+        # Le chapeau de section etait purement SUPPRIME : le texte situe entre
+        # l'en-tete TITRE/CHAPITRE et l'article suivant n'etait rattache a
+        # personne — ni a l'article precedent, borne par cet en-tete, ni au
+        # suivant, dont le contenu ne commence qu'a son propre motif. Sur les
+        # codes, ou chaque titre s'ouvre par un paragraphe de portee, et sur les
+        # annexes introduites par un CHAPITRE, la fin du document disparaissait
+        # entierement et sans trace.
+        #
+        # Il est emis comme chunk distinct plutot que colle a un article : il
+        # n'appartient a aucun des deux, et le rattacher fausserait la citation.
+        # Le prefixe SECTION_ suit la convention des chunks non-articles deja en
+        # place (LEGAL_BASIS, PARA_n) ; chunk_refiner le classe ensuite.
+        if chapeau:
+            articles.append((
+                f"SECTION_{section_seq}",
+                chapeau,
+                section_in_content.group(0).strip(),
+            ))
+            section_seq += 1
+
     return articles
 
 
@@ -683,19 +750,25 @@ def _extract_title(content: str) -> Optional[str]:
 
 
 def _clean_article_content(content: str, preserve_formatting: bool, title: Optional[str]) -> str:
-    """Clean article content."""
-    if preserve_formatting:
-        return content.strip()
+    """
+    Nettoie le contenu d'un article.
 
-    # Remove title if extracted separately
-    if title:
-        # Remove first line if it matches the title
-        lines = content.split('\n')
-        if len(lines) > 1:
-            first_line = lines[0].strip().rstrip('.')
-            if first_line == title:
-                content = '\n'.join(lines[1:])
+    Le titre est COPIE dans le champ `title`, jamais retire du contenu.
 
+    Il l'etait auparavant, et c'etait une perte visible pour l'utilisateur.
+    `_extract_title` accepte toute premiere ligne de 5 a 100 caracteres
+    commencant par une majuscule : sur du texte extrait, la premiere PHRASE
+    normative d'un article remplit tres souvent ce critere. Elle quittait alors
+    le contenu pour un champ que rien n'affiche — aucun endpoint ne renvoie
+    `Article.title` (`LawDetailResponse` n'est utilise nulle part, et
+    `ArticleResponse` ne porte pas le champ), et `search_service` construit ses
+    extraits depuis `content` seul. Cas reproduit : "Monsieur X, matricule
+    765 609-Y", premiere ligne d'une liste nominative, disparaissait de
+    l'application.
+
+    Dupliquer le titre dans les deux champs coute quelques dizaines d'octets par
+    article ; le retirer coutait une phrase de texte juridique.
+    """
     return content.strip()
 
 

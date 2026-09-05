@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 from app.models.law import Article, Law
+from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
 from app.schemas.search import SearchFilters, SearchRequest
 from app.services.embedding_service import EmbeddingService
 from app.services.postgres_search_service import search_articles_pg, search_laws_pg
@@ -34,7 +35,7 @@ def _unit_vector(seed: int) -> list:
 
 
 @pytest.fixture
-async def corpus(db_session):
+async def corpus(db_session, category_ids):
     """
     Un code publie a trois articles, et un projet en brouillon.
 
@@ -49,7 +50,7 @@ async def corpus(db_session):
         type="loi",
         language="fr",
         status="published",
-        category_id=1,
+        category_id=category_ids["Droit Civil"],
         publication_date=date(2024, 5, 1),
     )
     draft = Law(
@@ -60,7 +61,7 @@ async def corpus(db_session):
         type="loi",
         language="fr",
         status="draft",
-        category_id=1,
+        category_id=category_ids["Droit Civil"],
         publication_date=date(2025, 1, 10),
     )
     db_session.add_all([published, draft])
@@ -114,19 +115,15 @@ async def corpus(db_session):
 
     # search_vector est pose par trigger a l'INSERT ; on le rafraichit pour les
     # lois, dont le contenu a ete ecrit directement.
+    #
+    # CETTE FIXTURE CITE app/services/search_vectors.py, elle ne recopie pas les
+    # expressions. Elle etait la sixieme copie du meme SQL, et la seule encore
+    # NON PONDEREE : elle aurait remis des vecteurs sans `setweight` par-dessus
+    # ceux du trigger, invalidant en silence tout test de classement.
     from sqlalchemy import text as sql_text
 
-    await db_session.execute(sql_text("""
-        UPDATE laws SET search_vector =
-            to_tsvector('french', coalesce(title,'') || ' ' || coalesce(content,''))
-            || to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,''))
-    """))
-    await db_session.execute(sql_text("""
-        UPDATE articles SET search_vector =
-            to_tsvector('french', coalesce(content,''))
-            || to_tsvector('english', coalesce(content,''))
-            || to_tsvector('simple', coalesce(number,''))
-    """))
+    await db_session.execute(sql_text(REINDEX_LAWS_SQL))
+    await db_session.execute(sql_text(REINDEX_ARTICLES_SQL))
     await db_session.commit()
 
     return {"published": published, "draft": draft, "articles": articles}

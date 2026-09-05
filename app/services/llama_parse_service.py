@@ -224,6 +224,12 @@ class LlamaParseService:
 
     # Decoupe defensive : seuil conservateur, en-deca de la limite annoncee.
     # Le corpus contient 5 fichiers >50 Mo (max observe : 124,6 Mo / 48 pages).
+    # Version du format d'entree de cache. A incrementer des qu'un changement
+    # rend les entrees existantes trompeuses plutot que simplement vieilles.
+    # v2 : `_pages_from` decoupe desormais un markdown recu en un seul bloc ;
+    # les entrees v1 rendaient tout le document sur une page unique.
+    CACHE_SCHEMA = 2
+
     MAX_FILE_MB = 45
     SPLIT_PAGES = 100
 
@@ -521,7 +527,26 @@ class LlamaParseService:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if payload.get("tier") != self.tier:
                 return None
-            return payload.get("pages")
+
+            pages = payload.get("pages")
+
+            # Entree ecrite avant le decoupage en pages : elle rend tout le
+            # document sur une seule page. Son CONTENU reste valide et a deja
+            # ete paye — on le redecoupe sur place plutot que de rappeler l'API.
+            # Re-extraire aurait coute des credits pour un texte qu'on possede
+            # deja.
+            if payload.get("schema") != self.CACHE_SCHEMA and pages:
+                pages = _split_markdown_pages("\n\n".join(pages))
+                logger.info(f"♻️ Cache OCR v1 redecoupe sur place : {len(pages)} page(s)")
+                self._write_cache(key, pages)
+
+            # Une liste VIDE etait un HIT : une extraction ratee se gravait sur
+            # disque et se rejouait indefiniment, sans jamais rappeler l'API. Le
+            # seul moyen d'en sortir etait d'effacer le fichier a la main.
+            if not pages:
+                logger.warning("⚠️ Entree de cache OCR vide, ignoree")
+                return None
+            return pages
         except Exception as e:
             logger.warning(f"⚠️ Cache OCR illisible ({e}), ignore")
             return None
@@ -530,14 +555,33 @@ class LlamaParseService:
         path = self._cache_path(key)
         if not path:
             return
+
+        # Ne jamais graver un echec. Sans ce garde-fou, `pages == []` — ce que
+        # `_pages_from` rend des que la reponse n'a aucune forme reconnue, y
+        # compris sur un job COMPLETED au markdown nul — devenait un resultat
+        # permanent.
+        if not any(p.strip() for p in pages):
+            logger.warning("⚠️ Extraction vide, non mise en cache")
+            return
+
         try:
-            path.write_text(
+            # Ecriture atomique : un plantage en cours d'ecriture laissait un
+            # JSON tronque. Il etait relu comme un miss, donc non fatal, mais il
+            # occupait la place de l'entree valide.
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(
                 json.dumps(
-                    {"tier": self.tier, "pages": pages, "cached_at": time.time()},
+                    {
+                        "schema": self.CACHE_SCHEMA,
+                        "tier": self.tier,
+                        "pages": pages,
+                        "cached_at": time.time(),
+                    },
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
             )
+            tmp.replace(path)
         except OSError as e:
             logger.warning(f"⚠️ Ecriture cache OCR echouee ({e})")
 

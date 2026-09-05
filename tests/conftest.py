@@ -90,6 +90,9 @@ _DB_FIXTURES = {
     "pg_engine",
     "db_session",
     "async_db_session",
+    "category_ids",
+    "sync_db_session",
+    "migrated_categories",
     "client",
     "admin_client",
     "sample_law",
@@ -296,27 +299,130 @@ async def async_db_session(pg_engine) -> AsyncGenerator[AsyncSession, None]:
 
 @pytest_asyncio.fixture
 async def db_session(async_db_session: AsyncSession) -> AsyncSession:
-    """Session avec les 12 catégories de référence pré-insérées."""
+    """
+    Session avec les 14 domaines juridiques canoniques pré-insérés.
+
+    Les identifiants sont attribués dans l'ordre INVERSE de la liste canonique,
+    et la séquence démarre à 1000. Ce n'est pas un détail de mise en place :
+    l'ancien pipeline écrivait dans `laws.category_id` la position d'une
+    catégorie dans un dictionnaire Python, et l'ancienne version de cette
+    fixture — qui insérait les catégories avec `id=1, 2, 3...` dans l'ordre —
+    rendait ce bug invisible. Avec des identifiants désordonnés, tout code qui
+    résout une catégorie par position échoue immédiatement.
+    """
     from app.models.law import Category
+    from app.services.legal_domain_classifier import CANONICAL_DOMAINS
 
-    noms = [
-        "Droit Civil", "Droit Commercial OHADA", "Droit Pénal",
-        "Droit Administratif", "Droit du Travail", "Droit Foncier",
-        "Droit de la Famille", "Droit Fiscal", "Droit des Affaires",
-        "Droit International", "Droit Constitutionnel", "Procédure Civile",
-    ]
-    for i, nom in enumerate(noms, start=1):
-        async_db_session.add(Category(id=i, name=nom, description=nom))
-    await async_db_session.commit()
-
-    # Insérer avec des ids explicites ne fait PAS avancer la séquence : le
-    # prochain id auto-généré repartirait à 1 et heurterait "Droit Civil".
-    # C'est ce qui faisait échouer tous les tests créant une catégorie via l'API.
-    await async_db_session.execute(
-        text("SELECT setval('categories_id_seq', (SELECT max(id) FROM categories))")
-    )
+    await async_db_session.execute(text("SELECT setval('categories_id_seq', 1000, true)"))
+    for order, nom in enumerate(reversed(CANONICAL_DOMAINS)):
+        async_db_session.add(Category(name=nom, description=nom, display_order=order))
     await async_db_session.commit()
     return async_db_session
+
+
+@pytest_asyncio.fixture
+async def category_ids(db_session: AsyncSession) -> dict:
+    """
+    {nom du domaine: identifiant}, lu en base.
+
+    Les fixtures de test ecrivaient `category_id=1` en dur. C'etait la meme
+    hypothese que celle du bug d'origine — que la position vaut identifiant —
+    et elle rendait toute la suite aveugle a ce defaut.
+    """
+    from sqlalchemy import select as sa_select
+
+    from app.models.law import Category
+
+    rows = (await db_session.execute(sa_select(Category.name, Category.id))).all()
+    return {name: identifier for name, identifier in rows}
+
+
+@pytest.fixture
+def sync_db_session(request):
+    """
+    Session SYNCHRONE sur la base de test, pour le pipeline et les scripts.
+
+    Le pipeline d'ingestion et les scripts de maintenance sont synchrones
+    (`SyncSessionLocal`) : les tester à travers une session async ne testerait
+    pas le chemin réel. Le nettoyage est fait ici même, la fixture async
+    n'ayant pas de prise sur les connexions psycopg2.
+    """
+    from sqlalchemy import text as sa_text
+
+    from app.core.database import SyncSessionLocal
+
+    request.getfixturevalue("_migrated_schema")
+    truncate = sa_text(f"TRUNCATE {', '.join(_DATA_TABLES)} RESTART IDENTITY CASCADE")
+
+    with SyncSessionLocal() as session:
+        session.execute(truncate)
+        session.commit()
+        try:
+            yield session
+        finally:
+            session.rollback()
+            session.execute(truncate)
+            session.commit()
+
+
+@pytest.fixture
+def migrated_categories(sync_db_session):
+    """
+    Base dont la table `categories` a la forme d'AVANT la migration
+    d9e0f1a2b3c4 — types de documents inclus, lois rattachées — puis remise à
+    l'état canonique par cette migration.
+
+    C'est le seul test qui exerce réellement l'ordre des étapes : sans le
+    re-pointage des lois avant la suppression, l'étape 4 lèverait
+    ForeignKeyViolation.
+    """
+    from sqlalchemy import text as sa_text
+
+    from app.models.law import Category, Law
+
+    sync_db_session.execute(sa_text("DELETE FROM laws"))
+    sync_db_session.execute(sa_text("DELETE FROM categories"))
+    legacy = [
+        "Droit Civil", "Droit Pénal", "Droit Commercial", "Droit du Travail",
+        "Droit Fiscal", "Droit Administratif", "Droit de la Famille",
+        "Droit des Affaires", "Lois Internationales Ratifiées", "Lois",
+        "Ordonnances", "Décrets", "Arrêtés", "Autres", "Droit OHADA",
+    ]
+    rows = {}
+    for order, nom in enumerate(legacy):
+        category = Category(name=nom, description=nom, display_order=order)
+        sync_db_session.add(category)
+        sync_db_session.flush()
+        rows[nom] = category.id
+    # Des lois pointant sur une ligne vouee a disparaitre et sur une ligne
+    # vouee a etre fusionnee : les deux chemins de l'etape 3.
+    for reference, nom in [("LEG-1", "Lois"), ("LEG-2", "Droit des Affaires"),
+                           ("LEG-3", "Droit OHADA"), ("LEG-4", "Décrets")]:
+        sync_db_session.add(Law(
+            reference=reference, title=f"Loi {reference}", type="loi",
+            content="Contenu.", language="fr", status="published",
+            category_id=rows[nom],
+        ))
+    sync_db_session.commit()
+
+    from alembic import command
+    from alembic.config import Config
+
+    previous = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+    config = Config("alembic.ini")
+    try:
+        command.downgrade(config, "c8d9e0f1a2b3")
+        command.upgrade(config, "head")
+    finally:
+        if previous is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous
+
+    sync_db_session.expire_all()
+    sync_db_session.commit()
+    return sync_db_session
 
 
 @pytest_asyncio.fixture

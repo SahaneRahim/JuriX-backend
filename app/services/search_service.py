@@ -42,11 +42,17 @@ from app.schemas.search import (
 )
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.reranker import rerank_chunks
+from app.services.article_reference import parse_reference
+from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
 from app.services.postgres_search_service import (
     get_from_pg_cache,
     store_in_pg_cache,
+    apply_trigram_threshold,
+    find_article_in_laws,
+    resolve_law_by_hint,
     search_articles_pg,
     search_laws_pg,
+    search_titles_trgm_pg,
     update_law_search_vector,
     remove_law_search_index,
     cleanup_expired_cache,
@@ -87,6 +93,23 @@ def _init_global_singletons() -> None:
 
 
 # ==================== EXCEPTIONS ====================
+
+
+def _merge_title_scope(best: ChunkResult, title_chunk: ChunkResult) -> ChunkResult:
+    """
+    Marque `best` comme correspondance de titre, sans perdre son extrait.
+
+    La branche titre rend une ligne niveau-loi : `article_id` nul, et un extrait
+    qui est le debut du texte integral, pas un passage mis en evidence. La
+    garder telle quelle comme meilleur chunk ferait perdre le `<mark>` produit
+    par `ts_headline` sur l'article. On ne conserve donc du chunk de titre que
+    l'information de portee — et son score s'il est meilleur.
+    """
+    if best.article_id is None and title_chunk.article_id is not None:
+        best = title_chunk
+    best.match_scope = "title"
+    best.relevance_score = max(best.relevance_score, title_chunk.relevance_score)
+    return best
 
 
 class SearchServiceError(Exception):
@@ -241,7 +264,7 @@ class SearchService:
             chunks = rerank_chunks(request.query, chunks)
 
         elapsed_ms = int((time.time() - start_time) * 1000)
-        response = self._build_search_response(request, chunks, elapsed_ms)
+        response = await self._build_search_response(request, chunks, elapsed_ms)
 
         # Store in PostgreSQL cache
         if self.use_cache:
@@ -267,7 +290,10 @@ class SearchService:
 
     async def _execute_search_by_mode(self, request: SearchRequest) -> List[ChunkResult]:
         """Dispatch search to the correct mode handler. Renvoie des chunks."""
-        budget = self._chunk_budget(request.limit)
+        # Le budget couvre offset + limit : calcule sur `limit` seul, il ne
+        # ramenait jamais assez de chunks pour remplir une seconde page,
+        # qui restait donc vide — masque jusqu'ici par un `total` faux.
+        budget = self._chunk_budget(request.offset + request.limit)
 
         if request.mode == "text":
             return await self.text_chunks(request.query, request.filters, budget, 0)
@@ -278,7 +304,7 @@ class SearchService:
         else:
             raise ValueError(f"Mode invalide: {request.mode}")
 
-    def _build_search_response(self, request, chunks: List[ChunkResult], elapsed_ms):
+    async def _build_search_response(self, request, chunks: List[ChunkResult], elapsed_ms):
         """
         Construit la reponse : documents pour le front, chunks pour le RAG.
 
@@ -287,17 +313,33 @@ class SearchService:
         eux tronques a `limit`, c'est ce que consomme le RAG.
         """
         results = self._chunks_to_search_results(chunks)
-        results = results[request.offset:request.offset + request.limit]
+        # `total` est compte AVANT la decoupe de page. Il valait la taille de la
+        # page courante, donc le front — qui calcule Math.ceil(total / 20) —
+        # n'affichait jamais plus d'une page, quel que soit le nombre de
+        # correspondances. C'est le nombre de lois trouvees dans le budget de
+        # chunks, pas un total de corpus : la distinction est assumee, un COUNT
+        # exact doublerait le cout de chaque recherche.
         total = len(results)
-        article_ref = self._parse_article_reference(request.query)
-        target_article = None
-        direct_navigation = False
+        results = results[request.offset:request.offset + request.limit]
 
-        if article_ref and total == 1:
-            target_article = article_ref["article_num"]
-            direct_navigation = True
-        elif article_ref and total > 1:
-            target_article = article_ref["article_num"]
+        target_article = target_law_id = None
+        direct_navigation = False
+        reference = parse_reference(request.query)
+
+        if reference:
+            target_article = reference.number
+            # L'indice de document est ENFIN utilise. Il etait extrait puis
+            # jete : rien ne reliait « du code minier » a une loi.
+            law_ids = (
+                await resolve_law_by_hint(self.db, reference.doc_hint, request.filters)
+                if reference.has_hint
+                else [r.law_id for r in results[:3]]
+            )
+            target_law_id = await find_article_in_laws(self.db, law_ids, target_article)
+            # Navigation directe SI ET SEULEMENT SI l'article existe vraiment.
+            # L'ancienne condition etait `total == 1`, qui ne se produit presque
+            # jamais : le champ etait calcule puis toujours faux.
+            direct_navigation = target_law_id is not None
 
         return SearchResponse(
             query=request.query,
@@ -306,6 +348,7 @@ class SearchService:
             total=total,
             search_time_ms=elapsed_ms,
             filters_applied=request.filters.model_dump() if request.filters else None,
+            target_law_id=target_law_id,
             target_article=target_article,
             direct_navigation=direct_navigation,
             chunks=chunks[:request.limit],
@@ -337,12 +380,26 @@ class SearchService:
         offset: int = 0,
     ) -> List[ChunkResult]:
         """
-        Recherche textuelle PostgreSQL FTS, au niveau article.
+        Recherche textuelle PostgreSQL FTS, titre d'abord puis corps du texte.
 
-        Cherche d'abord dans les articles, puis dans les lois en repli. Les
-        filtres sont desormais transmis a la branche article : ils ne l'etaient
-        pas, si bien qu'un status="published" demande par l'appelant — le RAG le
-        fait — n'avait aucun effet des que des articles correspondaient.
+        TROIS PASSES, ET LA PREMIERE N'EST PLUS UN REPLI. La branche titre etait
+        gardee derriere `if not chunks:` : elle ne s'executait que si les trois
+        passes articles avaient toutes rendu zero ligne, c'est-a-dire jamais. Or
+        elle etait la SEULE a voir `laws.title`. D'ou le symptome : chercher
+        « nomination » remontait des documents qui ne l'ont pas dans leur titre,
+        et le document le moins pertinent sortait premier parce qu'il repetait le
+        mot dans son corps.
+
+        L'ordre de concatenation porte la decision « titre d'abord, texte
+        ensuite » : les correspondances exactes de titre, puis les
+        correspondances floues de titre (fautes de frappe), puis le corps. Le
+        classement final s'appuie sur `match_scope`, pas sur cet ordre, mais
+        l'ordre garantit qu'un titre survit a la troncature du budget.
+
+        Les filtres sont transmis aux trois branches : ils ne l'etaient pas a la
+        branche article, si bien qu'un status="published" demande par l'appelant
+        — le RAG le fait — n'avait aucun effet des que des articles
+        correspondaient.
 
         Raises:
             TextSearchError: Si la recherche echoue
@@ -352,12 +409,35 @@ class SearchService:
         start_time = time.time()
 
         try:
-            chunks = await search_articles_pg(self.db, query, filters, limit, offset)
-            if not chunks:
-                chunks = await search_laws_pg(self.db, query, filters, limit, offset)
+            title_chunks = await search_laws_pg(self.db, query, filters, limit, offset)
+
+            # La passe floue ne sert qu'a rattraper une faute de frappe : elle ne
+            # se declenche que si la passe exacte n'a pas rempli la page, et ses
+            # resultats viennent APRES. Une faute ne doit jamais declasser une
+            # correspondance franche.
+            fuzzy_chunks: List[ChunkResult] = []
+            if len(title_chunks) < limit:
+                await apply_trigram_threshold(
+                    self.db, settings.TITLE_TRIGRAM_THRESHOLD
+                )
+                seen_laws = {c.law_id for c in title_chunks}
+                fuzzy_chunks = [
+                    c
+                    for c in await search_titles_trgm_pg(
+                        self.db, query, filters, limit, settings.TITLE_TRIGRAM_THRESHOLD
+                    )
+                    if c.law_id not in seen_laws
+                ]
+
+            body_chunks = await search_articles_pg(self.db, query, filters, limit, offset)
+
+            chunks = title_chunks + fuzzy_chunks + body_chunks
 
             elapsed_ms = int((time.time() - start_time) * 1000)
-            logger.info(f"📝 Text search total: {len(chunks)} chunks in {elapsed_ms}ms")
+            logger.info(
+                f"📝 Text search: {len(title_chunks)} titres + {len(fuzzy_chunks)} flous "
+                f"+ {len(body_chunks)} corps en {elapsed_ms}ms"
+            )
             return chunks
 
         except Exception as e:
@@ -697,6 +777,13 @@ class SearchService:
                 by_law[chunk.law_id] = {"best": chunk, "chunks": [chunk]}
             else:
                 entry["chunks"].append(chunk)
+                # UN SEUL chunk de titre suffit a faire du document une
+                # correspondance de titre. La branche titre rend une ligne
+                # niveau-loi sans article ; si un article de la meme loi
+                # correspond aussi par le corps, le document doit rester dans la
+                # section « titre », et c'est l'article qui porte l'extrait.
+                if chunk.match_scope == "title":
+                    entry["best"] = _merge_title_scope(entry["best"], chunk)
 
         results: List[SearchResult] = []
         for law_id, entry in by_law.items():
@@ -728,11 +815,18 @@ class SearchService:
                 category_name=best.category_name,
                 publication_date=best.publication_date,
                 relevance_score=best.relevance_score,
+                match_scope=best.match_scope,
                 matched_articles=matched,
                 highlights={"content": best.excerpt} if best.excerpt else {},
                 content=best.content or None,
             ))
 
+        # LE TRI PORTE LA DECISION « titre d'abord, texte ensuite ». Il est fait
+        # ici, sur les documents, et non par la fusion RRF : celle-ci ecrase
+        # `relevance_score` en place et melangerait les deux groupes, si bien
+        # qu'un titre faiblement classe passerait derriere un corps fortement
+        # classe — exactement ce qu'on veut eviter.
+        results.sort(key=lambda r: (r.match_scope != "title", -r.relevance_score))
         return results
 
     # ==================== INDEXING (PostgreSQL native) ====================
@@ -786,15 +880,13 @@ class SearchService:
 
         try:
             # Recalcule tous les tsvectors en masse
-            result = await self.db.execute(text("UPDATE laws SET search_vector = "
-                "to_tsvector('french', coalesce(title,'') || ' ' || coalesce(content,''))"
-                " || to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,''))"))
+            # Expressions citees depuis app/services/search_vectors.py : elles
+            # etaient recopiees a l'identique en cinq endroits, qui divergeaient
+            # a la premiere retouche.
+            result = await self.db.execute(text(REINDEX_LAWS_SQL))
             laws_updated = getattr(result, "rowcount", 0)
 
-            result2 = await self.db.execute(text("UPDATE articles SET search_vector = "
-                "to_tsvector('french', coalesce(content,''))"
-                " || to_tsvector('english', coalesce(content,''))"
-                " || to_tsvector('simple', coalesce(number,''))"))
+            result2 = await self.db.execute(text(REINDEX_ARTICLES_SQL))
             articles_updated = getattr(result2, "rowcount", 0)
 
             await self.db.commit()
