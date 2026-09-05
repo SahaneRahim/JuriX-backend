@@ -36,6 +36,7 @@ from app.services.gemini_service import (
     GeminiServiceError,
     get_gemini_service,
 )
+from app.services.postgres_search_service import escape_like
 from app.services.prompts import (
     CONTEXT_TEMPLATE,
     NO_RESULTS_MESSAGE,
@@ -43,10 +44,9 @@ from app.services.prompts import (
     format_conversation_history,
     get_system_prompt,
 )
-from app.services.postgres_search_service import escape_like
 from app.services.reranker import rerank_with_llm
-from app.services.text_features import STOPWORDS
 from app.services.search_service import SearchService
+from app.services.text_features import STOPWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -383,10 +383,10 @@ class RAGService:
         assert request is not None, "RAGRequest must not be None"
         assert isinstance(request.question, str) and len(request.question) > 0, "Question must be non-empty"
 
-        start_time = time.time()
-
         try:
-            # Retrieval (same as ask)
+            # `start_time` etait mesure ici et jamais lu : le chemin en flux ne
+            # rapporte pas de duree totale, contrairement a `ask`. Mesurer sans
+            # rendre compte ne sert personne.
             retrieval_start = time.time()
             search_results = await self._retrieve_chunks(
                 request.question,
@@ -547,7 +547,7 @@ class RAGService:
         assert isinstance(law_id, int) and law_id > 0, "law_id must be a positive integer"
         assert isinstance(question, str) and len(question) > 0, "question must be a non-empty string"
 
-        from app.models.law import Law, Article
+        from app.models.law import Article, Law
 
         try:
             query = select(Law).where(Law.id == law_id)
@@ -671,7 +671,7 @@ class RAGService:
         question_lower = question.lower()
         for pattern in other_doc_patterns:
             if re.search(pattern, question_lower) and pattern not in current_title.lower():
-                logger.info(f"📌 Another document mentioned, skipping priority")
+                logger.info("📌 Another document mentioned, skipping priority")
                 return True
         return False
 
@@ -901,8 +901,12 @@ class RAGService:
                                     if re.search(pattern, title, re.IGNORECASE):
                                         logger.info(f"📚 Document context from sources: {doc_name}")
                                         return doc_name
-                    except:
-                        pass
+                    except Exception as e:
+                        # `except: pass` nu attrapait KeyboardInterrupt et
+                        # SystemExit en plus des erreurs visees, et n'en
+                        # laissait aucune trace. L'echec reste tolere — c'est
+                        # une heuristique de confort — mais il se voit.
+                        logger.debug(f"Detection de document ignoree: {e}")
         
         return None
 

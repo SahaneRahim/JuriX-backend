@@ -9,7 +9,6 @@ Les tests marques integration touchent la base de test ; les autres sont de
 pures fonctions de texte.
 """
 
-from unittest.mock import MagicMock
 
 import numpy as np
 import pytest

@@ -21,11 +21,11 @@ import numpy as np
 import pytest
 
 from app.models.law import Article, Law
-from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
 from app.schemas.search import SearchFilters, SearchRequest
 from app.services.embedding_service import EmbeddingService
 from app.services.postgres_search_service import search_articles_pg, search_laws_pg
 from app.services.search_service import SearchService
+from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
 
 
 def _unit_vector(seed: int) -> list:

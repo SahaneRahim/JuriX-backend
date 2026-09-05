@@ -24,7 +24,6 @@ Create Date: 2026-09-05
 from typing import Sequence, Union
 
 from alembic import op
-
 from app.services.search_vectors import (
     ARTICLES_TRIGGER_FUNCTION,
     LAWS_TITLE_CASCADE_FUNCTION,

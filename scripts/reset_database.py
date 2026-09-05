@@ -3,9 +3,6 @@ Script SIMPLE et ROBUSTE pour vider la base de données.
 Utilise la méthode la plus directe avec gestion d'erreurs complète.
 """
 
-import psycopg2
-from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-
 # L'URL vient de Settings, pas d'une constante.
 #
 # Elle etait ecrite en dur ici, mot de passe compris, et pointait sur un port
@@ -15,9 +12,12 @@ from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import sys
 from pathlib import Path
 
+import psycopg2
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.core.config import settings  # noqa: E402
+from app.core.config import settings
 
 # psycopg2 ne comprend pas le prefixe +asyncpg de SQLAlchemy.
 DATABASE_URL = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
@@ -46,7 +46,7 @@ def reset_database_fixed():
         cursor.execute("SELECT COUNT(*) FROM articles")
         articles_before = cursor.fetchone()[0]
         
-        print(f"📊 État AVANT:")
+        print("📊 État AVANT:")
         print(f"   • Documents: {laws_before}")
         print(f"   • Articles: {articles_before}")
         print()
@@ -66,9 +66,9 @@ def reset_database_fixed():
             """)
             print("   ✅ Toutes les tables vidées")
             
-        except psycopg2.ProgrammingError as e:
+        except psycopg2.ProgrammingError:
             # Si certaines tables n'existent pas, essayer une par une
-            print(f"   ⚠️  Erreur TRUNCATE global, essai individuel...")
+            print("   ⚠️  Erreur TRUNCATE global, essai individuel...")
             
             tables = ['articles', 'chat_messages', 'conversations', 'laws']
             for table in tables:
@@ -87,7 +87,7 @@ def reset_database_fixed():
         cursor.execute("SELECT COUNT(*) FROM articles")
         articles_after = cursor.fetchone()[0]
         
-        print(f"📊 État APRÈS:")
+        print("📊 État APRÈS:")
         print(f"   • Documents: {laws_after}")
         print(f"   • Articles: {articles_after}")
         print()
@@ -131,7 +131,7 @@ def reset_database_fixed():
         print("✅ RÉINITIALISATION TERMINÉE!")
         print("=" * 70)
         print()
-        print(f"📊 Bilan:")
+        print("📊 Bilan:")
         print(f"   • Documents supprimés: {laws_before}")
         print(f"   • Articles supprimés: {articles_before}")
         print(f"   • Documents restants: {laws_after}")

@@ -5,9 +5,8 @@ Revises: 668e3740d3b5
 Create Date: 2026-01-27 13:10:00.000000
 
 """
+
 from alembic import op
-import sqlalchemy as sa
-from pgvector.sqlalchemy import Vector
 
 # revision identifiers, used by Alembic.
 revision = '7a8b9c0d1e2f'

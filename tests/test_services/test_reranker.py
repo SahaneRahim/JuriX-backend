@@ -7,7 +7,6 @@ reste une fonction pure : la fusion, elle, ecrase relevance_score en place, et
 c'est ce qui rendait impossible d'attribuer un ecart au re-ranking.
 """
 
-import pytest
 
 from app.schemas.search import ChunkResult
 from app.services.reranker import rerank_chunks, score_chunk

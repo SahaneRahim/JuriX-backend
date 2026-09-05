@@ -14,15 +14,19 @@ Version: 2.1.0
 """
 
 import logging
-from typing import Dict, List, Optional, Any
-from datetime import datetime, date, timedelta
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, func, and_, desc
+from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.conversation import (
-    Conversation, Message, PersonaStat, MessageFeedback, PersonaInteraction
+    Conversation,
+    Message,
+    MessageFeedback,
+    PersonaInteraction,
+    PersonaStat,
 )
 
 # Configure logger
@@ -843,7 +847,9 @@ class PersonaService:
         await self.validate_persona(persona)
 
         start_date = date.today() - timedelta(days=days)
-        end_date = date.today()
+        # Pas de borne haute : `end_date` etait calculee et jamais utilisee. La
+        # fenetre est « depuis N jours », ouverte vers le present — une borne
+        # haute a aujourd'hui exclurait les interactions de la journee en cours.
 
         # Get conversations
         start_datetime = datetime.combine(start_date, datetime.min.time())

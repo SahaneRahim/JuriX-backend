@@ -36,7 +36,6 @@ from app.services.postgres_search_service import (
 from app.services.search_service import SearchService
 from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
 
-
 # Loi 200-204 : le mot « nomination » est dans le TITRE.
 # Loi 210-211 : il n'est QUE dans le corps, et repete, ce qui suffisait a les
 # faire passer devant.

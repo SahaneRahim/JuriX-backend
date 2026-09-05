@@ -13,8 +13,6 @@ Usage:
     pytest backend/tests/test_services/test_ocr_service.py -v --cov=backend/app/services/ocr_service
 """
 
-import tempfile
-from pathlib import Path
 
 import pytest
 

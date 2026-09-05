@@ -34,8 +34,8 @@ from sqlalchemy import text
 
 sys.path.insert(0, ".")
 
-from app.core.database import SyncSessionLocal  # noqa: E402
-from app.services.text_features import content_words, jaccard  # noqa: E402
+from app.core.database import SyncSessionLocal
+from app.services.text_features import content_words, jaccard
 
 logger = logging.getLogger("generate_eval_set")
 

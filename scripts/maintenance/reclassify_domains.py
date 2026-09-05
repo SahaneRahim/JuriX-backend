@@ -30,10 +30,10 @@ from typing import List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from app.core.database import SyncSessionLocal  # noqa: E402
-from app.models.law import Law  # noqa: E402
-from app.services.category_resolver import load_domain_map  # noqa: E402
-from app.services.legal_domain_classifier import (  # noqa: E402
+from app.core.database import SyncSessionLocal
+from app.models.law import Law
+from app.services.category_resolver import load_domain_map
+from app.services.legal_domain_classifier import (
     CANONICAL_DOMAINS,
     get_legal_domain_classifier,
 )

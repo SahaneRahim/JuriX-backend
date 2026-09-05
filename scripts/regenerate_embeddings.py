@@ -29,8 +29,8 @@ from sqlalchemy import text
 
 sys.path.insert(0, ".")
 
-from app.core.database import SyncSessionLocal, sync_engine  # noqa: E402
-from app.services.embedding_service import (  # noqa: E402
+from app.core.database import SyncSessionLocal, sync_engine
+from app.services.embedding_service import (
     EmbeddingService,
     EmbeddingServiceError,
     QuotaExhaustedError,

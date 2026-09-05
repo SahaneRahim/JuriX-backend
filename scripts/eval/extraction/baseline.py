@@ -51,11 +51,11 @@ from typing import Any, Dict, List, Optional, Sequence
 
 sys.path.insert(0, ".")
 
-from sqlalchemy import text  # noqa: E402
+from sqlalchemy import text
 
-from app.core.database import SyncSessionLocal  # noqa: E402
-from app.utils.chunk_refiner import normalize_for_chunking  # noqa: E402
-from app.utils.text_chunker import _detect_article_pattern  # noqa: E402
+from app.core.database import SyncSessionLocal
+from app.utils.chunk_refiner import normalize_for_chunking
+from app.utils.text_chunker import _detect_article_pattern
 
 logger = logging.getLogger("eval.extraction.baseline")
 

@@ -34,24 +34,24 @@ from app.schemas.search import (
     SearchResponse,
     SearchResult,
 )
-from app.services.embedding_service import EmbeddingService, get_embedding_service
-from app.services.reranker import rerank_chunks
 from app.services.article_reference import parse_reference
-from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
+from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.postgres_search_service import (
-    get_from_pg_cache,
-    store_in_pg_cache,
+    _make_cache_key,
     apply_trigram_threshold,
     find_article_in_laws,
+    get_from_pg_cache,
     record_search_event,
+    remove_law_search_index,
     resolve_law_by_hint,
     search_articles_pg,
     search_laws_pg,
     search_titles_trgm_pg,
+    store_in_pg_cache,
     update_law_search_vector,
-    remove_law_search_index,
-    _make_cache_key,
 )
+from app.services.reranker import rerank_chunks
+from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
 
 logger = logging.getLogger(__name__)
 
@@ -500,8 +500,8 @@ class SearchService:
 
         Extrait dans une methode pour qu'un test puisse le compiler sans base.
         """
-        from sqlalchemy import cast, literal
         from pgvector.sqlalchemy import HALFVEC, Vector
+        from sqlalchemy import cast, literal
 
         dim = EmbeddingService.EMBEDDING_DIM
         candidates = self._ann_candidates(limit)

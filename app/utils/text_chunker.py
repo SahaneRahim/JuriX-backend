@@ -5,10 +5,10 @@ Extracts articles from Cameroonian legal documents following
 common patterns: Article X, Art. X, Section X, etc.
 """
 
-import re
-from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass
 import logging
+import re
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 

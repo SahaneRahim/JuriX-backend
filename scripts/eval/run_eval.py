@@ -40,12 +40,12 @@ from sqlalchemy import text
 
 sys.path.insert(0, ".")
 
-from app.core.database import AsyncSessionLocal, SyncSessionLocal  # noqa: E402
-from app.schemas.search import SearchRequest  # noqa: E402
-from app.services.embedding_service import EmbeddingService, get_embedding_service  # noqa: E402
-from app.services.reranker import rerank_chunks  # noqa: E402
-from app.services.search_service import SearchService  # noqa: E402
-from scripts.eval.metrics import summarise  # noqa: E402
+from app.core.database import AsyncSessionLocal, SyncSessionLocal
+from app.schemas.search import SearchRequest
+from app.services.embedding_service import EmbeddingService, get_embedding_service
+from app.services.reranker import rerank_chunks
+from app.services.search_service import SearchService
+from scripts.eval.metrics import summarise
 
 logger = logging.getLogger("run_eval")
 

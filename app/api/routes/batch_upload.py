@@ -7,21 +7,31 @@ Handles:
 - Status tracking (PENDING → PROCESSING → PUBLISHED/REFUSED)
 """
 
-from fastapi import APIRouter, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from typing import List
 import asyncio
-import uuid
 import logging
+import uuid
 from datetime import datetime, timezone
+from typing import List
 
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from jose import JWTError, jwt
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.auth import ALGORITHM, SECRET_KEY, get_current_admin_user
+from app.core.config import settings
 from app.core.database import AsyncSessionLocal, get_db
 from app.models.law import Law
-from app.tasks.process_law import process_law_async
-from app.core.config import settings
-from app.core.auth import get_current_admin_user
 from app.models.user import User
+from app.tasks.process_law import process_law_async
 
 logger = logging.getLogger(__name__)
 
@@ -50,14 +60,40 @@ class ConnectionManager:
         if session_id in self.active_connections:
             try:
                 await self.active_connections[session_id].send_json(data)
-            except:
+            except Exception as e:
+                # `except:` nu attrapait aussi KeyboardInterrupt et
+                # SystemExit : un Ctrl-C pendant un envoi etait avale et le
+                # serveur refusait de s'arreter. La deconnexion reste le bon
+                # traitement d'un envoi echoue, mais elle se journalise.
+                logger.debug(f"Envoi WebSocket impossible ({session_id}): {e}")
                 self.disconnect(session_id)
 
 manager = ConnectionManager()
 
 
+def _jeton_valide(token: str | None) -> bool:
+    """
+    Verifie un jeton d'acces sans toucher la base.
+
+    Volontairement limite a la signature et a l'expiration : ouvrir une session
+    de base a chaque connexion WebSocket ferait payer une requete a chaque
+    onglet ouvert, pour un canal qui ne fait que diffuser une progression. Les
+    ECRITURES, elles, restent protegees par get_current_admin_user sur la route
+    HTTP correspondante.
+    """
+    if not token:
+        return False
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return False
+    return bool(payload.get("sub"))
+
+
 @router.websocket("/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
+async def websocket_endpoint(
+    websocket: WebSocket, session_id: str, token: str | None = None
+):
     """
     WebSocket endpoint for real-time upload progress.
     
@@ -72,6 +108,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     }
     """
     assert session_id and isinstance(session_id, str), "session_id must be a non-empty string"
+
+    # Le jumeau HTTP de cette route (GET /batch-upload/status) rend 401 sans
+    # jeton ; ce WebSocket, lui, acceptait n'importe qui et diffusait la
+    # progression d'imports d'administration. Le navigateur ne peut pas poser
+    # d'en-tete Authorization sur un WebSocket : le jeton passe donc en
+    # parametre de requete, et est valide AVANT l'acceptation de la connexion.
+    if not _jeton_valide(token):
+        await websocket.close(code=4401, reason="Authentification requise")
+        return
+
     await manager.connect(session_id, websocket)
     MAX_KEEPALIVE_CYCLES = 3600  # ~1 hour at 1s keepalive cadence (NASA Rule 2: bounded loops)
     try:

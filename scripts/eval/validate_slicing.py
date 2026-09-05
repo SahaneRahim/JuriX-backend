@@ -23,7 +23,7 @@ import numpy as np
 
 sys.path.insert(0, ".")
 
-from app.services.embedding_service import EmbeddingService  # noqa: E402
+from app.services.embedding_service import EmbeddingService
 
 logger = logging.getLogger("validate_slicing")
 

@@ -62,8 +62,12 @@ class CategoryResponse(CategoryBase):
 class ArticleBase(BaseModel):
     """Base schema for Article with shared fields."""
 
+    # 64 et non 20 : la colonne a ete elargie (migration c8d9e0f1a2b3) pour
+    # accueillir les ordinaux ecrits en toutes lettres, du type
+    # « QUATRE-VINGT-DIX-SEPTIEME ». Le schema etait reste en arriere, et aurait
+    # rejete a la validation ce que la base accepte.
     number: str = Field(
-        ..., min_length=1, max_length=20, description="Article number (e.g., 'Art. 1', '42')"
+        ..., min_length=1, max_length=64, description="Article number (e.g., 'Art. 1', '42')"
     )
     title: Optional[str] = Field(None, max_length=200, description="Article title (optional)")
     content: str = Field(..., min_length=1, description="Article text content")
@@ -79,7 +83,7 @@ class ArticleCreate(ArticleBase):
 class ArticleUpdate(BaseModel):
     """Schema for updating an existing article."""
 
-    number: Optional[str] = Field(None, min_length=1, max_length=20)
+    number: Optional[str] = Field(None, min_length=1, max_length=64)
     title: Optional[str] = Field(None, max_length=200)
     content: Optional[str] = Field(None, min_length=1)
     order: Optional[int] = Field(None, ge=1)
@@ -311,14 +315,14 @@ class LawResponse(LawBase):
         from_attributes = True
 
 
-class LawDetailResponse(LawResponse):
-    """
-    Detailed law response including articles.
-
-    Used for GET /laws/{id}?include_articles=true
-    """
-
-    articles: List[ArticleResponse] = Field(default_factory=list)
+# Un premier LawDetailResponse vivait ici, exposant `List[ArticleResponse]`.
+# Il n'a jamais ete branche sur aucune route, et il etait doublement
+# inutilisable : ArticleResponse porte le CONTENU integral de chaque article —
+# soit, pour le Code Minier, 166 Ko servis deux fois, dans `law.content` puis
+# article par article — et son `number` etait plafonne a 20 caracteres alors
+# que la colonne en fait 64 depuis qu'elle accueille les ordinaux ecrits en
+# toutes lettres. Le schema reellement servi est plus bas, et ne porte que le
+# sommaire.
 
 
 # ============================================================================

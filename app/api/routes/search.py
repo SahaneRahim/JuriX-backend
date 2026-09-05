@@ -17,7 +17,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import get_current_admin_user
 from app.core.database import get_db
+from app.models.user import User
 from app.schemas.search import (
     ReindexResponse,
     SearchRequest,
@@ -25,8 +27,6 @@ from app.schemas.search import (
     SearchStats,
 )
 from app.services.search_service import SearchService, SearchServiceError
-from app.core.auth import get_current_admin_user
-from app.models.user import User
 
 logger = logging.getLogger(__name__)
 

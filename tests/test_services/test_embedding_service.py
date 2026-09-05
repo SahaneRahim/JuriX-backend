@@ -21,8 +21,7 @@ from typing import List
 import numpy as np
 import pytest
 
-from app.services.embedding_service import EmbeddingService, EmbeddingServiceError
-
+from app.services.embedding_service import EmbeddingService
 
 # ==================== DOUBLURE GEMINI ====================
 #

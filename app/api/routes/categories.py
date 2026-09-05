@@ -18,21 +18,22 @@ Version: 2.1.0
 """
 
 import logging
-from typing import List, Dict
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from typing import Dict, List
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
-from app.services.category_service import (
-    CategoryService,
-    CategoryNotFoundError,
-    DuplicateCategoryNameError,
-    CategoryInUseError,
-    CategoryServiceError
-)
-from app.schemas.law import CategoryCreate, CategoryUpdate, CategoryResponse, CategoryStats
 from app.core.auth import get_current_admin_user
+from app.core.database import get_db
 from app.models.user import User
+from app.schemas.law import CategoryCreate, CategoryResponse, CategoryStats, CategoryUpdate
+from app.services.category_service import (
+    CategoryInUseError,
+    CategoryNotFoundError,
+    CategoryService,
+    CategoryServiceError,
+    DuplicateCategoryNameError,
+)
 
 # Configure logger
 logger = logging.getLogger(__name__)

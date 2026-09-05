@@ -21,31 +21,32 @@ Version: 2.1.0
 """
 
 import logging
-from typing import List, Optional
 from datetime import date
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Path
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.services.persona_service import (
-    PersonaService,
-    InvalidPersonaError,
-    MessageNotFoundError,
-    FeedbackAlreadyExistsError
-)
 from app.schemas.persona import (
-    PersonaInfo,
-    PersonaStatsResponse,
+    EngagementMetricsResponse,
+    ErrorResponse,
+    FeedbackStats,
+    HealthCheckResponse,
     MessageFeedbackCreate,
     MessageFeedbackResponse,
-    FeedbackStats,
-    EngagementMetricsResponse,
-    PopularQuestionsResponse,
     PersonaComparisonResponse,
+    PersonaInfo,
+    PersonaStatsResponse,
+    PopularQuestionsResponse,
     TrendsResponse,
     UsageBreakdownResponse,
-    HealthCheckResponse,
-    ErrorResponse
+)
+from app.services.persona_service import (
+    FeedbackAlreadyExistsError,
+    InvalidPersonaError,
+    MessageNotFoundError,
+    PersonaService,
 )
 
 # Configure logger
@@ -222,7 +223,7 @@ async def get_feedback_stats(
 
         service = PersonaService(db)
         stats = await service.get_feedback_stats(persona, start, end)
-        logger.info(f"📊 Feedback stats retrieved")
+        logger.info("📊 Feedback stats retrieved")
         return stats
     except InvalidPersonaError as e:
         raise HTTPException(
@@ -332,7 +333,7 @@ async def get_all_persona_stats(
 
         service = PersonaService(db)
         all_stats = await service.get_all_persona_stats(start, end)
-        logger.info(f"📊 Retrieved stats for all personas")
+        logger.info("📊 Retrieved stats for all personas")
         return all_stats
     except ValueError as e:
         raise HTTPException(
@@ -378,7 +379,7 @@ async def get_usage_breakdown(
             "percentages": breakdown
         }
 
-        logger.info(f"📊 Usage breakdown retrieved")
+        logger.info("📊 Usage breakdown retrieved")
         return response
     except Exception as e:
         logger.error(f"❌ Error getting usage breakdown: {e}")

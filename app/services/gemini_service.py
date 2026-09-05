@@ -250,7 +250,6 @@ FORBIDDEN:
             # demand. » revient par salves de quelques secondes. Sans cette
             # boucle, une salve remonte en 500 a l'utilisateur alors qu'un
             # second essai deux secondes plus tard aboutit.
-            last_error: Optional[Exception] = None
             for attempt in range(1, OVERLOAD_MAX_ATTEMPTS + 1):
                 try:
                     response = await asyncio.to_thread(
@@ -267,7 +266,6 @@ FORBIDDEN:
                     # appels sur un quota deja epuise.
                     if not _is_overloaded(err) or attempt == OVERLOAD_MAX_ATTEMPTS:
                         raise
-                    last_error = err
                     delai = OVERLOAD_BASE_DELAY_S * (2 ** (attempt - 1))
                     logger.warning(
                         f"⚠️ Gemini sature (essai {attempt}/{OVERLOAD_MAX_ATTEMPTS}), "

@@ -4,9 +4,9 @@ Pydantic schemas for PersonaService API.
 Request/response models for persona management and analytics endpoints.
 """
 
-from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Optional
 
+from pydantic import BaseModel, Field
 
 # ============================================================================
 # REQUEST SCHEMAS

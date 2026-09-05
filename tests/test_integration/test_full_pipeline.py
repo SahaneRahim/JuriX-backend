@@ -18,21 +18,20 @@ Date: 2026-01-10
 """
 
 import os
+import time
+from datetime import date
 
 import pytest
-from datetime import date
-import time
 
+from app.models.law import Article, Law
+from app.schemas.rag import RAGRequest
+from app.schemas.search import SearchRequest
+from app.services.embedding_service import EmbeddingService
 from app.services.language_detector import LanguageDetector
 from app.services.legal_domain_classifier import CANONICAL_DOMAINS, LegalDomainClassifier
-from app.services.embedding_service import EmbeddingService
-from app.services.search_service import SearchService
 from app.services.rag_service import RAGService
+from app.services.search_service import SearchService
 from app.utils.text_chunker import extract_articles
-from app.models.law import Article, Law
-from app.schemas.search import SearchRequest
-from app.schemas.rag import RAGRequest
-
 
 # Ces deux tests appellent l'API Gemini pour de vrai (embeddings puis RAG) :
 # ils consomment du quota et dependent du reseau. Ils ne s'executent donc que
@@ -241,11 +240,20 @@ async def test_pipeline_performance(sample_legal_document, async_db_session):
     print(f"✅ Language Detection: {timings['language_detection']:.0f}ms (target: <1000ms)")
 
     # Classification
-    classifier = DocumentClassifier()
+    #
+    # Appelait DocumentClassifier, supprime depuis. Le test est marque
+    # @pytest.mark.skip, donc le NameError n'a jamais eclate : un test qui ne
+    # tourne pas ne dit rien, meme quand il est faux.
+    classifier = LegalDomainClassifier()
     start = time.time()
-    class_result = classifier.classify(sample_legal_document)
+    class_result = classifier.classify(
+        "Loi portant Code du Travail", sample_legal_document
+    )
     timings["classification"] = (time.time() - start) * 1000
-    assert timings["classification"] < 2000  # <2s
+    assert class_result.domain in CANONICAL_DOMAINS
+    # Le classement est une fonction pure sur des expressions regulieres : il
+    # doit couter des millisecondes, pas des secondes.
+    assert timings["classification"] < 200
     print(f"✅ Classification: {timings['classification']:.0f}ms (target: <2000ms)")
 
     # Search (if available)

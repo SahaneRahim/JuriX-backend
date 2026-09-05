@@ -14,14 +14,13 @@ Author: JuriX Team
 """
 
 import json
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.schemas.rag import RAGResponse, Citation
-
+from app.schemas.rag import Citation, RAGResponse
 
 # ==================== FIXTURES ====================
 

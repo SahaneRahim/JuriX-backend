@@ -14,7 +14,8 @@ Usage:
 """
 
 import pytest
-from app.services.language_detector import LanguageDetector, LanguageDetectionError
+
+from app.services.language_detector import LanguageDetector
 
 
 @pytest.fixture(scope="module")

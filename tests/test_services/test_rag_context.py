@@ -212,7 +212,6 @@ class TestEventLoop:
         SYNCHRONE : sans deport, la boucle d'evenements etait gelee pendant
         tout l'aller-retour avec le modele, a chaque question.
         """
-        import asyncio
         import threading
 
         from app.services.gemini_service import GeminiService

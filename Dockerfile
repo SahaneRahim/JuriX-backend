@@ -61,11 +61,13 @@ RUN useradd -m -u 1000 -s /bin/bash jurix && \
 USER jurix
 
 # Runtime env vars
+# ML_MODELS_PATH et LOG_LEVEL ont ete retirees : aucun code ne les lisait.
+# language_detector.py resout lui-meme le chemin du modele, et la journalisation
+# est configuree dans app/main.py. Des variables d'environnement que personne ne
+# lit donnent l'illusion d'un reglage.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
-    ML_MODELS_PATH=/app/models \
-    LOG_LEVEL=INFO \
     TESSERACT_PATH=/usr/bin/tesseract
 
 # Les migrations sont appliquees au demarrage : le schema du produit vit dans

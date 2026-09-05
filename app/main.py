@@ -2,14 +2,29 @@
 
 import asyncio
 import logging
-from contextlib import suppress
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.routes import (
+    admin,
+    analytics,
+    articles,
+    auth,
+    batch_upload,
+    categories,
+    classifier,
+    language,
+    laws,
+    ocr,
+    personas,
+    rag,
+    search,
+    upload,
+)
 from app.core.config import settings
 from app.core.database import close_db
-from app.api.routes import auth, language, classifier, articles, search, rag, categories, personas, upload, ocr, laws, analytics, admin, batch_upload
 
 logger = logging.getLogger(__name__)
 

@@ -6,9 +6,7 @@ Create Date: 2026-01-12 07:03:08.986151
 
 """
 
-import pgvector.sqlalchemy
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
 from alembic import op
 

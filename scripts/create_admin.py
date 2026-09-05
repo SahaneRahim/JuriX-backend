@@ -29,8 +29,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from dotenv import load_dotenv  # noqa: E402
-from sqlalchemy import select  # noqa: E402
+from dotenv import load_dotenv
+from sqlalchemy import select
 
 load_dotenv()
 

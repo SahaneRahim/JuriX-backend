@@ -36,10 +36,10 @@ from typing import List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from app.core.database import SyncSessionLocal  # noqa: E402
-from app.models.law import Article, Law  # noqa: E402
-from app.utils.chunk_refiner import normalize_for_chunking  # noqa: E402
-from app.utils.text_chunker import extract_articles  # noqa: E402
+from app.core.database import SyncSessionLocal
+from app.models.law import Article, Law
+from app.utils.chunk_refiner import normalize_for_chunking
+from app.utils.text_chunker import extract_articles
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("rechunk")

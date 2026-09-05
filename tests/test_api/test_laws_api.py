@@ -12,12 +12,11 @@ Usage:
     pytest backend/tests/test_api/test_laws_api.py -v
 """
 
+from datetime import date
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.main import app
-from datetime import date
 
 from app.models.law import Law
 

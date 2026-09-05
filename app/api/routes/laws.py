@@ -26,18 +26,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.auth import get_current_admin_user
-from app.models.user import User
-from app.core.database import get_db, AsyncSessionLocal
+from app.core.database import AsyncSessionLocal, get_db
 from app.models.law import Law
+from app.models.user import User
 from app.schemas.law import (
-    LawDetailResponse,
     LawCreate,
+    LawDetailResponse,
     LawResponse,
     LawUpdate,
 )
-from app.utils.file_utils import resolve_upload_path
 from app.services.search_service import invalidate_search_cache
 from app.tasks.process_law import delete_from_search_index
+from app.utils.file_utils import resolve_upload_path
 
 
 class LawIngestRequest(BaseModel):
@@ -426,6 +426,7 @@ async def get_law_pdf_page_image(
         JPEG image of the specified page
     """
     from io import BytesIO
+
     from fastapi.responses import Response
     
     query = select(Law).where(Law.id == law_id)

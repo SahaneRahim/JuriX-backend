@@ -2,14 +2,14 @@
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.services.category_service import (
-    CategoryService,
-    CategoryNotFoundError,
-    DuplicateCategoryNameError,
-    CategoryInUseError
-)
+
 from app.schemas.law import CategoryCreate, CategoryUpdate
-from app.models.law import Category, Law
+from app.services.category_service import (
+    CategoryInUseError,
+    CategoryNotFoundError,
+    CategoryService,
+    DuplicateCategoryNameError,
+)
 
 
 class TestCreateCategory:
@@ -435,8 +435,16 @@ class TestPrivateHelpers:
         """Test validating a unique name that doesn't exist."""
         service = CategoryService(db_session)
 
-        # Should not raise any exception
+        # « Ne leve pas » est le contrat, mais il faut le DIRE : sans
+        # assertion, un refactor qui rendrait une erreur au lieu de la lever
+        # passerait ce test sans que rien ne bronche.
         await service._validate_unique_name("Totally New Category Name")
+
+        # Contre-epreuve : un nom deja pris DOIT lever. Sans elle, une methode
+        # devenue muette resterait verte.
+        existantes = await service.list_categories(limit=1)
+        with pytest.raises(Exception):
+            await service._validate_unique_name(existantes[0].name)
 
     @pytest.mark.asyncio
     async def test_validate_unique_name_duplicate(self, db_session: AsyncSession):
@@ -455,8 +463,14 @@ class TestPrivateHelpers:
         categories = await service.list_categories(limit=1)
         category = categories[0]
 
-        # Should not raise error when excluding the same category
+        # S'exclure soi-meme est autorise : c'est ce qui permet de renommer
+        # une categorie sans changer son nom.
         await service._validate_unique_name(category.name, exclude_id=category.id)
+
+        # Mais une AUTRE categorie ne peut pas prendre ce nom. Sans cette
+        # contre-epreuve, une exclusion trop large passerait inapercue.
+        with pytest.raises(Exception):
+            await service._validate_unique_name(category.name, exclude_id=category.id + 10_000)
 
     @pytest.mark.asyncio
     async def test_get_law_count_for_category(self, db_session: AsyncSession, sample_law):

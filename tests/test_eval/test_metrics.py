@@ -16,7 +16,6 @@ from scripts.eval.metrics import (
     summarise,
 )
 
-
 # 4 questions, classements connus :
 #   q1 : attendu 1, rang 2
 #   q2 : attendu 7, rang 3

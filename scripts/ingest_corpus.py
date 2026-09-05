@@ -33,10 +33,10 @@ from typing import Any, Dict, List, Optional, Sequence
 
 sys.path.insert(0, ".")
 
-from app.core.database import SyncSessionLocal  # noqa: E402
-from app.models.law import Law  # noqa: E402
-from app.services.file_upload_service import get_upload_service  # noqa: E402
-from app.tasks.process_law import process_law_sync  # noqa: E402
+from app.core.database import SyncSessionLocal
+from app.models.law import Law
+from app.services.file_upload_service import get_upload_service
+from app.tasks.process_law import process_law_sync
 
 logger = logging.getLogger("ingest_corpus")
 

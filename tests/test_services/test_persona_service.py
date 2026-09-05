@@ -1,19 +1,23 @@
 """Tests for PersonaService."""
 
+from datetime import date, timedelta
+
 import pytest
-from datetime import date, datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.conversation import (
+    Conversation,
+    Message,
+    MessageFeedback,
+    PersonaInteraction,
+    PersonaStat,
+)
 from app.services.persona_service import (
-    PersonaService,
+    FeedbackAlreadyExistsError,
     InvalidPersonaError,
     MessageNotFoundError,
-    FeedbackAlreadyExistsError
+    PersonaService,
 )
-from app.models.conversation import (
-    Conversation, Message, PersonaStat, MessageFeedback, PersonaInteraction
-)
-
 
 # ============================================================================
 # TEST PERSONA OPERATIONS
@@ -478,9 +482,17 @@ class TestAggregation:
 
         target_date = date.today() - timedelta(days=1)
 
-        # Should not raise error
+        # « Ne leve pas » ne suffit pas : sans assertion, une methode devenue
+        # muette — ou qui ecrirait des lignes fantomes — passerait ce test.
         await service.aggregate_daily_stats(target_date)
         await db_session.commit()
+
+        from sqlalchemy import text as sql_text
+
+        lignes = (await db_session.execute(sql_text(
+            "SELECT count(*) FROM persona_stats WHERE date = :d"), {"d": target_date}
+        )).scalar_one()
+        assert lignes == 0, "aucune conversation ce jour-la : aucune ligne ne doit etre creee"
 
     @pytest.mark.asyncio
     async def test_update_interaction_metrics(self, db_session: AsyncSession):

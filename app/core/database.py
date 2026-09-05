@@ -14,15 +14,14 @@ Author: JuriX Team
 """
 
 import logging
-
-from fastapi import HTTPException
 from typing import AsyncGenerator
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
-    create_async_engine,
     async_sessionmaker,
+    create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 

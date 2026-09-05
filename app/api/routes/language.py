@@ -11,14 +11,14 @@ Usage:
         -d '{"text": "Article 1. La présente loi..."}'
 """
 
-from typing import Dict
 import logging
+from typing import Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, validator
 
 from app.core.dependencies import get_language_detector
-from app.services.language_detector import LanguageDetector, LanguageDetectionError
+from app.services.language_detector import LanguageDetectionError, LanguageDetector
 
 logger = logging.getLogger(__name__)
 

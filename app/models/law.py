@@ -15,26 +15,25 @@ Author: JuriX Team
 """
 
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
-    text,
     Boolean,
     Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
     Integer,
     String,
     Text,
-    Float,
-    Date,
-    DateTime,
-    ForeignKey,
-    Index,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-from pgvector.sqlalchemy import Vector
 
 from app.core.database import Base
-
 
 # NOTE: un adaptateur get_array_type() existait ici pour choisir ARRAY sous
 # PostgreSQL et JSON ailleurs. Il n'a jamais ete appele — la colonne etait

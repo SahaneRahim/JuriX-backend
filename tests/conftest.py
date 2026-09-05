@@ -99,6 +99,7 @@ _DB_FIXTURES = {
     "test_user",
     "test_admin_user",
     "test_superadmin_user",
+    "superadmin_client",
     "auth_headers",
     "admin_headers",
     "as_admin",
@@ -216,8 +217,9 @@ def _migrated_schema():
     aucune boucle asyncio n'est impliquée et le schéma peut être construit une
     fois pour toute la session sans lier quoi que ce soit à une boucle donnée.
     """
-    from alembic import command
     from alembic.config import Config
+
+    from alembic import command
 
     previous = os.environ.get("DATABASE_URL")
     os.environ["DATABASE_URL"] = TEST_DATABASE_URL
@@ -405,8 +407,9 @@ def migrated_categories(sync_db_session):
         ))
     sync_db_session.commit()
 
-    from alembic import command
     from alembic.config import Config
+
+    from alembic import command
 
     previous = os.environ.get("DATABASE_URL")
     os.environ["DATABASE_URL"] = TEST_DATABASE_URL
@@ -565,4 +568,28 @@ def as_admin(test_admin_user):
 @pytest_asyncio.fixture
 async def admin_client(client: AsyncClient, as_admin) -> AsyncClient:
     """Client HTTP authentifié comme administrateur."""
+    return client
+
+
+@pytest.fixture
+def as_superadmin(test_superadmin_user):
+    """
+    Se fait passer pour un superadministrateur.
+
+    Nécessaire parce que certaines opérations — la suppression d'un compte, par
+    exemple — exigent ce rôle et non simplement `admin`. Sans ce niveau, on ne
+    peut pas tester la différence entre les deux.
+    """
+    from app.core.auth import get_current_user
+
+    app.dependency_overrides[get_current_user] = lambda: test_superadmin_user
+    try:
+        yield test_superadmin_user
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest_asyncio.fixture
+async def superadmin_client(client: AsyncClient, as_superadmin) -> AsyncClient:
+    """Client HTTP authentifié comme superadministrateur."""
     return client

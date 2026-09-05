@@ -7,15 +7,14 @@ Author: JuriX Team
 Date: 2026-01-12
 """
 
+import base64
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-import base64
-import hashlib
-
-import bcrypt
 from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

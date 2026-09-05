@@ -27,11 +27,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import DataError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
 from app.core.database import AsyncSessionLocal, SyncSessionLocal
 from app.models.law import Article, Law
+from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
 from app.utils.chunk_refiner import DocumentContext, normalize_for_chunking, refine
-from app.utils.text_chunker import extract_articles, ArticleExtractionError
+from app.utils.text_chunker import ArticleExtractionError, extract_articles
 
 logger = logging.getLogger(__name__)
 

@@ -4,13 +4,13 @@ Article extraction API endpoint (utility).
 For testing/debugging article extraction on arbitrary text.
 """
 
+import time
+from typing import Any, Dict, List
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any
-import time
 
-from app.utils.text_chunker import extract_articles, ArticleExtractionError
-
+from app.utils.text_chunker import ArticleExtractionError, extract_articles
 
 router = APIRouter(tags=["articles"])
 

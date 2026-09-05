@@ -12,10 +12,10 @@ Summary:
 - Create query_cache table (replaces Redis search cache)
 - Create embedding_cache table (replaces Redis embedding cache)
 """
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = 'a1b2c3d4e5f6'

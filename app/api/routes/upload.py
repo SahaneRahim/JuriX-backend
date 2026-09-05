@@ -15,12 +15,12 @@ import logging
 from pathlib import Path
 from typing import Dict
 
-from fastapi import Depends, APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
-from app.schemas.file_upload import FileUploadResult, UploadServiceHealth
-from app.services.file_upload_service import FileUploadError, FileUploadService
 from app.core.auth import get_current_admin_user
 from app.models.user import User
+from app.schemas.file_upload import FileUploadResult, UploadServiceHealth
+from app.services.file_upload_service import FileUploadError, FileUploadService
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,11 @@ def get_upload_service() -> FileUploadService:
 )
 async def upload_file(
     file: UploadFile = File(..., description="File to upload (PDF or DOCX, max 50 MB)"),
+    # N'IMPORTE QUI pouvait ecrire sur le disque du serveur : la route
+    # n'exigeait aucune authentification, alors que la seule interface qui
+    # l'appelle est le televersement d'administration, et qu'elle envoyait deja
+    # un jeton. 50 Mo par appel, sans limite de frequence.
+    _: User = Depends(get_current_admin_user),
 ) -> FileUploadResult:
     """
     Upload a file with validation and scanning.

@@ -14,6 +14,8 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.core.auth import get_current_admin_user
+from app.models.user import User
 from app.schemas.ocr import (
     OCRRequest,
     OCRResult,
@@ -21,10 +23,8 @@ from app.schemas.ocr import (
     PDFTypeDetectionRequest,
     PDFTypeDetectionResult,
 )
-from app.core.auth import get_current_admin_user
-from app.models.user import User
-from app.utils.file_utils import resolve_upload_path
 from app.services.ocr_service import OCRError, OCRService
+from app.utils.file_utils import resolve_upload_path
 
 logger = logging.getLogger(__name__)
 

@@ -12,15 +12,15 @@ Version: 2.1.0
 """
 
 import logging
-from typing import Dict, List, Optional, Any
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, func, and_
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.law import Category, Law
-from app.schemas.law import CategoryCreate, CategoryUpdate, CategoryResponse, CategoryStats
+from app.schemas.law import CategoryCreate, CategoryResponse, CategoryStats, CategoryUpdate
 
 # Configure logger
 logger = logging.getLogger(__name__)

@@ -32,9 +32,12 @@ d'attente sont assurés par PostgreSQL et par le serveur applicatif.
 Le plus simple pour la base :
 
 ```bash
-docker run -d --name jurix-pg -p 5432:5432 \
-  -e POSTGRES_USER=jurix -e POSTGRES_PASSWORD=jurix -e POSTGRES_DB=jurix_db \
+docker run -d --name jurix-pg -p 5433:5432 \
+  -e POSTGRES_USER=jurix -e POSTGRES_PASSWORD=jurix -e POSTGRES_DB=jurix_dev \
   pgvector/pgvector:pg16
+
+# La base de TEST vit sur le meme serveur, sous un autre nom :
+docker exec jurix-pg psql -U jurix -d jurix_dev -c "CREATE DATABASE jurix_test"
 ```
 
 ## Installation
@@ -201,9 +204,9 @@ triggers, extensions) n'existent que dans les migrations, jamais dans
 `Base.metadata`.
 
 ```bash
-docker run -d --name jurix-pg-test -p 5433:5432 \
-  -e POSTGRES_USER=jurix -e POSTGRES_PASSWORD=jurix -e POSTGRES_DB=jurix_test \
-  pgvector/pgvector:pg16
+<!-- La base de test partage le serveur de developpement : un seul conteneur,
+     deux bases. Deux conteneurs sur deux ports etaient annonces ici, et la
+     realite n'en a jamais compte qu'un. -->
 
 export TEST_DATABASE_URL=postgresql+asyncpg://jurix:jurix@localhost:5433/jurix_test
 pytest                                   # tout

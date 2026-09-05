@@ -31,8 +31,8 @@ Create Date: 2026-09-04
 
 """
 import sqlalchemy as sa
-from alembic import op
 
+from alembic import op
 
 revision = "b7c8d9e0f1a2"
 down_revision = "a6b7c8d9e0f1"

@@ -364,7 +364,9 @@ async def health_check(rag_service: RAGService = Depends(get_rag_service)) -> di
         # Simple test query
         from app.schemas.search import SearchRequest
 
-        test_response = await rag_service.search_service.search(
+        # C'est l'ABSENCE d'exception qui fait la sonde : la reponse n'a pas a
+        # etre liee a un nom.
+        await rag_service.search_service.search(
             SearchRequest(query="test", mode="text", limit=1)
         )
         health_status["search_service"] = "healthy"

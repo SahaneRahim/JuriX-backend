@@ -13,15 +13,14 @@ Total: 15 tests
 Author: JuriX Team
 """
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.models.conversation import Conversation, Message
-from app.schemas.rag import RAGRequest, RAGResponse, Citation
-from app.schemas.search import ChunkResult, SearchResult
+from app.models.conversation import Conversation
+from app.schemas.rag import Citation, RAGRequest, RAGResponse
+from app.schemas.search import ChunkResult
 from app.services.rag_service import RAGService, RAGServiceError
-
 
 # ==================== FIXTURES ====================
 

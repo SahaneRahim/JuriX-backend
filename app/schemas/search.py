@@ -15,10 +15,9 @@ Date: 2026-01-10
 """
 
 from datetime import date
-from typing import Literal, Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
-
 
 # ============================================================================
 # Filter Schemas

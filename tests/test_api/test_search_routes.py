@@ -15,18 +15,13 @@ Version: 1.0.0
 
 import json
 from datetime import date, datetime
-from typing import AsyncGenerator
-from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 from fastapi import status
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.core.database import Base
 from app.main import app
-from app.models.law import Article, Category, Law
+from app.models.law import Article, Law
 
 # NOTE: les fixtures db_engine / db_session locales (SQLite en memoire) ont ete
 # retirees. Elles masquaient celles de conftest.py et testaient un moteur qui ne

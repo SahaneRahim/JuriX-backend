@@ -6,11 +6,8 @@ edge cases, and validation scenarios.
 """
 
 import pytest
-from app.utils.text_chunker import (
-    extract_articles,
-    ArticleExtractionError,
-    ExtractedArticle
-)
+
+from app.utils.text_chunker import extract_articles
 
 
 class TestBasicExtraction:

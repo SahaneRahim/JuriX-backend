@@ -10,9 +10,8 @@ planificateur sait y rattacher.
 
 import numpy as np
 import pytest
-from sqlalchemy import literal, select, text
+from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
-from pgvector.sqlalchemy import Vector
 
 from app.models.law import Article
 from app.services.embedding_service import EmbeddingService

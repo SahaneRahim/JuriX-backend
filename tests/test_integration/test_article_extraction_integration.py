@@ -6,6 +6,7 @@ as intended in the process_law task.
 """
 
 import pytest
+
 from app.utils.text_chunker import extract_articles
 
 

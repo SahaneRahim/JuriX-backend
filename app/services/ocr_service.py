@@ -17,7 +17,8 @@ Usage:
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -359,7 +360,7 @@ class OCRService:
                         if page_text.strip():
                             text_blocks.append(page_text)
                     except FuturesTimeoutError:
-                        logger.warning(f"  ⚠️  Timeout OCR page")
+                        logger.warning("  ⚠️  Timeout OCR page")
                     except Exception as e:
                         logger.warning(f"  ⚠️  Erreur OCR page: {e}")
 

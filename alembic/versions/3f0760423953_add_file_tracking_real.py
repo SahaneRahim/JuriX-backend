@@ -5,9 +5,9 @@ Revises: 006
 Create Date: 2026-01-15 04:34:38.060616
 
 """
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 # revision identifiers, used by Alembic.
 """add_file_tracking_real
@@ -17,9 +17,6 @@ Revises: 006
 Create Date: 2026-01-15 04:34:38.060616
 
 """
-from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = '3f0760423953'

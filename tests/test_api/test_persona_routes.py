@@ -1,14 +1,12 @@
 """Integration tests for persona API routes."""
 
+from datetime import date, timedelta
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import date, timedelta
 
-from app.models.conversation import (
-    Conversation, Message, PersonaStat, MessageFeedback
-)
-
+from app.models.conversation import Conversation, Message, MessageFeedback
 
 # ============================================================================
 # TEST PERSONA INFORMATION ENDPOINTS

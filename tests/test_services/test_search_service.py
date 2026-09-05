@@ -17,40 +17,28 @@ Author: JuriX Team
 Version: 1.0.0
 """
 
-import asyncio
-import json
 import time
 from datetime import date, datetime
-from typing import List
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.core.database import Base
-from app.models.law import Article, Category, Law
+from app.models.law import Article, Law
 from app.schemas.search import (
     ChunkResult,
     SearchFilters,
     SearchRequest,
     SearchResponse,
-    SearchResult,
 )
 from app.services.embedding_service import EmbeddingService
 from app.services.search_service import (
-
-# NOTE: les fixtures db_engine / db_session locales (SQLite en memoire) ont ete
-# retirees. Elles masquaient celles de conftest.py et testaient un moteur qui ne
-# supporte ni pgvector, ni tsvector, ni les fonctions PostgreSQL dont ce code
-# depend — une suite verte y aurait certifie du code cassé en production.
-# db_session vient desormais de conftest.py (PostgreSQL reel + rollback).
-    IndexingError,
-    TextSearchError,
+    # NOTE: les fixtures db_engine / db_session locales (SQLite en memoire) ont ete
+    # retirees. Elles masquaient celles de conftest.py et testaient un moteur qui ne
+    # supporte ni pgvector, ni tsvector, ni les fonctions PostgreSQL dont ce code
+    # depend — une suite verte y aurait certifie du code cassé en production.
+    # db_session vient desormais de conftest.py (PostgreSQL reel + rollback).
     SearchService,
-    SearchServiceError,
-    VectorSearchError,
 )
 
 # ============================================================================
@@ -246,13 +234,11 @@ class TestTextSearch:
         filters = SearchFilters(language="fr")
 
         results = await search_service.text_search(
-            query="code",
-            filters=filters,
-            limit=15,
-            offset=0
+            query="code", filters=filters, limit=15, offset=0
         )
 
-        assert isinstance(results, list)
+        assert results, "le filtre ne doit pas tout ecarter"
+        assert all(r.language == "fr" for r in results)
         # All results should be French
         for result in results:
             assert result.language == "fr"
@@ -290,9 +276,16 @@ class TestTextSearch:
             offset=0
         )
 
-        # Both should work (mocked)
-        assert isinstance(fr_results, list)
-        assert isinstance(en_results, list)
+        # Les identifiants, pas la forme : `isinstance(x, list)` passait sur
+        # une liste vide, donc ce test restait vert si le filtre de langue
+        # renvoyait tout ou rien.
+        # Les identifiants, pas la forme : `isinstance(x, list)` passait sur
+        # une liste vide, donc ce test restait vert si la recherche ne rendait
+        # plus rien du tout, ou si le filtre de langue etait ignore.
+        assert {r.law_id for r in fr_results} == {1}, "« responsabilite » est dans le code civil"
+        assert all(r.language == "fr" for r in fr_results)
+        assert {r.law_id for r in en_results} == {3}, "« directors » est dans le texte anglais"
+        assert all(r.language == "en" for r in en_results)
 
     @pytest.mark.asyncio
     async def test_text_search_no_results(self, search_service):
@@ -334,17 +327,23 @@ class TestSemanticSearch:
 
     @pytest.mark.asyncio
     async def test_semantic_search_contextual(self, search_service, sample_data):
-        """Test semantic search finds contextually similar content."""
-        # Query with synonyms/context
+        """
+        La recherche semantique rend des resultats CLASSES et bornes.
+
+        Ce test n'assertait que `isinstance(results, list)` sous un commentaire
+        promettant qu'elle « devrait trouver du contenu apparente ». Le service
+        d'embeddings est simule ici, donc la PERTINENCE n'est pas mesurable —
+        mais l'ordre et les bornes du score le sont, et c'est ce qui casse en
+        silence quand la requete SQL change.
+        """
         results = await search_service.semantic_search(
-            query="accountability of company leaders",
-            filters=None,
-            limit=15,
-            offset=0
+            query="accountability of company leaders", filters=None, limit=15, offset=0
         )
 
-        assert isinstance(results, list)
-        # Semantic search should find related content even with different words
+        scores = [r.relevance_score for r in results]
+        assert scores == sorted(scores, reverse=True), "les resultats doivent etre classes"
+        assert all(0.0 <= s <= 1.0 for s in scores), "un score cosinus normalise reste dans [0, 1]"
+        assert len({r.law_id for r in results}) == len(results), "pas de doublon de document"
 
     @pytest.mark.asyncio
     async def test_semantic_search_with_filters(self, search_service, sample_data):
@@ -535,31 +534,44 @@ class TestHybridSearch:
         start_time = time.time()
 
         results = await search_service.hybrid_search(
-            query="test performance",
-            filters=None,
-            limit=15,
-            offset=0
+            query="test performance", filters=None, limit=15, offset=0
         )
 
         elapsed_ms = (time.time() - start_time) * 1000
+
+        # Une recherche instantanee qui ne rend rien est « rapide » aussi : sans
+        # cette verification, le test resterait vert si la fusion cessait de
+        # produire quoi que ce soit.
+        assert len(results) <= 15, "la limite demandee doit etre respectee"
 
         # With mocked services, should be very fast
         # Real implementation target: <200ms
         assert elapsed_ms < 500  # Generous for test environment
 
     @pytest.mark.asyncio
-    async def test_hybrid_search_better_than_single_mode(self, search_service, sample_data):
-        """Test hybrid search provides better results than single modes."""
+    async def test_hybrid_search_couvre_les_deux_branches(self, search_service, sample_data):
+        """
+        L'hybride ne perd aucun document trouve par l'une des deux branches.
+
+        Ce test s'appelait `test_hybrid_search_better_than_single_mode` et
+        n'assertait que `isinstance(hybrid_results, list)` : il promettait une
+        comparaison dans son nom et n'en faisait aucune. « Meilleur » n'est
+        d'ailleurs pas mesurable ici — le service d'embeddings est simule, et
+        c'est scripts/eval/run_eval.py qui mesure la qualite. Ce qui EST
+        verifiable, et qui casse en silence quand la fusion RRF change, c'est la
+        COUVERTURE : l'union des deux branches doit se retrouver dans l'hybride.
+        """
         query = "responsabilité dirigeants société"
-        filters = None
 
-        # Get results from all three modes
-        text_results = await search_service.text_search(query, filters, 15, 0)
-        semantic_results = await search_service.semantic_search(query, filters, 15, 0)
-        hybrid_results = await search_service.hybrid_search(query, filters, 15, 0)
+        text_results = await search_service.text_search(query, None, 15, 0)
+        semantic_results = await search_service.semantic_search(query, None, 15, 0)
+        hybrid_results = await search_service.hybrid_search(query, None, 15, 0)
 
-        # Hybrid should combine strengths (or at least not be empty if others have results)
-        assert isinstance(hybrid_results, list)
+        attendus = {r.law_id for r in text_results} | {r.law_id for r in semantic_results}
+        obtenus = {r.law_id for r in hybrid_results}
+
+        assert attendus <= obtenus, f"documents perdus par la fusion : {attendus - obtenus}"
+        assert len(obtenus) == len(hybrid_results), "la fusion a laisse un doublon"
 
 
 # ============================================================================
@@ -738,8 +750,9 @@ class TestCaching:
     @pytest.mark.asyncio
     async def test_expired_entry_is_ignored(self, db_session):
         """Une entree expiree n'est pas servie."""
-        from app.services.postgres_search_service import get_from_pg_cache
         from sqlalchemy import text as sa_text
+
+        from app.services.postgres_search_service import get_from_pg_cache
 
         await db_session.execute(
             sa_text(

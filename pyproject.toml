@@ -93,6 +93,38 @@ target-version = ['py311']
 line-length = 100
 target-version = "py311"
 
+# Le jeu de regles etait implicite : ruff tournait avec ses defauts et rendait
+# 1332 signalements, dont 98 faux positifs sur le motif `Depends()` de FastAPI
+# et 615 modernisations de style. Un controle que personne ne peut passer n'est
+# pas un controle. Ce qui suit ne retient que ce qui signale un VRAI defaut.
+[tool.ruff.lint]
+select = [
+    "F",      # erreurs reelles : nom inconnu, import inutilise, f-string sans champ
+    "E4",     # imports mal places
+    "E7",     # comparaisons douteuses (== None, type(x) == y)
+    "E9",     # erreurs de syntaxe et d'execution
+    "I",      # ordre des imports
+    "RUF100", # noqa devenus inutiles — ils masquent ce qu'ils ne masquent plus
+]
+ignore = [
+    # `Depends()`, `Query()`, `File()` en valeur par defaut sont LA convention
+    # FastAPI, pas un defaut. 98 occurrences legitimes.
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Les migrations Alembic importent les modeles pour enregistrer les metadonnees
+# sans les utiliser directement.
+# env.py doit inserer la racine du projet dans sys.path AVANT d'importer les
+# modeles : c'est le motif standard d'Alembic, et l'ordre n'est pas negociable.
+"alembic/env.py" = ["F401", "E402"]
+# Les scripts inserent eux aussi la racine dans sys.path avant leurs imports.
+"scripts/**" = ["E402"]
+# conftest surcharge DATABASE_URL avant d'importer l'application : l'ordre EST
+# la protection contre des tests qui ecriraient dans la base de developpement.
+# F841 : une variable de fixture liee et non lue nomme ce qui est mis en place.
+"tests/**" = ["E402", "F841"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true

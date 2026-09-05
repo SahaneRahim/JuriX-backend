@@ -8,9 +8,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from datetime import date
-from app.core.database import AsyncSessionLocal, engine, Base
-from app.models.law import Law, Category, Article
 
+from app.core.database import AsyncSessionLocal, Base, engine
+from app.models.law import Article, Category, Law
 
 SAMPLE_CATEGORIES = [
     {"id": 1, "name": "Droit Civil", "description": "Droit civil camerounais"},
@@ -199,7 +199,7 @@ async def seed_database():
 
         # Verify
         print("\n[4/4] Verifying data...")
-        from sqlalchemy import select, func
+        from sqlalchemy import func, select
 
         result = await session.execute(select(func.count(Law.id)))
         law_count = result.scalar()

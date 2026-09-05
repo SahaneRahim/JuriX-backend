@@ -148,9 +148,10 @@ def convert_pdf_to_images_pypdf(pdf_path: Path) -> List:
     Extract images from PDF using pypdf (Fallback if poppler missing).
     Best for scanned PDFs where each page is an image.
     """
-    from pypdf import PdfReader
-    from PIL import Image
     import io
+
+    from PIL import Image
+    from pypdf import PdfReader
 
     reader = PdfReader(pdf_path)
     images = []

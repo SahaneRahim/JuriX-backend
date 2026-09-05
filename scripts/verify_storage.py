@@ -2,9 +2,11 @@
 Quick verification of article storage - outputs to file.
 """
 import sys
+
 sys.path.insert(0, '.')
 
 from sqlalchemy import create_engine, text
+
 from app.core.config import settings
 
 output = []
@@ -91,7 +93,7 @@ with engine.connect() as conn:
         output.append(f"\n--- {row[0]} ---")
         content = row[1] or ""
         output.append(f"Length: {len(content)} chars")
-        output.append(f"Content (first 1000 chars):")
+        output.append("Content (first 1000 chars):")
         output.append(content[:1000])
         output.append("...")
 
