@@ -30,7 +30,12 @@ from app.core.config import settings
 from app.models.conversation import Conversation, Message
 from app.schemas.rag import Citation, RAGRequest, RAGResponse
 from app.schemas.search import ChunkResult, SearchFilters, SearchRequest
-from app.services.gemini_service import get_gemini_service, GeminiServiceError
+from app.services.gemini_service import (
+    GeminiOverloadedError,
+    GeminiQuotaError,
+    GeminiServiceError,
+    get_gemini_service,
+)
 from app.services.prompts import (
     CONTEXT_TEMPLATE,
     NO_RESULTS_MESSAGE,
@@ -83,6 +88,31 @@ def _normalize_article_number(number: str) -> str:
     cleaned = re.sub(r"^(ARTICLE|ART\.?|SECTION)\s+", "", cleaned)
     cleaned = cleaned.strip(" .:-")
     return _ORDINAL_WORDS.get(cleaned, cleaned)
+
+
+# Budget de generation. Doit couvrir la reflexion du modele ET la reponse.
+ANSWER_MAX_TOKENS = 4096
+
+
+class RAGQuotaError(Exception):
+    """
+    Quota de generation epuise chez le fournisseur.
+
+    Merite son propre type parce qu'elle appelle un 429 et un message qui dit
+    la verite — « quota du jour atteint » — la ou un 500 disait « erreur
+    interne » pour une cause parfaitement connue.
+    """
+
+
+class RAGOverloadedError(Exception):
+    """
+    Le fournisseur de generation est momentanement sature.
+
+    Distincte de RAGServiceError parce qu'elle appelle une autre reponse HTTP
+    (503 et non 500) et un autre message : « reessaie » plutot que « le service
+    est en panne ». Volontairement PAS une sous-classe : le gestionnaire de
+    RAGServiceError doit la laisser passer.
+    """
 
 
 class RAGServiceError(Exception):
@@ -210,9 +240,23 @@ class RAGService:
                 retrieval_time_ms, start_time
             )
 
+        except GeminiQuotaError as e:
+            logger.warning(f"⚠️ Quota de generation epuise: {e}")
+            raise RAGQuotaError(str(e)) from e
+        except GeminiOverloadedError as e:
+            # Saturation passagere du fournisseur, pas une panne du produit.
+            # `GeminiServiceError` etait levee en trois endroits de
+            # gemini_service.py et attrapee NULLE PART — l'import cense la
+            # traiter dormait, inutilise, en tete de ce fichier. Une salve de
+            # 503 remontait donc en 500 avec un message technique.
+            logger.warning(f"⚠️ Generation saturee: {e}")
+            raise RAGOverloadedError(str(e)) from e
+        except GeminiServiceError as e:
+            logger.error(f"❌ Erreur de generation: {e}")
+            raise RAGServiceError(f"Erreur de génération: {e}") from e
         except Exception as e:
             logger.error(f"❌ RAG error: {e}", exc_info=True)
-            raise RAGServiceError(f"Erreur lors du traitement: {str(e)}")
+            raise RAGServiceError(f"Erreur lors du traitement: {str(e)}") from e
 
     async def _retrieve_and_merge_context(self, request: RAGRequest, conversation):
         """
@@ -286,8 +330,13 @@ class RAGService:
         if self.llm is None:
             raise RAGServiceError("LLM service not configured. Please set up Gemini API.")
 
+        # 1000 jetons ne suffisent pas a un modele a raisonnement : la
+        # reflexion consomme le budget avant la reponse, et ce qui remonte est
+        # un morceau de monologue interne. Observe sur une question de suivi,
+        # ou la reponse commencait par « *Self-Correction during drafting:* ».
         llm_response = await self.llm.generate(
-            prompt=prompt, system=system_prompt, temperature=0.7, max_tokens=1000
+            prompt=prompt, system=system_prompt, temperature=0.7,
+            max_tokens=ANSWER_MAX_TOKENS,
         )
         generation_time_ms = int((time.time() - generation_start) * 1000)
         answer = llm_response["response"]

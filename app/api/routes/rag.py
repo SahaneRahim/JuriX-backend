@@ -25,7 +25,7 @@ from app.schemas.rag import (
     RAGRequest,
     RAGResponse,
 )
-from app.services.rag_service import RAGService, RAGServiceError
+from app.services.rag_service import RAGOverloadedError, RAGQuotaError, RAGService, RAGServiceError
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,26 @@ async def ask(
         logger.info(f"📤 Ask response: {response.total_time_ms}ms")
         return response
 
+    except RAGQuotaError as e:
+        # 429 et non 500 : la cause est connue, elle se dit, et elle porte un
+        # delai. Le message precedent deversait le JSON brut de Google dans
+        # `detail`, ce qui exposait des identifiants de quota au client.
+        logger.warning(f"⚠️ Quota epuise: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(e),
+            headers={"Retry-After": "60"},
+        )
+    except RAGOverloadedError as e:
+        # 503 et non 500 : le client sait alors qu'un nouvel essai a un sens,
+        # et Retry-After lui dit quand. Un 500 disait « c'est casse » pour une
+        # minute de charge chez le fournisseur.
+        logger.warning(f"⚠️ Generation saturee: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e),
+            headers={"Retry-After": "10"},
+        )
     except RAGServiceError as e:
         logger.error(f"❌ RAG error: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

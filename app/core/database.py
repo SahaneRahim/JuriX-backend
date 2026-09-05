@@ -14,6 +14,8 @@ Author: JuriX Team
 """
 
 import logging
+
+from fastapi import HTTPException
 from typing import AsyncGenerator
 
 from sqlalchemy import create_engine, text
@@ -106,6 +108,14 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         try:
             logger.debug("📦 Nouvelle session DB créée")
             yield session
+        except HTTPException:
+            # Une HTTPException n'est pas une erreur de base : c'est une
+            # reponse deliberee de la route. La journaliser en « Erreur session
+            # DB » avec sa trace complete noyait les vraies erreurs SQL sous des
+            # 404 et des 429 parfaitement normaux. On annule quand meme la
+            # transaction, sans mentir sur la cause.
+            await session.rollback()
+            raise
         except Exception as e:
             logger.error(f"❌ Erreur session DB: {e}")
             await session.rollback()
