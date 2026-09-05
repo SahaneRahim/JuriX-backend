@@ -1,6 +1,8 @@
 """Point d'entrée FastAPI."""
 
+import asyncio
 import logging
+from contextlib import suppress
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -16,6 +18,31 @@ logger = logging.getLogger(__name__)
 _DEV_SECRET_KEY = "dev_secret_key_change_in_production_with_openssl_rand_hex_32"
 
 
+# Intervalle de purge. Le cache de recherche vit cinq minutes ; passer plus
+# souvent ne libererait rien de plus, passer beaucoup moins souvent laisserait
+# s'accumuler une heure de lignes mortes.
+CACHE_CLEANUP_INTERVAL_S = 15 * 60
+
+
+async def _purger_les_caches() -> None:
+    """Boucle de menage. Ne doit jamais interrompre le service."""
+    from app.core.database import AsyncSessionLocal
+    from app.services.postgres_search_service import cleanup_expired_cache
+
+    while True:
+        try:
+            await asyncio.sleep(CACHE_CLEANUP_INTERVAL_S)
+            async with AsyncSessionLocal() as session:
+                supprimees = await cleanup_expired_cache(session)
+            if supprimees:
+                logger.info(f"🧹 {supprimees} entrees de cache expirees supprimees")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"⚠️ Purge des caches impossible: {e}")
+
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Cycle de vie de l'application."""
@@ -27,10 +54,25 @@ async def lifespan(app: FastAPI):
             "peut forger un jeton d'administration."
         )
     logger.info(f"🚀 {settings.APP_NAME} v{settings.VERSION} ({settings.ENVIRONMENT})")
-    yield
-    # close_db() existait mais n'etait jamais appele : le pool de connexions
-    # asyncpg n'etait jamais libere a l'arret.
-    await close_db()
+
+    # Purge des caches expires, en tache de fond.
+    #
+    # `cleanup_expired_cache` existait, etait importee par search_service, et
+    # n'etait APPELEE NULLE PART. `query_cache` et `embedding_cache` portent une
+    # colonne `expires_at` que rien n'appliquait : les deux tables grossissaient
+    # sans fin. Une colonne d'expiration non appliquee est pire que pas de
+    # colonne du tout — elle laisse croire que le menage est fait.
+    tache_menage = asyncio.create_task(_purger_les_caches())
+    try:
+        yield
+    finally:
+        tache_menage.cancel()
+        with suppress(asyncio.CancelledError):
+            await tache_menage
+        # close_db() existait mais n'etait jamais appele : le pool de
+        # connexions asyncpg n'etait jamais libere a l'arret. Dans le `finally`
+        # pour qu'il s'execute meme si l'arret vient d'une exception.
+        await close_db()
 
 
 app = FastAPI(

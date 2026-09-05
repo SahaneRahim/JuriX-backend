@@ -30,6 +30,7 @@ from app.models.user import User
 from app.core.database import get_db, AsyncSessionLocal
 from app.models.law import Category, Law
 from app.schemas.law import (
+    LawDetailResponse,
     LawCreate,
     LawResponse,
     LawUpdate,
@@ -136,7 +137,7 @@ async def get_laws(
         )
 
 
-@router.get("/{law_id}", response_model=LawResponse)
+@router.get("/{law_id}", response_model=LawDetailResponse)
 async def get_law(
     law_id: int,
     db: AsyncSession = Depends(get_db),
@@ -180,7 +181,13 @@ async def get_law(
                 status_code=status.HTTP_404_NOT_FOUND, detail=f"Law with ID {law_id} not found"
             )
 
-        logger.info(f"✅ Law {law_id} found: {law.title}")
+        # Les articles sont deja charges par le selectinload ci-dessus ; ils
+        # etaient simplement jetes par LawResponse, qui n'expose que
+        # `article_count`. La page de lecture les reconstruisait donc par
+        # expression reguliere sur le contenu — 193 articles la ou la base en
+        # compte 230, et aucune page de PDF.
+        law.articles.sort(key=lambda a: (a.order or 0, a.id))
+        logger.info(f"✅ Law {law_id} found: {law.title} ({len(law.articles)} articles)")
         return law
 
     except HTTPException:

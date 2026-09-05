@@ -247,6 +247,28 @@ class LawUpdate(BaseModel):
         return v.lower()
 
 
+class ArticleSummary(BaseModel):
+    """
+    Un article tel qu'il apparait dans le sommaire d'un document.
+
+    Existe parce que la page de lecture reconstruisait le sommaire par une
+    EXPRESSION REGULIERE sur `law.content`, cote navigateur. Deux consequences :
+    elle trouvait 193 articles la ou la base en compte 230 pour le meme
+    document, et elle n'avait aucun moyen de connaitre la page du PDF — donc un
+    lien `?article=35` deplacait le sommaire mais laissait le PDF a la page 1.
+    """
+
+    id: int
+    number: str
+    title: Optional[str] = None
+    section: Optional[str] = Field(None, description="En-tete de section (TITRE/CHAPITRE)")
+    page_number: Optional[int] = Field(None, description="Page du PDF, 1-indexee")
+    kind: Optional[str] = Field(None, description="article | legal_basis | preamble | ...")
+
+    class Config:
+        from_attributes = True
+
+
 class LawResponse(LawBase):
     """
     Schema for law responses with v2.1 auto-detection fields.
@@ -466,3 +488,18 @@ class LawStats(BaseModel):
     top_categories: List[CategoryStats] = Field(default_factory=list)
     avg_articles_per_law: float = Field(0.0)
     latest_publication: Optional[date] = None
+
+
+class LawDetailResponse(LawResponse):
+    """
+    Detail d'un document, sommaire compris.
+
+    Volontairement SEPAREE de LawResponse : la route de LISTE charge deja les
+    articles par `selectinload`, et les exposer la ferait transiter tout le
+    corpus a chaque affichage de liste. Seul `GET /laws/{id}` rend ce schema.
+    """
+
+    articles: List[ArticleSummary] = Field(
+        default_factory=list,
+        description="Articles du document, dans l'ordre, avec leur page",
+    )
