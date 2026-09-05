@@ -74,9 +74,14 @@ ENV PYTHONUNBUFFERED=1 \
 # alembic (search_vector, index GIN, declencheurs, extensions), pas dans
 # Base.metadata — un conteneur qui demarre sans les avoir jouees repond 500 sur
 # toute recherche.
-# Railway injects PORT automatically
-CMD alembic upgrade head && uvicorn app.main:app \
-    --host 0.0.0.0 \
-    --port ${PORT:-8000} \
-    --workers 1 \
-    --log-level info
+# Railway injects PORT automatically.
+#
+# Forme JSON avec `exec` : en forme shell, docker lance `/bin/sh -c "..."` et
+# c'est le SHELL qui recoit le SIGTERM de `docker stop`. uvicorn, lui, ne le
+# voit jamais et se fait tuer au bout du delai de grace — donc le lifespan
+# n'atteint jamais son `finally`, ou vivent la fermeture du pool de connexions
+# et l'arret de la tache de purge des caches. `exec` fait remplacer le shell
+# par uvicorn, qui recoit alors le signal directement.
+#
+# Le shell reste necessaire pour `&&` et pour l'expansion de ${PORT}.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level info"]
