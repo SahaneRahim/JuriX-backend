@@ -790,6 +790,46 @@ async def find_article_in_laws(
     return int(row.law_id) if row else None
 
 
+async def record_search_event(
+    db: AsyncSession,
+    query: str,
+    mode: str,
+    results_count: int,
+    duration_ms: int,
+    cached: bool,
+) -> None:
+    """
+    Journalise une recherche.
+
+    Ecrit dans `search_events`, la table qui permet a
+    `GET /api/v1/analytics/search` de rendre des mesures plutot que des
+    constantes. `query_cache` ne pouvait pas servir a cela : il ne garde qu'un
+    hachage, avec cinq minutes de duree de vie, et une requete servie depuis le
+    cache n'y cree aucune ligne.
+
+    NE LEVE JAMAIS. Une statistique manquante ne doit pas faire echouer la
+    recherche de l'utilisateur — c'est exactement l'inversion de priorite qu'il
+    faut eviter ici.
+    """
+    try:
+        await db.execute(
+            text("""
+                INSERT INTO search_events (query, mode, results_count, duration_ms, cached)
+                VALUES (:query, :mode, :results_count, :duration_ms, :cached)
+            """),
+            {
+                "query": query[:500],
+                "mode": mode,
+                "results_count": results_count,
+                "duration_ms": duration_ms,
+                "cached": cached,
+            },
+        )
+        await db.commit()
+    except Exception as e:
+        logger.debug(f"Journalisation de recherche impossible: {e}")
+
+
 async def apply_trigram_threshold(db: AsyncSession, threshold: float) -> None:
     """
     Pose le seuil de `word_similarity` pour la transaction en cours.

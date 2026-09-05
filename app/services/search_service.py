@@ -49,6 +49,7 @@ from app.services.postgres_search_service import (
     store_in_pg_cache,
     apply_trigram_threshold,
     find_article_in_laws,
+    record_search_event,
     resolve_law_by_hint,
     search_articles_pg,
     search_laws_pg,
@@ -252,7 +253,16 @@ class SearchService:
             if cached_data:
                 elapsed_ms = int((time.time() - start_time) * 1000)
                 logger.info(f"🎯 Cache HIT ({elapsed_ms}ms)")
-                return SearchResponse(**cached_data)
+                cached_response = SearchResponse(**cached_data)
+                # Journalise AUSSI les requetes servies par le cache : sans
+                # cela, la statistique compterait les defauts de cache et non
+                # les recherches, et sous-estimerait d'autant plus que le cache
+                # est efficace.
+                await record_search_event(
+                    self.db, request.query, request.mode,
+                    cached_response.total, elapsed_ms, cached=True,
+                )
+                return cached_response
 
         chunks = await self._execute_search_by_mode(request)
 
@@ -265,6 +275,10 @@ class SearchService:
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         response = await self._build_search_response(request, chunks, elapsed_ms)
+
+        await record_search_event(
+            self.db, request.query, request.mode, response.total, elapsed_ms, cached=False,
+        )
 
         # Store in PostgreSQL cache
         if self.use_cache:

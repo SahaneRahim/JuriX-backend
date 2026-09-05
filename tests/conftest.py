@@ -255,7 +255,7 @@ async def pg_engine(_migrated_schema):
 _DATA_TABLES = (
     "message_feedback", "messages", "conversations", "persona_interactions",
     "persona_stats", "articles", "laws", "categories", "users",
-    "query_cache", "embedding_cache",
+    "query_cache", "embedding_cache", "search_events",
 )
 
 

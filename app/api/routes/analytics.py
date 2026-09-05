@@ -16,11 +16,13 @@ from datetime import datetime, timedelta
 from typing import Dict, List
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import get_current_admin_user
 from app.core.database import get_db
 from app.models.law import Law
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,10 @@ router = APIRouter(tags=["Analytics"])
 @router.get("/overview")
 async def get_overview(
     db: AsyncSession = Depends(get_db),
+    # Le tableau de bord est reserve aux administrateurs, et le front envoyait
+    # deja un jeton. La route, elle, repondait 200 a n'importe qui et exposait
+    # la composition du corpus et les dernieres lois traitees.
+    _: User = Depends(get_current_admin_user),
 ) -> Dict:
     """
     Get dashboard overview with key metrics.
@@ -110,6 +116,10 @@ async def get_overview(
 @router.get("/laws")
 async def get_law_statistics(
     db: AsyncSession = Depends(get_db),
+    # Le tableau de bord est reserve aux administrateurs, et le front envoyait
+    # deja un jeton. La route, elle, repondait 200 a n'importe qui et exposait
+    # la composition du corpus et les dernieres lois traitees.
+    _: User = Depends(get_current_admin_user),
 ) -> Dict:
     """
     Get detailed law statistics.
@@ -182,97 +192,169 @@ async def get_law_statistics(
 
 
 @router.get("/search")
-async def get_search_analytics() -> Dict:
+async def get_search_analytics(
+    days: int = Query(7, ge=1, le=90, description="Fenetre d'observation, en jours"),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_admin_user),
+) -> Dict:
     """
-    Get search analytics.
-    
-    **Returns:**
-    - Search modes usage (text/semantic/hybrid)
-    - Average response time
-    - Popular queries (mock data for now)
-    
-    **Note:** This is a simplified version. In production, 
-    integrate with actual search logs.
-    
-    **Example Response:**
-    ```json
-    {
-        "modes_usage": {
-            "text": 100,
-            "semantic": 50,
-            "hybrid": 200
-        },
-        "avg_response_time_ms": 150,
-        "total_searches": 350
+    Statistiques de recherche, MESUREES.
+
+    Cette route rendait des constantes codees en dur — 350 recherches, 150 ms,
+    une repartition 100/50/200 entre les modes — que le tableau de bord admin
+    affichait comme des mesures. Le champ `note: "Mock data"` qui les
+    accompagnait n'etait lu par personne.
+
+    Les chiffres viennent maintenant de `search_events`, alimentee a chaque
+    recherche. Ils seront petits au debut : c'est le but.
+    """
+    fenetre = {"days": days}
+
+    total = (await db.execute(text(
+        "SELECT count(*) FROM search_events WHERE created_at >= now() - make_interval(days => :days)"
+    ), fenetre)).scalar_one()
+
+    modes = {
+        ligne.mode: ligne.n
+        for ligne in (await db.execute(text("""
+            SELECT mode, count(*) AS n FROM search_events
+            WHERE created_at >= now() - make_interval(days => :days)
+            GROUP BY mode ORDER BY n DESC
+        """), fenetre)).all()
     }
-    ```
-    """
-    logger.info("📊 GET /analytics/search")
-    
-    # TODO: Integrate with actual search logs
-    # For now, return mock data
+
+    # Mediane et non moyenne : une seule requete froide a 3 secondes deplace la
+    # moyenne et ne dit rien de l'experience courante.
+    latences = (await db.execute(text("""
+        SELECT
+            percentile_disc(0.5) WITHIN GROUP (ORDER BY duration_ms)  AS mediane,
+            percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95,
+            max(duration_ms)                                          AS maximum
+        FROM search_events
+        WHERE created_at >= now() - make_interval(days => :days) AND NOT cached
+    """), fenetre)).first()
+
+    caches = (await db.execute(text("""
+        SELECT count(*) FILTER (WHERE cached) AS depuis_cache, count(*) AS total
+        FROM search_events WHERE created_at >= now() - make_interval(days => :days)
+    """), fenetre)).first()
+
+    # Les requetes SANS resultat sont la statistique la plus utile du lot :
+    # elles disent ce que les gens cherchent et que le corpus ne contient pas.
+    sans_resultat = [
+        {"query": r.query, "count": r.n}
+        for r in (await db.execute(text("""
+            SELECT query, count(*) AS n FROM search_events
+            WHERE created_at >= now() - make_interval(days => :days) AND results_count = 0
+            GROUP BY query ORDER BY n DESC, query LIMIT 10
+        """), fenetre)).all()
+    ]
+
+    populaires = [
+        {"query": r.query, "count": r.n}
+        for r in (await db.execute(text("""
+            SELECT query, count(*) AS n FROM search_events
+            WHERE created_at >= now() - make_interval(days => :days)
+            GROUP BY query ORDER BY n DESC, query LIMIT 10
+        """), fenetre)).all()
+    ]
+
+    taux_cache = round(caches.depuis_cache / caches.total * 100, 1) if caches.total else 0.0
+
     return {
-        "modes_usage": {
-            "text": 100,
-            "semantic": 50,
-            "hybrid": 200,
-        },
-        "avg_response_time_ms": 150,
-        "total_searches": 350,
+        "window_days": days,
+        "total_searches": total,
+        "modes_usage": modes,
+        "median_response_time_ms": latences.mediane or 0,
+        "p95_response_time_ms": latences.p95 or 0,
+        "max_response_time_ms": latences.maximum or 0,
+        "cache_hit_rate_percent": taux_cache,
+        "popular_queries": populaires,
+        "queries_without_results": sans_resultat,
         "timestamp": datetime.now().isoformat(),
-        "note": "Mock data - integrate with search logs in production",
     }
-
-
-# ==================== USAGE METRICS ====================
 
 
 @router.get("/usage")
-async def get_usage_metrics() -> Dict:
+async def get_usage_metrics(
+    days: int = Query(7, ge=1, le=90, description="Fenetre d'observation, en jours"),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_admin_user),
+) -> Dict:
     """
-    Get API usage metrics.
-    
-    **Returns:**
-    - API calls per endpoint
-    - Peak usage times
-    - Active users (mock data for now)
-    
-    **Note:** This is a simplified version. In production,
-    integrate with API gateway logs or monitoring system.
-    
-    **Example Response:**
-    ```json
-    {
-        "api_calls": {
-            "/api/v1/laws": 500,
-            "/api/v1/search": 350,
-            "/api/v1/rag": 200
-        },
-        "total_calls": 1050,
-        "active_users": 25
+    Metriques d'usage, MESUREES.
+
+    Cette route rendait `total_calls: 1150`, `active_users: 25` et des heures de
+    pointe inventees. Tout vient desormais de `conversations`, `messages`,
+    `users` et `search_events`, qui portaient deja ces informations.
+    """
+    fenetre = {"days": days}
+
+    conversations = (await db.execute(text(
+        "SELECT count(*) FROM conversations WHERE created_at >= now() - make_interval(days => :days)"
+    ), fenetre)).scalar_one()
+
+    messages = (await db.execute(text("""
+        SELECT count(*) FILTER (WHERE role = 'user')      AS questions,
+               count(*) FILTER (WHERE role = 'assistant') AS reponses
+        FROM messages WHERE created_at >= now() - make_interval(days => :days)
+    """), fenetre)).first()
+
+    recherches = (await db.execute(text(
+        "SELECT count(*) FROM search_events WHERE created_at >= now() - make_interval(days => :days)"
+    ), fenetre)).scalar_one()
+
+    # Un « utilisateur actif » est ici quelqu'un qui a ouvert une conversation.
+    # Les visiteurs anonymes ne sont pas comptes : rien ne les identifie, et en
+    # inventer un compte serait revenir au probleme que cette route corrige.
+    actifs = (await db.execute(text("""
+        SELECT count(DISTINCT user_id) FROM conversations
+        WHERE user_id IS NOT NULL AND created_at >= now() - make_interval(days => :days)
+    """), fenetre)).scalar_one()
+
+    heures = [
+        {"hour": int(r.heure), "count": r.n}
+        for r in (await db.execute(text("""
+            SELECT extract(hour FROM created_at) AS heure, count(*) AS n
+            FROM (
+                SELECT created_at FROM messages
+                WHERE created_at >= now() - make_interval(days => :days)
+                UNION ALL
+                SELECT created_at FROM search_events
+                WHERE created_at >= now() - make_interval(days => :days)
+            ) activite
+            GROUP BY heure ORDER BY n DESC, heure LIMIT 5
+        """), fenetre)).all()
+    ]
+
+    latences = (await db.execute(text("""
+        SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY retrieval_time_ms + generation_time_ms)
+        FROM messages
+        WHERE role = 'assistant' AND created_at >= now() - make_interval(days => :days)
+          AND retrieval_time_ms IS NOT NULL AND generation_time_ms IS NOT NULL
+    """), fenetre)).scalar()
+
+    personas = {
+        r.persona: r.n
+        for r in (await db.execute(text("""
+            SELECT persona, count(*) AS n FROM conversations
+            WHERE created_at >= now() - make_interval(days => :days)
+            GROUP BY persona ORDER BY n DESC
+        """), fenetre)).all()
     }
-    ```
-    """
-    logger.info("📊 GET /analytics/usage")
-    
-    # TODO: Integrate with API gateway logs or monitoring
-    # For now, return mock data
+
     return {
-        "api_calls": {
-            "/api/v1/laws": 500,
-            "/api/v1/search": 350,
-            "/api/v1/rag": 200,
-            "/api/v1/upload": 100,
-        },
-        "total_calls": 1150,
-        "active_users": 25,
-        "peak_hours": [9, 10, 14, 15, 16],
+        "window_days": days,
+        "conversations": conversations,
+        "questions_asked": messages.questions or 0,
+        "answers_generated": messages.reponses or 0,
+        "searches": recherches,
+        "active_users": actifs,
+        "peak_hours": heures,
+        "median_answer_time_ms": latences or 0,
+        "personas_usage": personas,
         "timestamp": datetime.now().isoformat(),
-        "note": "Mock data - integrate with monitoring system in production",
     }
-
-
-# ==================== HEALTH CHECK ====================
 
 
 @router.get("/health")
