@@ -341,8 +341,14 @@ async def health_check(rag_service: RAGService = Depends(get_rag_service)) -> di
     if rag_service.llm is not None:
         try:
             llm_health = await rag_service.llm.health_check()
-            health_status["llm"] = llm_health.get("status", "unknown")
-            if llm_health.get("status") != "healthy":
+            etat_llm = llm_health.get("status", "unknown")
+            health_status["llm"] = etat_llm
+            if etat_llm == "quota_exhausted":
+                # Un quota epuise se resorbe seul : le dire, et le distinguer
+                # d'une panne. La raison porte le delai conseille.
+                health_status["status"] = "degraded"
+                health_status["llm_reason"] = llm_health.get("reason", "")
+            elif etat_llm != "healthy":
                 health_status["status"] = "degraded"
         except Exception as e:
             health_status["llm"] = f"error: {str(e)}"

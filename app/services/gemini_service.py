@@ -414,6 +414,20 @@ FORBIDDEN:
             # Une saturation passagere n'est pas une panne du service. La
             # distinguer evite de declarer le produit hors service pour une
             # minute de charge chez le fournisseur.
+            # Un quota epuise n'est ni une panne ni une saturation : c'est un
+            # etat connu, temporaire, et dont on sait quand il cesse. Le rendre
+            # « unhealthy » avec le JSON brut du fournisseur dans `reason`
+            # exposait des identifiants de quota et faisait passer une limite
+            # administrative pour un service casse.
+            if _is_quota_exhausted(e):
+                delai = retry_after_seconds(e)
+                logger.warning(f"⚠️ Quota Gemini epuise, reprise dans {delai}s")
+                return {
+                    "status": "quota_exhausted",
+                    "model": self.model_name,
+                    "reason": f"quota de generation epuise, reprise dans {delai} secondes",
+                    "retry_after_s": delai,
+                }
             if _is_overloaded(e):
                 logger.warning(f"⚠️ Gemini sature: {e}")
                 return {

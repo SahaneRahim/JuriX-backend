@@ -123,6 +123,13 @@ class GeminiPdfExtractor:
     OVERLOAD_MAX_ATTEMPTS = 3
     OVERLOAD_BASE_DELAY_S = 2.0
 
+    # Pause entre deux appels d'un meme document. Le palier gratuit limite AUSSI
+    # le nombre de requetes par minute — le 429 renvoyait « reprise dans 23
+    # secondes », pas « demain ». Sans cette pause, un document de plusieurs
+    # lots epuise la fenetre a son deuxieme appel et s'arrete, alors qu'il
+    # suffisait d'attendre.
+    INTER_CALL_DELAY_S = 6.0
+
     # Budget de sortie par appel. La limite du modele est de 65 536 jetons ;
     # a ~2400 caracteres par page, un lot de 20 pages produit ~48 Ko, soit
     # ~13 000 jetons. La marge couvre la reflexion interne du modele.
@@ -208,7 +215,9 @@ class GeminiPdfExtractor:
 
         lots = await asyncio.to_thread(self._decouper_en_lots, file_path)
         pages: List[str] = []
-        for premiere, octets in lots:
+        for index, (premiere, octets) in enumerate(lots):
+            if index:
+                await asyncio.sleep(self.INTER_CALL_DELAY_S)
             try:
                 pages.extend(await self._extraire_lot(octets, premiere, file_path.name))
             except PdfExtractionRefusedError:
