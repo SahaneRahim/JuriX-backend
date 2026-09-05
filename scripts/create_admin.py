@@ -34,10 +34,10 @@ from sqlalchemy import select
 
 load_dotenv()
 
-from app.core.auth import hash_password  # noqa: E402
-from app.core.database import AsyncSessionLocal  # noqa: E402
-from app.models.user import User  # noqa: E402
-from app.schemas.user import UserCreate  # noqa: E402
+from app.core.auth import hash_password
+from app.core.database import AsyncSessionLocal
+from app.models.user import User
+from app.schemas.user import UserCreate
 
 
 def parse_args() -> argparse.Namespace:
