@@ -53,6 +53,24 @@ from app.utils.markdown_cleanup import strip_stamp_blocks
 logger = logging.getLogger(__name__)
 
 
+def _decrire(err: Exception) -> str:
+    """
+    Description utilisable d'une exception, meme muette.
+
+    `httpx.ReadTimeout` a un `str()` VIDE : le message remontait « Extraction de
+    X impossible : » suivi de rien, et atterrissait tel quel dans
+    `laws.processing_error`. Un message qui ne dit rien coute autant a lire
+    qu'un message juste, et ne sert a rien.
+    """
+    texte = str(err).strip()
+    return texte if texte else type(err).__name__
+
+
+def _est_un_depassement(err: Exception) -> bool:
+    """Vrai pour un depassement de delai reseau, quelle que soit la couche."""
+    return "Timeout" in type(err).__name__ or isinstance(err, TimeoutError)
+
+
 class PdfExtractionError(Exception):
     """
     Extraction impossible.
@@ -148,6 +166,7 @@ class GeminiPdfExtractor:
         self.api_key = settings.GEMINI_API_KEY if api_key is None else api_key
         self.model_name = model_name or settings.GEMINI_MODEL
         self.pages_per_call = pages_per_call or settings.PDF_EXTRACTION_PAGES_PER_CALL
+        self.max_batch_mb = settings.PDF_EXTRACTION_MAX_BATCH_MB
 
         self.cache_dir: Optional[Path] = Path(
             cache_dir or getattr(settings, "OCR_CACHE_DIR", "./data/ocr_cache")
@@ -320,7 +339,14 @@ class GeminiPdfExtractor:
             # incident de quarante minutes l'a etabli.
             self._client = genai.Client(
                 api_key=self.api_key,
-                http_options=types.HttpOptions(timeout=settings.GEMINI_TIMEOUT_S * 1000),
+                # Delai PROPRE a l'extraction, et non celui du chat : un lot de
+                # vingt pages scannees demande plusieurs minutes de traitement
+                # cote modele, la ou une question de RAG se compte en secondes.
+                # Mesure : un lot de 9,8 Mo depassait les 120 s du reglage
+                # general et remontait un httpx.ReadTimeout muet.
+                http_options=types.HttpOptions(
+                    timeout=settings.PDF_EXTRACTION_TIMEOUT_S * 1000
+                ),
             )
         return self._client
 
@@ -367,9 +393,13 @@ class GeminiPdfExtractor:
                     raise PdfExtractionQuotaError(
                         f"Quota d'extraction epuise. Reprise possible dans {delai} secondes."
                     ) from err
-                if not _is_overloaded(err) or essai == self.OVERLOAD_MAX_ATTEMPTS:
+                # Un depassement de delai est transitoire au meme titre qu'une
+                # saturation : sur un lot de 10 Mo d'images scannees, la
+                # premiere tentative depassait les 120 s du reglage general.
+                transitoire = _is_overloaded(err) or _est_un_depassement(err)
+                if not transitoire or essai == self.OVERLOAD_MAX_ATTEMPTS:
                     raise PdfExtractionError(
-                        f"Extraction de {nom} impossible : {err}"
+                        f"Extraction de {nom} impossible : {_decrire(err)}"
                     ) from err
                 attente = self.OVERLOAD_BASE_DELAY_S * (2 ** (essai - 1))
                 logger.warning(
@@ -447,20 +477,46 @@ class GeminiPdfExtractor:
 
         lecteur = PdfReader(str(file_path))
         total = len(lecteur.pages)
-        if total <= self.pages_per_call:
-            return [(1, file_path.read_bytes())]
+        octets_max = int(self.max_batch_mb * 1_000_000)
 
+        if total <= self.pages_per_call:
+            entier = file_path.read_bytes()
+            if len(entier) <= octets_max:
+                return [(1, entier)]
+
+        # Deux bornes, pas une. Le nombre de pages ne dit rien du poids : vingt
+        # pages scannees pesent 10 Mo la ou vingt pages de texte en pesent 1, et
+        # c'est le POIDS qui a fait depasser le delai sur la Loi de finances.
+        # On ferme donc un lot des qu'une des deux bornes est atteinte.
         lots = []
-        for debut in range(0, total, self.pages_per_call):
+        debut = 0
+        while debut < total:
             ecrivain = PdfWriter()
-            for page in lecteur.pages[debut:debut + self.pages_per_call]:
-                ecrivain.add_page(page)
+            fin = debut
+            while fin < total and (fin - debut) < self.pages_per_call:
+                ecrivain.add_page(lecteur.pages[fin])
+                fin += 1
+                tampon = io.BytesIO()
+                ecrivain.write(tampon)
+                if tampon.tell() >= octets_max and fin - debut > 1:
+                    # Le lot vient de depasser le poids : on le referme AVANT la
+                    # page qui l'a fait deborder, sauf si c'est la premiere —
+                    # une page seule trop lourde part quand meme, faute de mieux.
+                    fin -= 1
+                    ecrivain = PdfWriter()
+                    for page in lecteur.pages[debut:fin]:
+                        ecrivain.add_page(page)
+                    break
+
             tampon = io.BytesIO()
             ecrivain.write(tampon)
             lots.append((debut + 1, tampon.getvalue()))
+            debut = fin
+
+        poids = [len(o) / 1e6 for _, o in lots]
         logger.info(
-            f"✂️ {file_path.name} : {total} pages -> {len(lots)} lot(s) "
-            f"de {self.pages_per_call}"
+            f"✂️ {file_path.name} : {total} pages -> {len(lots)} lot(s), "
+            f"le plus lourd {max(poids):.1f} Mo"
         )
         return lots
 

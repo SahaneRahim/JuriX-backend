@@ -82,6 +82,14 @@ class Settings(BaseSettings):
     # gratuit plafonnant a 20 appels par jour, agrandir le lot economise des
     # appels — au risque de tronquer si les pages sont denses.
     PDF_EXTRACTION_PAGES_PER_CALL: int = 20
+    # Delai d'un appel d'extraction. Distinct de GEMINI_TIMEOUT_S : un lot de
+    # vingt pages scannees demande plusieurs minutes, la ou une question de RAG
+    # se compte en secondes. Mesure : un lot de 9,8 Mo depassait 120 s.
+    PDF_EXTRACTION_TIMEOUT_S: int = 600
+    # Poids maximal d'un lot. Le nombre de pages ne suffit pas : vingt pages
+    # scannees pesent 10 Mo la ou vingt pages de texte en pesent 1. Au-dela, le
+    # lot est redecoupe.
+    PDF_EXTRACTION_MAX_BATCH_MB: float = 6.0
 
     # CORS — comma-separated list of extra allowed origins for production
     # Example: https://jurix.vercel.app,https://www.jurix.cm

@@ -26,6 +26,8 @@ from app.services.pdf_extraction_service import (
     GeminiPdfExtractor,
     PdfExtractionError,
     PdfExtractionQuotaError,
+    _decrire,
+    _est_un_depassement,
 )
 
 SATURATION = (
@@ -330,3 +332,110 @@ class TestDecoupageEtComptage:
         extracteur._decouper_en_lots(_pdf(tmp_path / "d.pdf", pages=5))
 
         assert sorted(p.name for p in tmp_path.glob("*.pdf")) == ["d.pdf"]
+
+
+class TestErreursMuettes:
+    """
+    `httpx.ReadTimeout` a un `str()` VIDE.
+
+    Constate en production : la Loi de finances a echoue sur un message
+    « Extraction de X impossible : » suivi de rien, ecrit tel quel dans
+    `laws.processing_error`. Un message qui ne dit rien coute autant a lire
+    qu'un message juste.
+    """
+
+    def test_une_exception_muette_est_nommee(self):
+        class ReadTimeout(Exception):
+            def __str__(self):
+                return ""
+
+        assert _decrire(ReadTimeout()) == "ReadTimeout"
+
+    def test_une_exception_bavarde_garde_son_message(self):
+        assert _decrire(ValueError("quelque chose de precis")) == "quelque chose de precis"
+
+    def test_un_message_de_blancs_compte_comme_muet(self):
+        assert _decrire(ValueError("   \n  ")) == "ValueError"
+
+    @pytest.mark.asyncio
+    async def test_le_message_remonte_jusqu_a_l_appelant(self, extracteur, tmp_path):
+        class ReadTimeout(Exception):
+            def __str__(self):
+                return ""
+
+        _brancher(extracteur, [ReadTimeout()] * 3)
+        extracteur.OVERLOAD_BASE_DELAY_S = 0
+
+        with pytest.raises(PdfExtractionError, match="ReadTimeout"):
+            await extracteur.extract_text(_pdf(tmp_path / "d.pdf"))
+
+
+class TestDepassementDeDelai:
+    def test_un_depassement_est_reconnu(self):
+        class ReadTimeout(Exception):
+            pass
+
+        assert _est_un_depassement(ReadTimeout()) is True
+        assert _est_un_depassement(TimeoutError()) is True
+
+    def test_une_erreur_ordinaire_n_en_est_pas_un(self):
+        assert _est_un_depassement(ValueError("400 INVALID_ARGUMENT")) is False
+
+    @pytest.mark.asyncio
+    async def test_un_depassement_est_retente(self, extracteur, tmp_path):
+        """
+        Transitoire au meme titre qu'une saturation : sur un lot de 10 Mo
+        d'images scannees, la premiere tentative depassait le delai general.
+        """
+        class ReadTimeout(Exception):
+            def __str__(self):
+                return ""
+
+        etat = _brancher(extracteur, [ReadTimeout(), _reponse("<<PAGE:1>>\nOK")])
+        extracteur.OVERLOAD_BASE_DELAY_S = 0
+
+        assert "OK" in await extracteur.extract_text(_pdf(tmp_path / "d.pdf"))
+        assert etat["appels"] == 2
+
+
+class TestDecoupageParPoids:
+    """
+    Le nombre de pages ne dit rien du poids.
+
+    Vingt pages scannees pesent 10 Mo la ou vingt pages de texte en pesent 1,
+    et c'est le POIDS qui a fait depasser le delai sur la Loi de finances :
+    trois lots de 10,4 Mo au maximum, dont le premier n'a jamais abouti.
+    """
+
+    def test_un_lot_trop_lourd_est_redecoupe(self, tmp_path):
+        extracteur = GeminiPdfExtractor(
+            api_key="cle", pages_per_call=50, cache_dir=tmp_path / "c"
+        )
+        # Seuil minuscule : chaque page depasse, donc un lot par page.
+        extracteur.max_batch_mb = 0.0005
+
+        lots = extracteur._decouper_en_lots(_pdf(tmp_path / "d.pdf", pages=4))
+
+        assert [premiere for premiere, _ in lots] == [1, 2, 3, 4]
+
+    def test_le_poids_ne_prime_pas_sur_la_couverture(self, tmp_path):
+        """Toutes les pages doivent sortir, quel que soit le decoupage."""
+        extracteur = GeminiPdfExtractor(
+            api_key="cle", pages_per_call=3, cache_dir=tmp_path / "c"
+        )
+        extracteur.max_batch_mb = 0.0005
+
+        lots = extracteur._decouper_en_lots(_pdf(tmp_path / "d.pdf", pages=7))
+
+        assert [premiere for premiere, _ in lots] == list(range(1, 8))
+
+    def test_une_page_seule_trop_lourde_part_quand_meme(self, tmp_path):
+        """Faute de mieux : on ne peut pas decouper une page en deux."""
+        extracteur = GeminiPdfExtractor(
+            api_key="cle", pages_per_call=5, cache_dir=tmp_path / "c"
+        )
+        extracteur.max_batch_mb = 0.0000001
+
+        lots = extracteur._decouper_en_lots(_pdf(tmp_path / "d.pdf", pages=2))
+
+        assert len(lots) == 2, "une page par lot, aucune page perdue"
