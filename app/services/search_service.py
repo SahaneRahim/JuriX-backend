@@ -729,8 +729,10 @@ class SearchService:
 
     # ============ SEARCH MODES — niveau document, derive des chunks ============
     # Ces trois methodes conservent la signature et le type de retour d'origine
-    # (List[SearchResult]) : le front, les routes et les tests existants n'ont
-    # rien a changer. Elles ne sont plus que des adaptateurs.
+    # (List[SearchResult]). Les routes passent par `search()` ; ce sont les tests
+    # et les scripts qui les appellent, pour obtenir directement une liste de
+    # documents sans construire de SearchRequest. Elles ne sont plus que des
+    # adaptateurs au-dessus de *_chunks.
 
     async def text_search(
         self,

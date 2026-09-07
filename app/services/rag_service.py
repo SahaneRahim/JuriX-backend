@@ -10,7 +10,6 @@ Orchestrates the complete RAG pipeline:
 6. Persistence (Database)
 """
 
-import json
 import logging
 import re
 import time
@@ -28,7 +27,7 @@ from sqlalchemy.orm import joinedload
 
 from app.core.config import settings
 from app.models.conversation import Conversation, Message
-from app.schemas.rag import Citation, RAGRequest, RAGResponse
+from app.schemas.rag import Citation, RAGRequest, RAGResponse, RAGStreamChunk
 from app.schemas.search import ChunkResult, SearchFilters, SearchRequest
 from app.services.gemini_service import (
     GeminiOverloadedError,
@@ -395,12 +394,10 @@ class RAGService:
             retrieval_time_ms = int((time.time() - retrieval_start) * 1000)
 
             if not search_results:
-                yield json.dumps({
-                    "chunk": NO_RESULTS_MESSAGE[request.language],
-                    "done": True,
-                    "sources": [],
-                    "confidence": 0.0
-                })
+                yield RAGStreamChunk(
+                    chunk=NO_RESULTS_MESSAGE[request.language],
+                    done=True, sources=[], confidence=0.0,
+                ).model_dump_json(exclude_none=True)
                 return
 
             # Load history & build prompt
@@ -428,7 +425,10 @@ class RAGService:
 
             # TODO: Implement Gemini streaming
             if self.llm is None:
-                yield json.dumps({"chunk": "LLM service not configured. Please set up Gemini API.", "done": True, "error": True})
+                yield RAGStreamChunk(
+                    chunk="", done=True,
+                    error="LLM service not configured. Please set up Gemini API.",
+                ).model_dump_json(exclude_none=True)
                 return
 
             answer_parts = []
@@ -439,7 +439,7 @@ class RAGService:
                 max_tokens=1000
             ):
                 answer_parts.append(chunk)
-                yield json.dumps({"chunk": chunk, "done": False})
+                yield RAGStreamChunk(chunk=chunk, done=False).model_dump_json(exclude_none=True)
 
             generation_time_ms = int((time.time() - generation_start) * 1000)
 
@@ -458,21 +458,16 @@ class RAGService:
             )
 
             # Final chunk with metadata
-            yield json.dumps({
-                "chunk": "",
-                "done": True,
-                "sources": [c.model_dump() for c in citations],
-                "confidence": confidence,
-                "session_id": conversation.session_id
-            })
+            yield RAGStreamChunk(
+                chunk="", done=True, sources=citations,
+                confidence=confidence, session_id=conversation.session_id,
+            ).model_dump_json(exclude_none=True)
 
         except Exception as e:
             logger.error(f"❌ Streaming error: {e}")
-            yield json.dumps({
-                "chunk": "",
-                "done": True,
-                "error": str(e)
-            })
+            yield RAGStreamChunk(chunk="", done=True, error=str(e)).model_dump_json(
+                exclude_none=True
+            )
 
     async def _retrieve_chunks(
         self,

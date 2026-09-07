@@ -157,6 +157,10 @@ class RAGStreamChunk(BaseModel):
         None,
         description="Session ID (only in final chunk)"
     )
+    error: Optional[str] = Field(
+        None,
+        description="Error message (only in a terminal chunk that failed)"
+    )
 
 
 class MessageResponse(BaseModel):

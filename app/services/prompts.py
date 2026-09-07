@@ -415,3 +415,126 @@ Suggestions:
 
 How else can I help you?"""
 }
+
+
+# ============================================================================
+# Explication d'un article isole
+# ============================================================================
+
+# Consigne de tache pour le bouton « Expliquer l'article » de la page de
+# lecture. Elle complete le prompt systeme « citoyen », qui donne le TON, et
+# n'y touche pas : ce prompt demande explicitement du markdown (titres en gras,
+# listes), et la page sait rendre cette structure sans interpreter de HTML
+# (voir src/lib/texte.ts cote frontend). Lui demander ici de ne plus en
+# produire reviendrait a contredire le prompt systeme dans le meme appel.
+#
+# « n'explique pas leur contenu » vise les blocs voisins : sans cette phrase le
+# modele resume les trois articles, et le lecteur ne sait plus lequel il lit.
+EXPLAIN_TASK_TEMPLATES = {
+    "fr": """Tâche : explique l'article {number} du document ci-dessus à une personne sans formation juridique.
+
+- Ce que dit l'article, en une phrase.
+- Ce que cela change concrètement pour la personne concernée.
+- Les conditions, délais ou exceptions à connaître.
+
+Le bloc [1] est l'article à expliquer. Les blocs suivants ne sont là que pour le contexte : n'explique pas leur contenu.
+
+Structure ta réponse avec des titres courts en gras et des paragraphes brefs.
+N'invente aucune obligation qui ne figure pas dans le texte fourni.""",
+
+    "en": """Task: explain article {number} of the document above to someone with no legal training.
+
+- What the article says, in one sentence.
+- What it concretely changes for the person concerned.
+- The conditions, deadlines or exceptions to know about.
+
+Block [1] is the article to explain. The following blocks are context only: do not explain their content.
+
+Structure your answer with short bold headings and brief paragraphs.
+Do not invent any obligation that is absent from the provided text.""",
+}
+
+
+# ============================================================================
+# Comparaison de deux regimes
+# ============================================================================
+
+# Prompt systeme du mode comparaison. Il ne reprend PAS les personas : ceux-ci
+# demandent du markdown et un ton, alors qu'ici la sortie est un JSON contraint
+# par un schema. Les deux consignes se contrediraient.
+COMPARE_SYSTEM_PROMPTS = {
+    "fr": """Tu es un juriste qui compare deux regimes juridiques camerounais a partir
+d'extraits de textes officiels, et de rien d'autre.
+
+REGLE ABSOLUE : chaque cellule que tu remplis doit etre justifiee par un extrait
+fourni. Si les extraits ne disent rien sur un critere pour un sujet, ecris
+exactement « {absence} » dans la cellule et laisse sa liste de sources vide.
+N'utilise JAMAIS tes connaissances generales sur le droit d'un autre pays, ni
+sur une version anterieure du texte.
+
+Les sources sont des NUMEROS d'article, tels qu'ils apparaissent dans les
+extraits — « 32 », « 40.1 », « 1er ». Ne cite jamais un numero absent des
+extraits. Ne cite qu'un article qui soutient reellement ce que tu affirmes :
+une source de trop est une erreur au meme titre qu'une source fausse.""",
+
+    "en": """You are a lawyer comparing two Cameroonian legal regimes using only the
+supplied extracts of official texts, and nothing else.
+
+ABSOLUTE RULE: every cell you fill must be supported by a supplied extract. If
+the extracts say nothing about a criterion for a subject, write exactly
+« {absence} » in that cell and leave its source list empty. NEVER use general
+knowledge of another country's law, or of an earlier version of the text.
+
+Sources are article NUMBERS exactly as they appear in the extracts — "32",
+"40.1", "1er". Never cite a number absent from the extracts. Only cite an
+article that genuinely supports your statement: one source too many is as much
+an error as a wrong source.""",
+}
+
+COMPARE_TASK_TEMPLATES = {
+    "fr": """Sujet A : {a}
+Extraits concernant le sujet A :
+{ctx_a}
+
+=====================================
+
+Sujet B : {b}
+Extraits concernant le sujet B :
+{ctx_b}
+
+=====================================
+
+Compare le sujet A et le sujet B sur EXACTEMENT ces criteres, dans cet ordre :
+{criteres}
+
+Reponds une ligne par critere, en reportant dans le champ `index` le NUMERO du critere tel qu'il est ecrit ci-dessus.
+
+Remplis la grille, puis enonce les differences majeures, puis les angles morts :
+les criteres que les extraits ne permettent pas de trancher.""",
+
+    "en": """Subject A: {a}
+Extracts about subject A:
+{ctx_a}
+
+=====================================
+
+Subject B: {b}
+Extracts about subject B:
+{ctx_b}
+
+=====================================
+
+Compare subject A and subject B on EXACTLY these criteria, in this order:
+{criteres}
+
+Answer one row per criterion, copying into the `index` field the NUMBER of the criterion exactly as written above.
+
+Fill the grid, then state the key differences, then the blind spots: the
+criteria the extracts do not allow you to settle.""",
+}
+
+
+def get_compare_system_prompt(language: str, absence: str) -> str:
+    """Prompt systeme du mode comparaison, avec la mention d'absence exacte."""
+    lang = language if language in COMPARE_SYSTEM_PROMPTS else "fr"
+    return COMPARE_SYSTEM_PROMPTS[lang].format(absence=absence)

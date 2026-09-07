@@ -193,22 +193,3 @@ class OCRServiceHealth(BaseModel):
 # ============================================================================
 
 
-class OCRStatistics(BaseModel):
-    """Statistics for OCR processing."""
-
-    total_pages_processed: int = Field(0, ge=0)
-    total_processing_time_ms: int = Field(0, ge=0)
-    average_time_per_page_ms: float = Field(0.0, ge=0.0)
-    total_text_extracted: int = Field(0, ge=0, description="Total characters extracted")
-    success_rate: float = Field(0.0, ge=0.0, le=1.0, description="Success rate (0-1)")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "total_pages_processed": 450,
-                "total_processing_time_ms": 180000,
-                "average_time_per_page_ms": 400,
-                "total_text_extracted": 1250000,
-                "success_rate": 0.98,
-            }
-        }

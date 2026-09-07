@@ -192,6 +192,28 @@ sans dépendance, sans réseau, actif par défaut. L'étage 2 fait noter les 20
 meilleurs chunks par Gemini ; il ajoute un appel facturé sur le chemin critique,
 reste désactivé (`RERANK_LLM_ENABLED`) et dégrade toujours vers l'étage 1.
 
+### Explication et comparaison
+
+Deux usages du modèle qui ne passent pas par le pipeline de chat, parce qu'il
+n'y a rien à converser :
+
+- `POST /laws/{id}/explain-article` explique un article en langage courant à
+  partir de son texte, de ses deux voisins et des métadonnées du document
+  (`app/services/explanation_service.py`). L'article est résolu en base par son
+  numéro ; à défaut, l'extrait envoyé par la page sert de repli, mais seulement
+  après vérification qu'il provient bien du document — sans ce contrôle, la
+  route serait un proxy de prompt gratuit.
+- `POST /compare` compare deux régimes sur des critères imposés
+  (`app/services/comparison_service.py`). **Une recherche par sujet**, l'une
+  après l'autre : une requête unique mélangeant les deux termes rendait six
+  articles d'un régime contre trois de l'autre, en ratant le bloc qui définissait
+  le second. La sortie est contrainte par un schéma JSON où chaque cellule doit
+  citer ses articles ; un numéro cité sans article correspondant est renvoyé
+  dans `unmatched_citations` plutôt qu'avalé, et le texte intégral des sources
+  accompagne chaque cellule pour que le lecteur vérifie lui-même.
+
+Aucun des deux n'est mis en cache : chaque appel dépense un appel Gemini.
+
 ### Mesure
 
 `RRF_K`, `TEXT_WEIGHT` et `SEMANTIC_WEIGHT` ne sont **pas** calibrés sur ce

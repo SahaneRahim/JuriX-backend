@@ -65,8 +65,12 @@ def try_resolve_domain_id(session: Session, domain: str) -> Optional[int]:
     """
     Variante non levante : rend None et journalise si le domaine manque.
 
-    Utilisee par le pipeline d'ingestion, ou l'absence d'une categorie ne doit
-    pas faire echouer le traitement d'un document par ailleurs valide.
+    Le pipeline d'ingestion ne l'appelle PAS, contrairement a ce que ce
+    docstring affirmait : il charge la table entiere par `load_domain_map`
+    parce qu'il a aussi besoin des identifiants des domaines suggeres, et il
+    trace lui-meme l'absence sur la loi. Cette fonction reste l'entree
+    naturelle pour un appelant qui ne resout qu'UN nom et ne veut pas gerer
+    l'exception — un futur endpoint d'administration, par exemple.
     """
     try:
         return resolve_domain_id(session, domain)

@@ -183,24 +183,6 @@ class FileUploadResult(BaseModel):
 # ============================================================================
 
 
-class FileUploadRequest(BaseModel):
-    """
-    Request schema for file upload (for documentation).
-    
-    Note: Actual upload uses multipart/form-data, not JSON.
-    This schema is for OpenAPI documentation only.
-    """
-
-    file: str = Field(..., description="File to upload (multipart/form-data)")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "file": "binary file data",
-            }
-        }
-
-
 # ============================================================================
 # Health Check Schema
 # ============================================================================

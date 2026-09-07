@@ -105,10 +105,3 @@ class UserWithToken(UserResponse):
 # ==================== Admin Schemas ====================
 
 
-class UserAdminResponse(UserResponse):
-    """Schema for admin view of user (includes all fields)."""
-
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True

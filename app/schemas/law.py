@@ -74,21 +74,6 @@ class ArticleBase(BaseModel):
     order: int = Field(..., ge=1, description="Display order within the law")
 
 
-class ArticleCreate(ArticleBase):
-    """Schema for creating a new article."""
-
-    pass
-
-
-class ArticleUpdate(BaseModel):
-    """Schema for updating an existing article."""
-
-    number: Optional[str] = Field(None, min_length=1, max_length=64)
-    title: Optional[str] = Field(None, max_length=200)
-    content: Optional[str] = Field(None, min_length=1)
-    order: Optional[int] = Field(None, ge=1)
-
-
 class ArticleResponse(ArticleBase):
     """Schema for article responses."""
 
@@ -330,111 +315,6 @@ class LawResponse(LawBase):
 # ============================================================================
 
 
-class LawFilters(BaseModel):
-    """
-    Query parameters for filtering and paginating law lists.
-
-    Supports:
-    - Language filtering (v2.1 feature)
-    - Category filtering
-    - Status filtering
-    - Type filtering
-    - Date range filtering
-    - Pagination
-    """
-
-    # v2.1 Language filtering
-    language: Optional[str] = Field(None, description="Filter by language (fr or en)")
-
-    # Category filtering
-    category_id: Optional[int] = Field(None, ge=1, description="Filter by category ID")
-
-    # Status filtering
-    status: Optional[str] = Field(None, description="Filter by status (draft, published, archived)")
-
-    # Type filtering
-    type: Optional[str] = Field(None, description="Filter by law type")
-
-    # Date range filtering
-    year_from: Optional[int] = Field(
-        None, ge=1900, le=2100, description="Filter laws published from this year"
-    )
-    year_to: Optional[int] = Field(
-        None, ge=1900, le=2100, description="Filter laws published up to this year"
-    )
-
-    # Pagination
-    page: int = Field(1, ge=1, description="Page number (1-indexed)")
-    per_page: int = Field(20, ge=1, le=100, description="Items per page (max 100)")
-
-    # Sorting
-    sort_by: Optional[str] = Field(
-        "created_at", description="Sort field (created_at, publication_date, title, reference)"
-    )
-    sort_order: Optional[str] = Field("desc", description="Sort order (asc or desc)")
-
-    @field_validator("language")
-    @classmethod
-    def validate_language(cls, v: Optional[str]) -> Optional[str]:
-        """Validate language filter."""
-        if v is None:
-            return v
-        if v.lower() not in {"fr", "en"}:
-            raise ValueError(f"Language must be 'fr' or 'en'. Got: {v}")
-        return v.lower()
-
-    @field_validator("status")
-    @classmethod
-    def validate_status(cls, v: Optional[str]) -> Optional[str]:
-        """Validate status filter."""
-        if v is None:
-            return v
-        # Statuts du cycle de vie d'ingestion inclus : un document passe par
-        # pending -> processing -> published | refused. Sans eux, LawResponse
-        # rejetait sa propre reponse (erreur 500) des qu'un document etait en
-        # cours de traitement ou en echec — donc invisible dans l'admin, qui
-        # est justement l'endroit ou il faut le suivre.
-        allowed_statuses = {
-            "draft", "published", "archived",
-            "pending", "processing", "refused",
-        }
-        if v.lower() not in allowed_statuses:
-            raise ValueError(f"Status must be one of: {', '.join(allowed_statuses)}. Got: {v}")
-        return v.lower()
-
-    @field_validator("sort_by")
-    @classmethod
-    def validate_sort_by(cls, v: Optional[str]) -> str:
-        """Validate sort field."""
-        if v is None:
-            return "created_at"
-        allowed_fields = {"created_at", "publication_date", "title", "reference", "updated_at"}
-        if v.lower() not in allowed_fields:
-            raise ValueError(f"sort_by must be one of: {', '.join(allowed_fields)}. Got: {v}")
-        return v.lower()
-
-    @field_validator("sort_order")
-    @classmethod
-    def validate_sort_order(cls, v: Optional[str]) -> str:
-        """Validate sort order."""
-        if v is None:
-            return "desc"
-        if v.lower() not in {"asc", "desc"}:
-            raise ValueError(f"sort_order must be 'asc' or 'desc'. Got: {v}")
-        return v.lower()
-
-    @field_validator("year_to")
-    @classmethod
-    def validate_year_range(cls, v: Optional[int], info) -> Optional[int]:
-        """Ensure year_to >= year_from if both provided."""
-        if v is None:
-            return v
-        year_from = info.data.get("year_from")
-        if year_from is not None and v < year_from:
-            raise ValueError(f"year_to ({v}) must be >= year_from ({year_from})")
-        return v
-
-
 class LawListResponse(BaseModel):
     """
     Paginated list of laws with metadata.
@@ -481,19 +361,6 @@ class CategoryStats(BaseModel):
     percentage: float = Field(0.0, ge=0.0, le=100.0)
 
 
-class LawStats(BaseModel):
-    """Overall statistics for the law database."""
-
-    total_laws: int = Field(0)
-    total_articles: int = Field(0)
-    by_language: LanguageStats
-    by_status: dict = Field(default_factory=dict)  # {"draft": 10, "published": 50, ...}
-    by_type: dict = Field(default_factory=dict)  # {"loi": 30, "décret": 20, ...}
-    top_categories: List[CategoryStats] = Field(default_factory=list)
-    avg_articles_per_law: float = Field(0.0)
-    latest_publication: Optional[date] = None
-
-
 class LawDetailResponse(LawResponse):
     """
     Detail d'un document, sommaire compris.
@@ -507,3 +374,75 @@ class LawDetailResponse(LawResponse):
         default_factory=list,
         description="Articles du document, dans l'ordre, avec leur page",
     )
+
+
+# ============================================================================
+# Explication d'article par le modele
+# ============================================================================
+
+
+class ArticleExplanationRequest(BaseModel):
+    """
+    Demande d'explication d'un article, envoyee par la page de lecture.
+
+    Le numero voyage dans le CORPS et non dans le chemin : `articles.number`
+    est un String(64) qui contient « 1er », « L 94 bis » ou « PREAMBULE ». En
+    segment d'URL il faudrait l'encoder, et un numero portant « / » ou « . »
+    produirait des surprises de routage. Ici il gagne en plus une borne.
+
+    `persona` n'est PAS un champ : le ton est fixe cote serveur. L'exposer
+    laisserait n'importe quel client changer la voix du produit depuis son
+    navigateur.
+    """
+
+    number: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="Numero de l'article, tel qu'affiche (« 35 », « 1er »)",
+    )
+    language: str = Field("fr", description="Langue de la reponse : fr ou en")
+    excerpt: Optional[str] = Field(
+        None,
+        max_length=12_000,
+        description=(
+            "Texte de l'article tel qu'affiche. Sert de repli quand la base n'a "
+            "pas de ligne pour ce numero ; sa provenance est verifiee."
+        ),
+    )
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, v: str) -> str:
+        """Seules les deux langues du corpus sont acceptees."""
+        if v.lower() not in {"fr", "en"}:
+            raise ValueError(f"Language must be 'fr' or 'en'. Got: {v}")
+        return v.lower()
+
+    @field_validator("number")
+    @classmethod
+    def validate_number(cls, v: str) -> str:
+        """Un numero fait d'espaces n'en est pas un."""
+        if not v.strip():
+            raise ValueError("Article number must not be blank")
+        return v.strip()
+
+
+class ArticleExplanationResponse(BaseModel):
+    """
+    Explication d'un article, rendue sur la page du document.
+
+    `resolved_from` dit par quelle voie l'article a ete retrouve : « database »
+    quand la ligne existe (cas nominal, autoritaire), « excerpt » quand seule
+    la page l'avait — un test peut ainsi prouver quel chemin s'est execute sans
+    lire les journaux.
+    """
+
+    law_id: int
+    article_id: Optional[int] = Field(None, description="None si resolu depuis l'extrait")
+    number: str = Field(..., description="Numero normalise reellement explique")
+    explanation: str
+    language: str
+    persona: str = Field(..., description="Toujours « citoyen »")
+    resolved_from: str = Field(..., description="database | excerpt")
+    generation_time_ms: int

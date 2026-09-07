@@ -15,6 +15,7 @@ from app.api.routes import (
     batch_upload,
     categories,
     classifier,
+    comparison,
     language,
     laws,
     ocr,
@@ -37,6 +38,32 @@ _DEV_SECRET_KEY = "dev_secret_key_change_in_production_with_openssl_rand_hex_32"
 # souvent ne libererait rien de plus, passer beaucoup moins souvent laisserait
 # s'accumuler une heure de lignes mortes.
 CACHE_CLEANUP_INTERVAL_S = 15 * 60
+STATS_AGGREGATION_INTERVAL_S = 24 * 60 * 60
+
+
+async def _agreger_les_statistiques() -> None:
+    """
+    Agregation quotidienne des statistiques par persona.
+
+    `PersonaService.aggregate_daily_stats` existait, etait testee, et son
+    docstring annoncait « appelee par une tache Celery chaque nuit ». Il n'y a
+    jamais eu de Celery dans ce depot : la table `persona_stats` restait vide et
+    les routes /personas/* qui la lisent rendaient des zeros. Meme motif que la
+    purge des caches ci-dessous : une promesse de traitement de fond non tenue
+    est pire qu'aucune promesse.
+    """
+    from app.core.database import AsyncSessionLocal
+    from app.services.persona_service import PersonaService
+
+    while True:
+        try:
+            await asyncio.sleep(STATS_AGGREGATION_INTERVAL_S)
+            async with AsyncSessionLocal() as session:
+                await PersonaService(session).aggregate_daily_stats()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"⚠️ Agregation des statistiques impossible: {e}")
 
 
 async def _purger_les_caches() -> None:
@@ -78,12 +105,14 @@ async def lifespan(app: FastAPI):
     # sans fin. Une colonne d'expiration non appliquee est pire que pas de
     # colonne du tout — elle laisse croire que le menage est fait.
     tache_menage = asyncio.create_task(_purger_les_caches())
+    tache_stats = asyncio.create_task(_agreger_les_statistiques())
     try:
         yield
     finally:
-        tache_menage.cancel()
-        with suppress(asyncio.CancelledError):
-            await tache_menage
+        for tache in (tache_menage, tache_stats):
+            tache.cancel()
+            with suppress(asyncio.CancelledError):
+                await tache
         # close_db() existait mais n'etait jamais appele : le pool de
         # connexions asyncpg n'etait jamais libere a l'arret. Dans le `finally`
         # pour qu'il s'execute meme si l'arret vient d'une exception.
@@ -140,6 +169,7 @@ app.include_router(categories.router, prefix="/api/v1/categories", tags=["catego
 app.include_router(articles.router, prefix="/api/v1/articles", tags=["articles"])
 app.include_router(personas.router, prefix="/api/v1/personas", tags=["personas"])
 app.include_router(rag.router, prefix="/api/v1/rag", tags=["rag", "chatbot"])
+app.include_router(comparison.router, prefix="/api/v1/compare", tags=["compare"])
 app.include_router(upload.router, prefix="/api/v1/upload", tags=["upload"])
 app.include_router(ocr.router, prefix="/api/v1/ocr", tags=["ocr"])
 app.include_router(laws.router, prefix="/api/v1/laws", tags=["laws"])

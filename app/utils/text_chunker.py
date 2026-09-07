@@ -7,7 +7,6 @@ common patterns: Article X, Art. X, Section X, etc.
 
 import logging
 import re
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -16,20 +15,6 @@ logger = logging.getLogger(__name__)
 class ArticleExtractionError(Exception):
     """Raised when article extraction fails."""
     pass
-
-
-@dataclass
-class ExtractedArticle:
-    """Represents a single extracted article."""
-    number: str
-    title: Optional[str]
-    content: str
-    position: int
-    parent_id: Optional[str]
-    section: Optional[str]
-    word_count: int
-    char_count: int
-    page_number: Optional[int] = None  # PDF page number (1-indexed) for navigation
 
 
 # Pattern constants - COMPREHENSIVE support for French and English variants
@@ -570,7 +555,6 @@ def _detect_article_pattern(text: str) -> Optional[re.Pattern]:
     # Les branches sont deja parenthesees et sans ancrage mutuellement exclusif ;
     # l'alternance les essaie dans l'ordre de ARTICLE_PATTERNS.
     return re.compile("|".join(retenus), re.IGNORECASE | re.MULTILINE)
-
 
 
 def _split_by_pattern(text: str, pattern: re.Pattern) -> List[Tuple[str, str]]:

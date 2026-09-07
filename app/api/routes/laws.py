@@ -4,6 +4,7 @@ API routes for Laws management.
 Endpoints:
 - GET /api/v1/laws - List laws with filters
 - GET /api/v1/laws/{id} - Get law detail with articles
+- POST /api/v1/laws/{id}/explain-article - Explain one article (Gemini)
 - POST /api/v1/admin/laws - Create law (admin only)
 - PUT /api/v1/admin/laws/{id} - Update law (admin only)
 - DELETE /api/v1/admin/laws/{id} - Delete law (admin only)
@@ -30,10 +31,19 @@ from app.core.database import AsyncSessionLocal, get_db
 from app.models.law import Law
 from app.models.user import User
 from app.schemas.law import (
+    ArticleExplanationRequest,
+    ArticleExplanationResponse,
     LawCreate,
     LawDetailResponse,
     LawResponse,
     LawUpdate,
+)
+from app.services.explanation_service import (
+    ArticleNotFoundError,
+    ExplanationError,
+    ExplanationOverloadedError,
+    ExplanationQuotaError,
+    ExplanationService,
 )
 from app.services.search_service import invalidate_search_cache
 from app.tasks.process_law import delete_from_search_index
@@ -195,6 +205,77 @@ async def get_law(
         logger.error(f"❌ Error fetching law {law_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error fetching law"
+        )
+
+
+def get_explanation_service(db: AsyncSession = Depends(get_db)) -> ExplanationService:
+    """Injection d'ExplanationService, calquee sur get_rag_service."""
+    return ExplanationService(db)
+
+
+@router.post("/{law_id}/explain-article", response_model=ArticleExplanationResponse)
+async def explain_article(
+    law_id: int,
+    request: ArticleExplanationRequest,
+    service: ExplanationService = Depends(get_explanation_service),
+) -> ArticleExplanationResponse:
+    """
+    Explique un article en langage courant, sur la page du document.
+
+    Le numero voyage dans le corps et non dans le chemin : `articles.number`
+    contient « 1er », « L 94 bis » ou « PREAMBULE », qu'il faudrait sinon
+    encoder.
+
+    Route PUBLIQUE, comme `GET /laws/{id}` et `POST /rag/ask` : l'explication
+    ne revele rien que la page ne montre deja. Elle depense en revanche un
+    appel Gemini a chaque fois, sur un quota partage avec le chat — il n'y a
+    volontairement aucun cache, c'est un choix produit assume.
+
+    Raises:
+        404: document ou article introuvable
+        429: quota de generation epuise
+        503: service de generation sature
+    """
+    try:
+        return await service.explain(
+            law_id=law_id,
+            number=request.number,
+            language=request.language,
+            excerpt=request.excerpt,
+        )
+
+    except ArticleNotFoundError as e:
+        logger.warning(f"⚠️ Explication impossible: {e}")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ExplanationQuotaError as e:
+        # 429 et non 500 : la cause est connue, elle se dit, et elle porte un
+        # delai. Meme traitement que /rag/ask, dont le quota est le meme.
+        logger.warning(f"⚠️ Quota epuise: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(e),
+            headers={"Retry-After": "60"},
+        )
+    except ExplanationOverloadedError as e:
+        # 503 et non 500 : le client sait qu'un nouvel essai a un sens.
+        logger.warning(f"⚠️ Generation saturee: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e),
+            headers={"Retry-After": "10"},
+        )
+    except ExplanationError as e:
+        logger.error(f"❌ Explication en echec: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        )
+    except Exception as e:
+        # `detail` ne reprend PAS le message : une erreur inattendue peut porter
+        # une cle ou un identifiant de projet, et cette route est publique.
+        logger.error(f"❌ Erreur inattendue: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur interne du serveur",
         )
 
 

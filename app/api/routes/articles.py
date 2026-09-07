@@ -33,18 +33,6 @@ class ExtractRequest(BaseModel):
         }
 
 
-class ArticleResult(BaseModel):
-    """Single extracted article."""
-    number: str
-    title: str | None
-    content: str
-    position: int
-    parent_id: str | None
-    section: str | None
-    word_count: int
-    char_count: int
-
-
 class ExtractResponse(BaseModel):
     """Response model for article extraction."""
     articles: List[Dict[str, Any]]
