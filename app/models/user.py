@@ -44,7 +44,16 @@ class User(Base):
     # Authentication
     email = Column(String(255), unique=True, index=True, nullable=False)
     username = Column(String(100), unique=True, index=True, nullable=False)
-    hashed_password = Column(String(255), nullable=False)
+    # NULLABLE : un compte cree par Google n'a pas de mot de passe. La
+    # contrainte CHECK `ck_users_au_moins_une_identite` garantit qu'un compte
+    # porte toujours au moins une identite — mot de passe ou Google.
+    hashed_password = Column(String(255), nullable=True)
+
+    # Claim `sub` du jeton d'identite Google, seul identifiant stable d'un
+    # compte Google (l'adresse e-mail peut changer chez eux). Unique et
+    # nullable : les comptes par mot de passe le laissent a NULL, et PostgreSQL
+    # tolere plusieurs NULL sur un index unique.
+    google_sub = Column(String(255), nullable=True, unique=True, index=True)
 
     # Profile
     full_name = Column(String(255), nullable=True)
@@ -68,9 +77,18 @@ class User(Base):
     last_login_at = Column(DateTime, nullable=True)
 
     # Relationships
-    conversations = relationship(
-        "Conversation", back_populates="user", cascade="all, delete-orphan", lazy="selectin"
-    )
+    #
+    # `lazy="raise"` et NON `selectin`. `get_current_user` charge cet objet a
+    # CHAQUE requete authentifiee : avec un chargement empresse, chacune
+    # tirait en plus toutes les conversations du compte — la liste que
+    # l'historique de chat fait precisement grossir, pour une relation que
+    # personne ne lit.
+    #
+    # La cascade ORM est retiree en meme temps, et c'est indissociable : elle
+    # exige de charger la collection pour supprimer un compte, ce que `raise`
+    # interdit. La suppression des conversations d'un compte est desormais
+    # EXPLICITE dans `admin.delete_user`.
+    conversations = relationship("Conversation", back_populates="user", lazy="raise")
 
     def __repr__(self) -> str:
         return f"<User(id={self.id}, email='{self.email}', role='{self.role}')>"

@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import (
@@ -27,8 +27,10 @@ from app.core.auth import (
     hash_password,
 )
 from app.core.database import get_db, health_check_db
+from app.models.conversation import Conversation
 from app.models.user import User
 from app.schemas.user import UserCreate, UserResponse, UserUpdate
+from app.services.user_identity import normaliser_email
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +98,10 @@ async def create_user(
         )
 
     user = User(
-        email=payload.email,
+        # Normalisee A L'ECRITURE : `_authenticate` cherche avec
+        # `email.lower().strip()`. Sans cela, un compte cree avec « Jean@X.cm »
+        # ne pouvait JAMAIS se connecter — le select ne le trouvait pas.
+        email=normaliser_email(payload.email),
         username=payload.username,
         full_name=payload.full_name,
         role=payload.role,
@@ -200,6 +205,17 @@ async def delete_user(
                 detail="Impossible de supprimer le dernier superadmin actif",
             )
 
+    # Suppression EXPLICITE des conversations, en remplacement de la cascade
+    # ORM retiree de `User.conversations` (voir le commentaire du modele : la
+    # cascade obligeait a charger toutes les conversations a chaque requete
+    # authentifiee). Un `DELETE` en masse fait le meme travail sans rien
+    # charger, et les messages suivent par la contrainte ON DELETE CASCADE.
+    #
+    # Sans cette ligne, la contrainte `ON DELETE SET NULL` de la colonne
+    # laisserait les conversations orphelines en base apres la suppression du
+    # compte — c'est-a-dire des questions juridiques conservees alors que leur
+    # auteur a demande son effacement.
+    await db.execute(delete(Conversation).where(Conversation.user_id == user.id))
     await db.delete(user)
     await db.commit()
     logger.info(f"🗑️ Compte supprimé : {user.email}")

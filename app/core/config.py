@@ -98,7 +98,38 @@ class Settings(BaseSettings):
     # Security
     SECRET_KEY: str = "dev_secret_key_change_in_production_with_openssl_rand_hex_32"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
+    # DUREE DE SESSION, en minutes, et il y en a DEUX a dessein.
+    #
+    # 30 minutes rendait le produit inutilisable : l'interet d'un compte est de
+    # retrouver ses conversations, or l'utilisateur etait deconnecte sans
+    # preavis en pleine session. 30 jours est la norme des produits grand
+    # public.
+    #
+    # Mais le meme reglage regissait aussi l'administration, et les JWT sont
+    # SANS ETAT ici : /auth/logout ne revoque rien, le jeton vit en clair dans
+    # localStorage, il n'existe aucune liste de revocation. Un jeton superadmin
+    # vole serait donc exploitable un mois. D'ou la seconde valeur, bien plus
+    # courte, appliquee des que le compte porte un role privilegie.
+    #
+    # Levier d'urgence a connaitre : `get_current_user` relit l'utilisateur en
+    # base a chaque requete et leve 403 si `is_active` est faux. DESACTIVER UN
+    # COMPTE REVOQUE DONC SES JETONS IMMEDIATEMENT.
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 43200  # 30 jours
+    ADMIN_TOKEN_EXPIRE_MINUTES: int = 720  # 12 heures
+
+    # Identifiant client OAuth de la console Google Cloud (type « Web
+    # application »). VIDE = connexion Google desactivee, et POST /auth/google
+    # repond 503.
+    #
+    # Il n'y a PAS de client secret : le mode « credential » de Google Identity
+    # Services rend le jeton d'identite a une fonction JavaScript, sans
+    # redirection. Un secret ici ne servirait a rien.
+    #
+    # PIEGE : `class Config` ci-dessous porte `extra = "ignore"`. Une cle du
+    # .env qui n'est pas DECLAREE dans cette classe est silencieusement
+    # ignoree — c'est pourquoi celle-ci doit y figurer.
+    GOOGLE_CLIENT_ID: str = ""
 
     # QODO_API_KEY, ZEROSTEP_API_KEY et CORS_ORIGINS ont ete retires : les deux
     # premiers n'etaient lus nulle part, et main.py lit ALLOWED_ORIGINS, pas

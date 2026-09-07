@@ -24,6 +24,15 @@ python-jose[cryptography]>=3.3.0,<4.0.0
 # et le hachage echouait totalement avec bcrypt 5.x.
 bcrypt>=4.0,<6.0
 python-multipart>=0.0.6,<1.0.0
+# Verification des jetons d'identite Google (connexion « Se connecter avec
+# Google »). L'extra [requests] tire le transport HTTP dont
+# `google.auth.transport.requests` a besoin.
+#
+# ATTENTION : google-auth etait DEJA installe dans l'environnement, tire
+# transitivement par google-genai, mais declare nulle part. Dependre d'un
+# paquet transitif est un piege — il disparait le jour ou la dependance qui
+# l'amenait change de version.
+google-auth[requests]>=2.35,<3.0
 
 # ── Document Processing ───────────────────────────────────────────────────────
 pypdf>=3.17.0,<4.0.0

@@ -113,6 +113,32 @@ class RAGOverloadedError(Exception):
     """
 
 
+def titre_de_conversation(question: str, longueur_max: int = 80) -> str:
+    """
+    Titre affiche dans la liste, tire de la premiere question.
+
+    Coupe sur une FRONTIERE DE MOT : une troncature brute au milieu d'un mot
+    donne des titres illisibles dans un panneau etroit.
+    """
+    propre = " ".join((question or "").split())
+    if not propre:
+        return "Conversation"
+    if len(propre) <= longueur_max:
+        return propre
+    coupe = propre[:longueur_max].rsplit(" ", 1)[0]
+    return (coupe or propre[:longueur_max]) + "…"
+
+
+class ConversationInterdite(Exception):
+    """
+    La conversation demandee appartient a quelqu'un d'autre.
+
+    Volontairement PAS une sous-classe de `RAGServiceError` : la route la
+    traduit en 404, et le `except RAGServiceError` generique qui rend un 500 ne
+    doit pas l'avaler.
+    """
+
+
 class RAGServiceError(Exception):
     """Base exception for RAG service."""
     pass
@@ -175,14 +201,18 @@ class RAGService:
         
         return " ".join(keywords[:10])  # Limit to 10 keywords
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, user_id: Optional[int] = None):
         """
         Initialize RAG service.
 
         Args:
             db: Async database session
+            user_id: proprietaire des conversations creees ou reprises. `None`
+                = requete anonyme. LE DEFAUT EST INDISPENSABLE : les tests
+                existants construisent `RAGService(mock_db_session)`.
         """
         self.db = db
+        self.user_id = user_id
         self.llm = get_gemini_service()
         self.search_service = SearchService(db)
 
@@ -238,6 +268,11 @@ class RAGService:
                 retrieval_time_ms, start_time
             )
 
+        except ConversationInterdite:
+            # DOIT PASSER AVANT `except Exception` : sinon le refus
+            # d'appartenance est retraduit en RAGServiceError, donc rendu en
+            # 500 par la route au lieu du 404 qui ne revele rien.
+            raise
         except GeminiQuotaError as e:
             logger.warning(f"⚠️ Quota de generation epuise: {e}")
             raise RAGQuotaError(str(e)) from e
@@ -696,6 +731,33 @@ class RAGService:
             conversation = result.unique().scalar_one_or_none()
 
             if conversation:
+                # CONTROLE D'APPARTENANCE. Sans lui, poster le `session_id`
+                # d'un tiers chargeait sa conversation ET en reinjectait les
+                # cinq derniers messages dans le prompt : le contenu d'autrui
+                # ressortait dans la reponse generee.
+                #
+                # `user_id` NULL signifie « anonyme, appartient a qui detient le
+                # session_id » — les conversations d'avant les comptes restent
+                # donc accessibles, sans quoi cette regle les aurait toutes
+                # rendues muettes.
+                if conversation.user_id not in (None, self.user_id):
+                    logger.warning(
+                        "⛔ Conversation %s refusee : appartient a un autre compte",
+                        session_id,
+                    )
+                    raise ConversationInterdite(session_id)
+
+                # ADOPTION : une conversation anonyme reprise par un compte lui
+                # est rattachee. C'est ce qui permet de discuter sans compte,
+                # puis de s'inscrire en gardant le fil.
+                if conversation.user_id is None and self.user_id is not None:
+                    conversation.user_id = self.user_id
+                    logger.info(
+                        "🔗 Conversation %s rattachee au compte %s",
+                        session_id,
+                        self.user_id,
+                    )
+
                 # Get last N messages
                 msg_stmt = (
                     select(Message)
@@ -713,7 +775,8 @@ class RAGService:
         conversation = Conversation(
             session_id=session_id or str(uuid.uuid4()),
             persona=persona,
-            language=language
+            language=language,
+            user_id=self.user_id,
         )
         self.db.add(conversation)
         await self.db.flush()
@@ -1151,6 +1214,12 @@ class RAGService:
         generation_time_ms: int
     ):
         """Save question and answer to database."""
+        # Titre de la conversation, ecrit UNE SEULE FOIS. `_save_interaction`
+        # est le point de passage commun a `ask`, `ask_stream` et
+        # `_handle_no_results` : le poser ici couvre les trois chemins.
+        if conversation.title is None:
+            conversation.title = titre_de_conversation(question)
+
         # User message
         user_msg = Message(
             conversation_id=conversation.id,

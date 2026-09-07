@@ -45,6 +45,10 @@ def _prepare(password: str) -> bytes:
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
+# Variante tolerante : `auto_error=False` rend None au lieu de lever 401 quand
+# l'en-tete Authorization est absent. Utilisee par `get_current_user_optional`.
+_oauth2_optionnel = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
+
 # JWT settings — lus depuis la configuration.
 # Auparavant ALGORITHM et ACCESS_TOKEN_EXPIRE_MINUTES etaient codes en dur ici
 # (7 jours) alors que config.py declare 30 minutes : les deux valeurs se
@@ -79,11 +83,34 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     Returns:
         True if password matches, False otherwise
     """
+    # Un compte cree par Google n'a PAS de mot de passe : `hashed_password` est
+    # NULL. Sans ce controle, `.encode()` leve un AttributeError — que le
+    # `except (ValueError, TypeError)` ci-dessous n'attrape pas — et la simple
+    # tentative de connexion par mot de passe sur un compte Google repondait 500.
+    if not hashed_password:
+        return False
+
     try:
         return bcrypt.checkpw(_prepare(plain_password), hashed_password.encode("utf-8"))
     except (ValueError, TypeError):
         # Empreinte illisible ou tronquee : on refuse plutot que de propager.
         return False
+
+
+def duree_de_session(user: User) -> timedelta:
+    """
+    Duree de vie du jeton, selon le privilege du compte.
+
+    Les valeurs sont lues sur `settings` A L'APPEL et non a l'import : les
+    constantes de module ci-dessus sont figees au chargement, et un test qui
+    modifierait le reglage ne verrait rien changer.
+    """
+    minutes = (
+        settings.ADMIN_TOKEN_EXPIRE_MINUTES
+        if user.is_admin()
+        else settings.ACCESS_TOKEN_EXPIRE_MINUTES
+    )
+    return timedelta(minutes=minutes)
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -152,6 +179,28 @@ async def get_current_user(
         )
 
     return user
+
+
+async def get_current_user_optional(
+    token: Optional[str] = Depends(_oauth2_optionnel), db: AsyncSession = Depends(get_db)
+) -> Optional[User]:
+    """
+    L'utilisateur courant, ou None quand la requete est anonyme.
+
+    Existe pour les routes qui doivent servir les deux publics — le chat reste
+    utilisable sans compte, mais doit rattacher la conversation quand il y en a
+    un.
+
+    LA DISTINCTION QUI COMPTE : pas d'en-tete `Authorization` rend `None` ; un
+    en-tete PRESENT mais dont le jeton est invalide ou expire leve 401, jamais
+    `None`. Degrader silencieusement en anonyme serait le pire comportement :
+    l'utilisateur croirait sa conversation enregistree alors qu'elle partirait
+    en `user_id` NULL, invisible dans sa liste. Le front sait deja traiter un
+    401 (`apiFetch` : deconnexion puis redirection).
+    """
+    if token is None:
+        return None
+    return await get_current_user(token=token, db=db)
 
 
 async def get_current_active_user(current_user: User = Depends(get_current_user)) -> User:

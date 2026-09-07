@@ -30,7 +30,8 @@ class RAGRequest(BaseModel):
     )
     session_id: Optional[str] = Field(
         None,
-        description="Session ID for conversation continuity"
+        max_length=100,
+        description="Session ID for conversation continuity",
     )
     stream: bool = Field(
         False,
@@ -178,10 +179,30 @@ class MessageResponse(BaseModel):
     }
 
 
+class ConversationSummary(BaseModel):
+    """
+    Une conversation dans la liste laterale — sans ses messages.
+
+    Le detail complet passe par `ConversationResponse`. Charger les messages
+    ici ferait transiter tout l'historique du compte a chaque ouverture du
+    panneau.
+    """
+
+    session_id: str
+    title: Optional[str] = None
+    persona: str
+    language: str
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class ConversationResponse(BaseModel):
     """Conversation history response."""
 
     session_id: str
+    title: Optional[str] = None
     persona: str
     language: str
     created_at: datetime

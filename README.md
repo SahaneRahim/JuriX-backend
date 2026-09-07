@@ -92,13 +92,71 @@ JWT porteur, trois rôles : `user`, `admin`, `superadmin`.
 
 | Route | Usage |
 |---|---|
+| `POST /api/v1/auth/signup` | Inscription publique : nom, adresse, mot de passe |
+| `POST /api/v1/auth/google` | Connexion par Google Identity Services |
 | `POST /api/v1/auth/login` | Formulaire OAuth2 (utilisé par `/docs`) |
 | `POST /api/v1/auth/login/json` | JSON (utilisé par le front) |
 | `GET /api/v1/auth/me` | Compte associé au jeton |
 
 Les écritures, les endpoints d'administration, l'OCR et l'upload exigent un
-rôle administrateur. Il n'existe pas d'inscription publique : les comptes sont
-créés par `POST /api/v1/admin/users` ou par `scripts/create_admin.py`.
+rôle administrateur. L'inscription publique, elle, écrit `role: "user"` côté
+serveur : son schéma n'expose pas ce champ et refuse toute clé inconnue.
+
+**Deux durées de session.** 30 jours pour un compte ordinaire — l'intérêt d'un
+compte étant de retrouver ses conversations, être déconnecté toutes les 30
+minutes le rendait inutilisable. 12 heures dès que le compte porte un rôle
+privilégié : les JWT sont sans état ici, `/logout` ne révoque rien, et il
+n'existe aucune liste de révocation.
+
+**Levier d'urgence :** `get_current_user` relit l'utilisateur en base à chaque
+requête et refuse un compte inactif. Désactiver un compte révoque donc ses
+jetons immédiatement — c'est le seul moyen d'annuler une session en cours sans
+changer `SECRET_KEY`, ce qui déconnecterait tout le monde.
+
+### Connexion Google
+
+Pas de Firebase : le navigateur obtient un jeton d'identité de Google, le
+serveur le vérifie avec `google-auth`, puis émet le JWT maison. Une dépendance,
+zéro paquet npm, et **un seul fichier d'utilisateurs**.
+
+Console Google Cloud, une fois : écran de consentement *External*, périmètres
+`openid email profile` uniquement, puis un identifiant client OAuth de type
+*Web application* dont les origines JavaScript autorisées couvrent
+`http://localhost:5173`, `http://localhost:4173` et le domaine de production.
+Ni URI de redirection, ni client secret. Reporter l'identifiant dans
+`GOOGLE_CLIENT_ID` (backend) et `VITE_GOOGLE_CLIENT_ID` (frontend).
+
+`GOOGLE_CLIENT_ID` vide ⇒ `/auth/google` répond 503 et le bouton n'est pas
+rendu ; le reste fonctionne. Ce n'est pas une commodité : vérifier un jeton
+sans audience acceptrait n'importe quel jeton Google émis pour n'importe quelle
+application.
+
+Un compte créé par mot de passe qui se connecte ensuite par Google est **lié**
+au même compte, et garde son mot de passe. L'inverse est refusé en 409 : sans
+vérification d'adresse de notre côté, autoriser un mot de passe sur une adresse
+déjà rattachée à Google serait une prise de contrôle de compte.
+
+### Mot de passe oublié
+
+**Il n'y a aucune infrastructure d'envoi d'e-mail**, donc ni vérification
+d'adresse, ni lien de réinitialisation. Deux conséquences assumées :
+
+- `is_verified` ne vaut `true` que lorsque Google a affirmé `email_verified`.
+  Il ne conditionne rien.
+- La seule remise à zéro est administrative :
+  `PUT /api/v1/admin/users/{id}` accepte un champ `password`. Pour un compte
+  lié à Google, se reconnecter par Google fait office de récupération.
+
+### Conversations et appartenance
+
+`Conversation.user_id` est le propriétaire ; `NULL` signifie « anonyme,
+appartient à qui détient le `session_id` ». Une conversation demandée par un
+autre compte répond **404**, jamais 403 — un 403 confirmerait l'existence du
+`session_id` et permettrait de les énumérer.
+
+Le chat reste utilisable **sans compte**. Une conversation anonyme reprise par
+un compte connecté lui est rattachée : on peut discuter, puis s'inscrire en
+gardant le fil.
 
 ## Chaîne d'ingestion
 

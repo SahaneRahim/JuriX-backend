@@ -41,13 +41,21 @@ class Conversation(Base):
     user_id = Column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # Titre affiche dans la liste des conversations, tire de la premiere
+    # question et ecrit UNE SEULE FOIS (rag_service._save_interaction). NULL
+    # pour les conversations anonymes et pour tout ce qui precede cette
+    # colonne — elles n'apparaissent dans la liste de personne.
+    title = Column(String(120), nullable=True)
     persona = Column(String(50), nullable=False)  # citoyen/avocat/entrepreneur/étudiant
     language = Column(String(2), nullable=False, default="fr")  # fr/en
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    user = relationship("User", back_populates="conversations", lazy="selectin")
+    # `lazy="raise"` : aucun code ne lit cette relation, et un chargement
+    # empresse ajoutait une requete par conversation remontee. Y acceder un
+    # jour levera une erreur explicite plutot que de couter en silence.
+    user = relationship("User", back_populates="conversations", lazy="raise")
     messages = relationship(
         "Message",
         back_populates="conversation",

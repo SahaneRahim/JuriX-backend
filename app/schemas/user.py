@@ -10,9 +10,27 @@ Date: 2026-01-12
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 # ==================== Base Schemas ====================
+
+
+def valider_force_du_mot_de_passe(v: str) -> str:
+    """
+    Politique de mot de passe, partagee par TOUS les points d'entree.
+
+    Elle vivait uniquement dans `UserCreate.validate_password`, donc dans la
+    seule creation par un administrateur. L'inscription publique ne peut pas
+    heriter de ce schema (voir `SignupRequest`), et une seconde copie aurait
+    diverge. Une violation produit un 422 Pydantic, pas un 400.
+    """
+    if not any(c.isupper() for c in v):
+        raise ValueError("Password must contain at least one uppercase letter")
+    if not any(c.islower() for c in v):
+        raise ValueError("Password must contain at least one lowercase letter")
+    if not any(c.isdigit() for c in v):
+        raise ValueError("Password must contain at least one digit")
+    return v
 
 
 class UserBase(BaseModel):
@@ -48,13 +66,7 @@ class UserCreate(UserBase):
     @classmethod
     def validate_password(cls, v: str) -> str:
         """Validate password strength."""
-        if not any(c.isupper() for c in v):
-            raise ValueError("Password must contain at least one uppercase letter")
-        if not any(c.islower() for c in v):
-            raise ValueError("Password must contain at least one lowercase letter")
-        if not any(c.isdigit() for c in v):
-            raise ValueError("Password must contain at least one digit")
-        return v
+        return valider_force_du_mot_de_passe(v)
 
 
 class UserUpdate(BaseModel):
@@ -105,3 +117,60 @@ class UserWithToken(UserResponse):
 # ==================== Admin Schemas ====================
 
 
+# ============================================================================
+# Inscription publique et connexion Google
+# ============================================================================
+
+
+class SignupRequest(BaseModel):
+    """
+    Inscription publique : nom, adresse, mot de passe. Rien d'autre.
+
+    N'HERITE PAS DE `UserBase`, ET C'EST LE POINT CENTRAL. `UserBase` porte
+    `role` (motif `^(user|admin|superadmin)$`, defaut `"user"`) et `UserCreate`
+    y ajoute `is_active` — deux champs FOURNIS PAR LE CLIENT. Reutiliser
+    `UserCreate` pour une route publique aurait laisse n'importe qui poster
+    `{"role": "superadmin"}` et s'ouvrir l'administration. La seule protection
+    existante est imperative, dans `admin.create_user`, et ne couvre pas cette
+    route.
+
+    Ici ces champs N'EXISTENT PAS, et `extra="forbid"` fait de leur envoi un
+    422 plutot qu'un silence : la tentative laisse une trace dans les journaux
+    d'acces au lieu d'etre ignoree sans que personne ne le sache jamais.
+
+    `username` n'est pas demande non plus : il est derive de l'adresse par
+    `app/services/user_identity.py`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str = Field(..., min_length=2, max_length=255)
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=100)
+
+    @field_validator("password")
+    @classmethod
+    def valider_mot_de_passe(cls, v: str) -> str:
+        return valider_force_du_mot_de_passe(v)
+
+    @field_validator("full_name")
+    @classmethod
+    def valider_nom(cls, v: str) -> str:
+        nettoye = " ".join(v.split())
+        if len(nettoye) < 2:
+            raise ValueError("Full name must not be blank")
+        return nettoye
+
+
+class GoogleAuthRequest(BaseModel):
+    """
+    Le jeton d'identite rendu par Google Identity Services.
+
+    Borne des deux cotes : un jeton Google fait environ un kilo-octet. Sans
+    plafond, on accepterait de verifier cryptographiquement un megaoctet
+    envoye par n'importe qui.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    credential: str = Field(..., min_length=100, max_length=4096)
