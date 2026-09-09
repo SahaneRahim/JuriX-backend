@@ -34,10 +34,14 @@ logger = logging.getLogger(__name__)
 _DEV_SECRET_KEY = "dev_secret_key_change_in_production_with_openssl_rand_hex_32"
 
 
-# Intervalle de purge. Le cache de recherche vit cinq minutes ; passer plus
-# souvent ne libererait rien de plus, passer beaucoup moins souvent laisserait
-# s'accumuler une heure de lignes mortes.
-CACHE_CLEANUP_INTERVAL_S = 15 * 60
+# Intervalle de purge : desormais `settings.CACHE_CLEANUP_INTERVAL_S`, lu A
+# CHAQUE TOUR de boucle et non a l'import. Une constante de module est figee au
+# chargement, donc ni reglable par l'environnement ni modifiable par un test.
+#
+# Le cache de recherche vit cinq minutes ; passer plus souvent ne libererait
+# rien de plus. Effet de bord utile en production : cette boucle touche la base
+# regulierement, ce qui empeche un hebergeur gratuit de mettre le projet en
+# pause pour inactivite.
 STATS_AGGREGATION_INTERVAL_S = 24 * 60 * 60
 
 
@@ -73,7 +77,7 @@ async def _purger_les_caches() -> None:
 
     while True:
         try:
-            await asyncio.sleep(CACHE_CLEANUP_INTERVAL_S)
+            await asyncio.sleep(settings.CACHE_CLEANUP_INTERVAL_S)
             async with AsyncSessionLocal() as session:
                 supprimees = await cleanup_expired_cache(session)
             if supprimees:

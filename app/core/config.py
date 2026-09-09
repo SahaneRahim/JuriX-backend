@@ -1,6 +1,12 @@
 """Configuration application - Toutes les variables d'environnement."""
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
+
+# Parametres TLS que le pilote asyncpg ne connait pas. Au niveau module et non
+# dans la classe : pydantic transforme tout attribut de classe a underscore
+# initial en ModelPrivateAttr, qui n'est pas iterable.
+_PARAMS_QUI_FUIENT = ("sslmode", "channel_binding")
 
 
 class Settings(BaseSettings):
@@ -76,6 +82,24 @@ class Settings(BaseSettings):
     # numero de page explicite la ou LlamaParse n'en donnait aucun.
     # Cache d'extraction par sha256 — evite de repayer un fichier deja traite
     OCR_CACHE_DIR: str = "./data/ocr_cache"
+
+    # ---- Documents d'origine (PDF) ----
+    # Racine HTTPS du magasin de documents. VIDE = les PDF sont lus sur le
+    # disque local, comportement historique : le developpement ne change pas et
+    # aucun test existant ne bouge. NON VIDE = ils sont recuperes en HTTPS.
+    #
+    # Meme discipline que GOOGLE_CLIENT_ID plus bas : vide, la fonctionnalite
+    # est INERTE, elle ne degrade rien. C'est ce qui rend le magasin
+    # interchangeable — Supabase Storage aujourd'hui, un autre demain, sans
+    # toucher une ligne de code.
+    DOCUMENTS_BASE_URL: str = ""
+    # Plafond du cache disque des documents telecharges, en Mo. 0 le desactive,
+    # et chaque rendu de page retelecharge alors le PDF entier.
+    DOCUMENTS_CACHE_MAX_MB: int = 96
+    # Repertoire du cache. /tmp est inscriptible dans le conteneur, et son
+    # caractere ephemere est sans consequence : le cache se reconstruit.
+    DOCUMENTS_CACHE_DIR: str = "/tmp/jurix-docs"
+    DOCUMENTS_FETCH_TIMEOUT_S: int = 30
     # Pages envoyees par appel a Gemini. La limite du modele est de 65 536
     # jetons EN SORTIE ; a ~2400 caracteres par page, 20 pages produisent
     # ~13 000 jetons, avec de la marge pour la reflexion interne. Le palier
@@ -131,6 +155,37 @@ class Settings(BaseSettings):
     # ignoree — c'est pourquoi celle-ci doit y figurer.
     GOOGLE_CLIENT_ID: str = ""
 
+    # ---- Envoi de courriel (Brevo) ----
+    # VIDE = envoi desactive. L'inscription, la connexion et tout le reste
+    # continuent de fonctionner ; seuls la verification d'adresse et le lien de
+    # reinitialisation ne partent pas. Meme discipline que GOOGLE_CLIENT_ID.
+    #
+    # Le transport est l'API HTTPS de Brevo, JAMAIS smtplib : les hebergeurs
+    # gratuits (Render, Railway) bloquent les ports sortants 25, 465 et 587.
+    BREVO_API_KEY: str = ""
+    # L'adresse VERIFIEE dans Brevo. Sur un domaine gratuit (gmail.com), Brevo
+    # ne peut pas l'authentifier et reecrit l'expediteur en @brevosend.com —
+    # d'ou la mention "verifiez vos spams" affichee a l'utilisateur.
+    BREVO_SENDER_EMAIL: str = ""
+    BREVO_SENDER_NAME: str = "JuriX"
+    BREVO_TIMEOUT_S: int = 15
+    # Le palier gratuit plafonne a 300 messages par jour, PARTAGES entre
+    # transactionnel et campagnes. On s'arrete avant, pour garder de la marge.
+    BREVO_BUDGET_QUOTIDIEN: int = 200
+
+    # Racine des liens contenus dans les courriels. VIDE = le service REFUSE
+    # d'envoyer un message porteur d'un lien, plutot que d'expedier un lien
+    # mort : sans elle le lien se construirait sur l'hote de l'API, qui ne sert
+    # aucune page.
+    FRONTEND_BASE_URL: str = ""
+
+    # Intervalle de purge des caches, en secondes. Sorti de main.py pour etre
+    # reglable : une constante de module est figee a l'import, donc intestable.
+    # Cette boucle a un effet de bord utile en production — elle touche la base
+    # regulierement, ce qui empeche un hebergeur gratuit de mettre le projet en
+    # pause pour inactivite.
+    CACHE_CLEANUP_INTERVAL_S: int = 900
+
     # QODO_API_KEY, ZEROSTEP_API_KEY et CORS_ORIGINS ont ete retires : les deux
     # premiers n'etaient lus nulle part, et main.py lit ALLOWED_ORIGINS, pas
     # CORS_ORIGINS — cette liste, qui contenait un joker "*", ne s'appliquait a
@@ -143,6 +198,45 @@ class Settings(BaseSettings):
     # l'image Docker il est sur le PATH. Le defaut precedent etait un chemin
     # Windows, et n'etait de toute facon lu par personne.
     TESSERACT_PATH: str = ""
+
+    # ---- Gardes ----
+
+    @field_validator("DATABASE_URL")
+    @classmethod
+    def _refuser_les_parametres_qui_fuient(cls, v: str) -> str:
+        """
+        Interdit dans l'URL les parametres TLS que le pilote asyncpg ne connait pas.
+
+        MESURE, pas suppose. Le dialecte asyncpg de SQLAlchemy tient une liste
+        FERMEE de parametres qu'il consomme et convertit ; tout le reste part
+        tel quel en argument nomme vers `asyncpg.connect()`, dont la signature
+        n'a ni `sslmode`, ni `channel_binding`, ni `**kwargs` :
+
+            TypeError: connect() got an unexpected keyword argument 'sslmode'
+
+        L'erreur ne survient qu'au PREMIER acces a la base, donc bien apres un
+        demarrage en apparence reussi. Or c'est exactement ce que proposent les
+        boutons « copier » de Neon et de Supabase, et ce que .env.example
+        recommandait. D'ou ce refus au chargement de la configuration, avec le
+        remede dans le message.
+
+        `prepared_statement_cache_size` n'est PAS refuse : celui-la est bien
+        consomme par le dialecte (asyncpg.py, `kw.pop` puis `coerce_kw_type`),
+        et il est INDISPENSABLE au pooler Supabase en mode transaction, qui ne
+        supporte pas les instructions preparees.
+        """
+        if not v.startswith("postgresql+asyncpg://"):
+            return v
+        fautifs = [p for p in _PARAMS_QUI_FUIENT if f"{p}=" in v]
+        if fautifs:
+            raise ValueError(
+                f"DATABASE_URL porte {', '.join(fautifs)}, que le pilote asyncpg "
+                "refuse : la connexion echouerait avec « connect() got an "
+                "unexpected keyword argument ». Retirez ce parametre de l'URL et "
+                "posez la variable d'environnement PGSSLMODE=require, lue aussi "
+                "bien par asyncpg que par psycopg2."
+            )
+        return v
 
     class Config:
         env_file = ".env"

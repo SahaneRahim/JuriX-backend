@@ -49,7 +49,7 @@ Author: JuriX Team
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -69,13 +69,32 @@ from app.core.google_identity import (
     JetonGoogleInvalide,
     verifier_jeton_google,
 )
+from app.models.email_token import (
+    DUREE_REINITIALISATION,
+    DUREE_VERIFICATION,
+    REINITIALISATION_MOT_DE_PASSE,
+    VERIFICATION_ADRESSE,
+)
 from app.models.user import User
 from app.schemas.user import (
+    DemandeReinitialisation,
     GoogleAuthRequest,
+    MessageReponse,
+    ReinitialisationMotDePasse,
     SignupRequest,
     UserLogin,
     UserResponse,
     UserWithToken,
+    VerificationAdresse,
+)
+from app.services import email_service, email_templates
+from app.services.email_tokens_service import (
+    adresse_du_client,
+    compte_etrangle,
+    consommer_jeton,
+    creer_jeton,
+    invalider_les_autres,
+    ip_etranglee,
 )
 from app.services.user_identity import normaliser_email, username_pour_email
 
@@ -187,6 +206,8 @@ def _maintenant_naif() -> datetime:
 @router.post("/signup", response_model=UserWithToken, status_code=status.HTTP_201_CREATED)
 async def signup(
     payload: SignupRequest,
+    request: Request,
+    taches: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> UserWithToken:
     """
@@ -230,8 +251,10 @@ async def signup(
             full_name=payload.full_name,
             role="user",
             is_active=True,
-            # Aucune infrastructure d'e-mail : l'adresse n'est pas prouvée.
-            # `is_verified` ne devient vrai que par une affirmation de Google.
+            # L'adresse n'est pas encore prouvée. Elle le devient par le
+            # lien de confirmation envoyé juste après, par une affirmation
+            # `email_verified` de Google, ou par une réinitialisation de mot de
+            # passe réussie — trois preuves du contrôle de la boîte.
             is_verified=False,
             last_login_at=_maintenant_naif(),
         )
@@ -249,6 +272,14 @@ async def signup(
                 )
 
     await db.refresh(user)
+
+    # Le lien de confirmation part EN TÂCHE DE FOND, et son échec est avalé.
+    # Une panne de l'expéditeur ne doit pas faire échouer une inscription : le
+    # compte est créé, la session est ouverte, et l'utilisateur peut demander un
+    # renvoi. Sans clé configurée, aucun jeton n'est même créé et cette route se
+    # comporte exactement comme avant.
+    await _programmer_verification(taches, db, user, adresse_du_client(request))
+
     logger.info("🆕 Inscription : %s", user.email)
     return _reponse_avec_jeton(user)
 
@@ -362,3 +393,263 @@ async def logout(current_user: User = Depends(get_current_active_user)) -> None:
     """
     logger.info(f"👋 Déconnexion de {current_user.email}")
     return None
+
+
+# ==================== Courriel : vérification et réinitialisation ====================
+
+# Réponse unique des deux routes de demande. Toutes les branches la rendent —
+# adresse inconnue, compte désactivé, étranglement atteint, envoi réel — parce
+# qu'une réponse qui varierait ferait de ces routes un oracle permettant de
+# savoir quelles adresses possèdent un compte.
+_ACCUSE_RECEPTION = (
+    "Si un compte existe pour cette adresse, un lien vient d'être envoyé. "
+    "Pensez à vérifier vos courriers indésirables."
+)
+
+# Message unique pour toutes les causes de refus d'un jeton : illisible, expiré,
+# déjà utilisé, ou destiné à un autre usage. Même raisonnement que `_INVALID` :
+# détailler la cause n'aide que celui qui cherche à en fabriquer un.
+_JETON_REFUSE = "Ce lien n'est plus valide. Demandez-en un nouveau."
+
+
+async def _envoyer_sans_faire_echouer(destinataire: str, sujet: str, texte: str, html: str) -> None:
+    """
+    Envoie un message et avale toute panne.
+
+    Appelée en tâche de fond. Une panne Brevo ne doit JAMAIS remonter jusqu'à la
+    réponse HTTP : une inscription doit réussir même si l'expéditeur est en
+    panne, et une demande de réinitialisation doit rendre le même accusé de
+    réception que d'habitude, sinon l'échec devient lui-même un signal.
+    """
+    try:
+        await email_service.envoyer(destinataire, sujet, texte, html)
+    except email_service.CourrielNonConfigure as exc:
+        # État normal en développement et en test. Pas une erreur.
+        logger.debug("Envoi désactivé : %s", exc)
+    except (email_service.CourrielRefuse, email_service.CourrielInjoignable) as exc:
+        logger.warning("Courriel non délivré à %s : %s", destinataire, exc)
+
+
+async def _programmer_verification(
+    taches: BackgroundTasks,
+    db: AsyncSession,
+    user: User,
+    ip: str | None = None,
+    langue: str = "fr",
+) -> None:
+    """
+    Crée un jeton de vérification et programme son envoi.
+
+    Ne crée AUCUN jeton si l'envoi n'est pas configuré : une ligne en base pour
+    un message qui ne partira jamais est un déchet, et elle fausserait le compte
+    de l'étranglement.
+
+    L'ÉTRANGLEMENT PAR IP EST ICI, ET C'EST LE SEUL ENDROIT OÙ IL PEUT ÊTRE.
+    L'étranglement par compte ne protège rien sur ce chemin : chaque inscription
+    crée un compte NEUF, donc son compteur repart de zéro. Sans cette garde,
+    inscrire cent adresses différentes enverrait cent messages et épuiserait le
+    quota quotidien — qui est un plafond dur et partagé. La garde ne bloque pas
+    l'inscription elle-même, seulement le message : le compte est créé, la
+    session est ouverte, et un renvoi reste possible plus tard.
+    """
+    if not email_service.lien_configure():
+        return
+    if ip is not None and ip_etranglee(ip):
+        logger.info("Envoi de vérification étranglé pour %s", ip)
+        return
+    jeton = await creer_jeton(db, user, VERIFICATION_ADRESSE, DUREE_VERIFICATION, ip)
+    url = email_service.url_du_front(f"/verify-email/{jeton}")
+    sujet, texte, html = email_templates.verification_adresse(
+        user.full_name or user.username, url, langue
+    )
+    taches.add_task(_envoyer_sans_faire_echouer, user.email, sujet, texte, html)
+
+
+@router.post(
+    "/password/forgot",
+    response_model=MessageReponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def demander_reinitialisation(
+    payload: DemandeReinitialisation,
+    request: Request,
+    taches: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> MessageReponse:
+    """
+    Demande un lien de réinitialisation de mot de passe.
+
+    RÉPOND TOUJOURS 202, AVEC LE MÊME CORPS. Adresse inconnue, compte désactivé,
+    étranglement atteint, compte Google, envoi réel : cinq chemins, une seule
+    réponse. Un code ou un message différent transformerait cette route en
+    oracle d'énumération de comptes — et elle est bien plus facile à balayer
+    qu'un formulaire d'inscription.
+
+    LE CAS DU COMPTE GOOGLE. Un compte sans mot de passe n'a rien à
+    réinitialiser. Lui en greffer un lui ajouterait une porte d'entrée dont son
+    propriétaire n'a jamais voulu — donc une surface d'hameçonnage et de
+    bourrage d'identifiants supplémentaire. Il reçoit à la place un message qui
+    dit la vérité : reconnectez-vous avec Google. Ce message part quand même,
+    sans quoi l'absence de courriel distinguerait un compte Google d'une adresse
+    inconnue.
+    """
+    ip = adresse_du_client(request)
+    email = normaliser_email(payload.email)
+
+    # Étranglement par IP AVANT toute lecture : il attrape le balayage
+    # d'adresses inconnues, qui ne crée aucune ligne et échappe donc entièrement
+    # à l'étranglement par compte.
+    if ip_etranglee(ip):
+        logger.warning("Demandes de réinitialisation étranglées pour %s", ip)
+        return MessageReponse(message=_ACCUSE_RECEPTION)
+
+    user = (
+        await db.execute(select(User).where(User.email == email))
+    ).scalar_one_or_none()
+
+    if user is None or not user.is_active:
+        return MessageReponse(message=_ACCUSE_RECEPTION)
+
+    if not email_service.lien_configure():
+        logger.debug("Envoi non configuré : aucune réinitialisation possible")
+        return MessageReponse(message=_ACCUSE_RECEPTION)
+
+    if user.hashed_password is None:
+        sujet, texte, html = email_templates.compte_google(
+            user.full_name or user.username, email_service.url_du_front("/login")
+        )
+        taches.add_task(_envoyer_sans_faire_echouer, user.email, sujet, texte, html)
+        return MessageReponse(message=_ACCUSE_RECEPTION)
+
+    if await compte_etrangle(db, user.id, REINITIALISATION_MOT_DE_PASSE):
+        logger.info("Réinitialisation étranglée pour le compte %s", user.id)
+        return MessageReponse(message=_ACCUSE_RECEPTION)
+
+    jeton = await creer_jeton(db, user, REINITIALISATION_MOT_DE_PASSE, DUREE_REINITIALISATION, ip)
+    url = email_service.url_du_front(f"/reset-password/{jeton}")
+    sujet, texte, html = email_templates.reinitialisation(user.full_name or user.username, url)
+    taches.add_task(_envoyer_sans_faire_echouer, user.email, sujet, texte, html)
+
+    return MessageReponse(message=_ACCUSE_RECEPTION)
+
+
+@router.post(
+    "/password/reset",
+    response_model=MessageReponse,
+    status_code=status.HTTP_200_OK,
+)
+async def reinitialiser_mot_de_passe(
+    payload: ReinitialisationMotDePasse,
+    db: AsyncSession = Depends(get_db),
+) -> MessageReponse:
+    """
+    Pose un nouveau mot de passe à partir d'un jeton reçu par courriel.
+
+    Tout se passe dans UNE transaction : le mot de passe est écrit, le jeton est
+    consommé, les autres jetons de réinitialisation du compte sont invalidés, et
+    `is_verified` passe à vrai — recevoir ce courriel prouve le contrôle de la
+    boîte, exactement comme l'affirmation `email_verified` de Google.
+
+    LIMITE À CONNAÎTRE, ET ELLE N'EST PAS CACHÉE : les JWT sont sans état,
+    `/logout` ne révoque rien, il n'existe aucune liste de révocation, et la
+    session dure trente jours. **Changer son mot de passe ne déconnecte donc
+    personne** : un jeton déjà volé survit à la réinitialisation. Le seul levier
+    immédiat est de désactiver le compte, que `get_current_user` relit à chaque
+    requête. Le correctif propre est un numéro de version dans le claim, qui
+    dépasse ce lot — c'est une dette, pas un oubli.
+
+    Raises:
+        400: jeton illisible, expiré, déjà utilisé, ou d'un autre usage
+    """
+    ligne = await consommer_jeton(db, payload.token, REINITIALISATION_MOT_DE_PASSE)
+    if ligne is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_JETON_REFUSE)
+
+    user = (
+        await db.execute(select(User).where(User.id == ligne.user_id))
+    ).scalar_one_or_none()
+    if user is None or not user.is_active:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_JETON_REFUSE)
+
+    user.hashed_password = hash_password(payload.password)
+    user.is_verified = True
+    await invalider_les_autres(db, user.id, REINITIALISATION_MOT_DE_PASSE)
+    await db.commit()
+
+    logger.info("🔑 Mot de passe réinitialisé pour %s", user.email)
+    return MessageReponse(message="Mot de passe modifié. Vous pouvez vous connecter.")
+
+
+@router.post(
+    "/verify-email",
+    response_model=MessageReponse,
+    status_code=status.HTTP_200_OK,
+)
+async def verifier_adresse(
+    payload: VerificationAdresse,
+    db: AsyncSession = Depends(get_db),
+) -> MessageReponse:
+    """
+    Confirme une adresse à partir du jeton reçu par courriel.
+
+    POST ET NON GET, ET CE N'EST PAS UN DÉTAIL DE STYLE. Un
+    `GET /verify-email/<jeton>` serait déclenché par les analyseurs de liens —
+    Outlook Safe Links, passerelles de messagerie d'entreprise, aperçus — AVANT
+    que l'humain ne clique. Le jeton étant à usage unique, l'utilisateur
+    arriverait alors systématiquement sur « lien déjà utilisé ». Le lien du
+    courriel pointe donc vers une page du front, qui poste le jeton depuis le
+    navigateur.
+
+    Raises:
+        400: jeton illisible, expiré, déjà utilisé, ou d'un autre usage
+    """
+    ligne = await consommer_jeton(db, payload.token, VERIFICATION_ADRESSE)
+    if ligne is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_JETON_REFUSE)
+
+    user = (
+        await db.execute(select(User).where(User.id == ligne.user_id))
+    ).scalar_one_or_none()
+    if user is None:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_JETON_REFUSE)
+
+    user.is_verified = True
+    await db.commit()
+
+    logger.info("✅ Adresse vérifiée : %s", user.email)
+    return MessageReponse(message="Adresse confirmée.")
+
+
+@router.post(
+    "/verify-email/resend",
+    response_model=MessageReponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def renvoyer_verification(
+    request: Request,
+    taches: BackgroundTasks,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> MessageReponse:
+    """
+    Renvoie le lien de vérification au compte connecté.
+
+    Authentifiée, donc sans risque d'énumération — mais étranglée quand même :
+    le quota d'envoi est un plafond dur et partagé, qu'un seul compte ne doit
+    pas pouvoir épuiser.
+    """
+    if current_user.is_verified:
+        return MessageReponse(message="Adresse déjà confirmée.")
+
+    # L'étranglement par IP est appliqué par `_programmer_verification`, une
+    # seule fois : le vérifier aussi ici consommerait deux jetons pour une même
+    # requête et diviserait le plafond par deux sans que rien ne le dise.
+    if await compte_etrangle(db, current_user.id, VERIFICATION_ADRESSE):
+        return MessageReponse(message=_ACCUSE_RECEPTION)
+
+    await _programmer_verification(
+        taches, db, current_user, adresse_du_client(request)
+    )
+    return MessageReponse(message=_ACCUSE_RECEPTION)

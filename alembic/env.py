@@ -17,17 +17,45 @@ if config.config_file_name is not None:
 # add your model's MetaData object here
 # for 'autogenerate' support
 from app.core.database import Base
-from app.models import Article, Category, Conversation, Law, Message, User
+from app.models import (
+    Article,
+    Category,
+    Conversation,
+    EmailToken,
+    Law,
+    Message,
+    User,
+)
 
 target_metadata = Base.metadata
 
 # Override sqlalchemy.url from environment variable.
-# Neon gives postgresql+asyncpg:// URLs — convert to psycopg2-compatible for migrations.
+# L'application parle asyncpg ; Alembic a besoin d'un pilote synchrone.
 _db_url = os.environ.get("DATABASE_URL", "")
 if _db_url:
     # Alembic needs a sync driver: swap asyncpg with psycopg2
     _db_url = _db_url.replace("postgresql+asyncpg://", "postgresql://")
-    _db_url = _db_url.replace("postgres://", "postgresql://")  # Neon sometimes gives bare postgres://
+    _db_url = _db_url.replace("postgres://", "postgresql://")  # parfois donne en postgres:// nu
+
+    # LA CHAINE DE REQUETE EST RETIREE, et ce n'est pas une precaution de style.
+    #
+    # Echanger le schema sans toucher aux parametres laissait passer a psycopg2
+    # des options qu'il ne connait pas. Mesure :
+    #
+    #     postgresql://...?prepared_statement_cache_size=0
+    #     -> ProgrammingError: invalid dsn: invalid URI query parameter
+    #
+    # Or ce parametre est INDISPENSABLE cote application avec un pooler en mode
+    # transaction, qui ne supporte pas les instructions preparees. Une seule URL
+    # devait donc servir deux pilotes qui n'acceptent pas les memes options.
+    #
+    # Le conteneur lance `alembic upgrade head` a chaque demarrage : sans ce
+    # nettoyage, l'image ne demarre pas du tout en production.
+    #
+    # Rien d'utile n'est perdu : le TLS se regle par PGSSLMODE, variable
+    # d'environnement lue nativement par libpq comme par asyncpg.
+    _db_url = _db_url.split("?", 1)[0]
+
     config.set_main_option("sqlalchemy.url", _db_url)
 
 

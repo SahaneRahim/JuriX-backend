@@ -38,6 +38,12 @@ from app.schemas.law import (
     LawResponse,
     LawUpdate,
 )
+from app.services.document_storage import (
+    DocumentInaccessible,
+    DocumentIntrouvable,
+    IdentifiantInvalide,
+    chemin_local,
+)
 from app.services.explanation_service import (
     ArticleNotFoundError,
     ExplanationError,
@@ -47,7 +53,6 @@ from app.services.explanation_service import (
 )
 from app.services.search_service import invalidate_search_cache
 from app.tasks.process_law import delete_from_search_index
-from app.utils.file_utils import resolve_upload_path
 
 
 class LawIngestRequest(BaseModel):
@@ -310,32 +315,49 @@ def _download_filename(law: Law, file_path: Path) -> str:
     return f"{cleaned or 'document'}{file_path.suffix or '.pdf'}"
 
 
-def _law_file_path(law: Law) -> Path:
+async def _law_file_path(law: Law) -> Path:
     """
     Chemin du fichier d'origine d'une loi, resolu UNE seule fois.
 
-    Les cinq endpoints qui servent un PDF repetaient la meme construction a la
-    main, avec un repli qui joignait `law.file_id` au repertoire d'upload sans
-    aucune verification : ni motif, ni resolve(), ni confinement. Ce n'etait pas
+    Les endpoints qui servent un PDF repetaient la meme construction a la main,
+    avec un repli qui joignait `law.file_id` au repertoire d'upload sans aucune
+    verification : ni motif, ni resolve(), ni confinement. Ce n'etait pas
     exploitable — la valeur vient de la base et non de la requete — mais c'etait
-    cinq copies de la faiblesse que resolve_upload_path a ete ecrite pour
-    fermer, et elle n'etait utilisee que par les routes OCR.
+    autant de copies de la faiblesse que resolve_upload_path a ete ecrite pour
+    fermer.
+
+    C'est desormais AUSSI la couture entre les deux magasins de documents. En
+    mode local, rien ne change. En mode distant (`DOCUMENTS_BASE_URL` non vide),
+    le document est telecharge en flux dans le cache disque, puis son chemin est
+    rendu — les bibliotheques de rendu prennent un chemin, pas une URL, et un
+    fichier deja sur disque se sert ensuite sans repasser en memoire.
 
     Raises:
         HTTPException: 404 si la loi n'a pas de fichier, si l'identifiant ne
-            respecte pas le motif, ou si le fichier est absent du disque.
+            respecte pas le motif, ou si le document est introuvable ;
+            503 si le magasin distant est en panne.
     """
     if not law.file_id:
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
     try:
-        return resolve_upload_path(law.file_id)
-    except ValueError as exc:
-        # Identifiant hors motif ou chemin sortant du repertoire d'upload.
+        return await chemin_local(law.file_id)
+    except IdentifiantInvalide as exc:
         logger.warning(f"⚠️ file_id invalide pour la loi {law.id}: {exc}")
         raise HTTPException(status_code=404, detail="File not found on server") from exc
-    except FileNotFoundError as exc:
+    except DocumentIntrouvable as exc:
         raise HTTPException(status_code=404, detail="File not found on server") from exc
+    except DocumentInaccessible as exc:
+        # 503 et non 404 : c'est NOTRE magasin qui est en panne. Un 404 ferait
+        # disparaitre le document de l'interface au lieu de signaler une panne
+        # passagere, et accuserait l'utilisateur d'un defaut qui n'est pas le
+        # sien — meme raisonnement que pour GoogleInjoignable dans /auth/google.
+        logger.error(f"⚠️ Magasin de documents injoignable pour la loi {law.id}: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Document momentanement indisponible",
+            headers={"Retry-After": "30"},
+        ) from exc
 
 
 @router.get("/{law_id}/download")
@@ -354,7 +376,7 @@ async def download_law_file(
     if not law.file_id:
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
-    file_path = _law_file_path(law)
+    file_path = await _law_file_path(law)
 
     return FileResponse(
         path=str(file_path), 
@@ -366,87 +388,18 @@ async def download_law_file(
     )
 
 
-@router.get("/{law_id}/pdf-data")
-async def get_law_pdf_data(
-    law_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Return PDF as Base64-encoded JSON to bypass download manager interception.
-    This allows JavaScript to fetch the PDF without IDM/browser extensions intercepting the request.
-    """
-    import base64
-    
-    query = select(Law).where(Law.id == law_id)
-    result = await db.execute(query)
-    law = result.scalar_one_or_none()
-
-    if not law:
-        raise HTTPException(status_code=404, detail="Law not found")
-
-    if not law.file_id:
-        raise HTTPException(status_code=404, detail="No source file found for this law")
-
-    file_path = _law_file_path(law)
-
-    # Read file and encode to Base64
-    with open(str(file_path), "rb") as f:
-        file_bytes = f.read()
-    
-    base64_data = base64.b64encode(file_bytes).decode("utf-8")
-    
-    return {
-        "filename": law.original_filename or file_path.name,
-        "content_type": "application/pdf" if file_path.suffix == ".pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "data": base64_data
-    }
-
-
-@router.post("/{law_id}/pdf-stream")
-async def get_law_pdf_stream(
-    law_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Stream PDF as binary data for efficient loading of large files.
-    
-    Uses POST method to bypass download managers (IDM) which typically
-    only intercept GET requests. Returns PDF as binary with special headers.
-    
-    This is more efficient than base64 encoding for large files
-    (saves ~33% bandwidth and avoids JavaScript decode overhead).
-    """
-    from fastapi.responses import Response
-    
-    query = select(Law).where(Law.id == law_id)
-    result = await db.execute(query)
-    law = result.scalar_one_or_none()
-
-    if not law:
-        raise HTTPException(status_code=404, detail="Law not found")
-
-    if not law.file_id:
-        raise HTTPException(status_code=404, detail="No source file found for this law")
-
-    file_path = _law_file_path(law)
-
-    # Read file content
-    with open(str(file_path), "rb") as f:
-        file_bytes = f.read()
-    
-    # Return as binary stream with headers that prevent IDM interception
-    # Using POST method + octet-stream prevents IDM from intercepting
-    return Response(
-        content=file_bytes,
-        media_type="application/octet-stream",  # Not application/pdf - hides from IDM
-        headers={
-            "Content-Disposition": "inline",
-            "X-Content-Type-Options": "nosniff",
-            "X-PDF-Content": "true",  # Custom header to identify as PDF
-            "Cache-Control": "private, max-age=3600",
-        }
-    )
-
+# /pdf-data et /pdf-stream ont ete SUPPRIMES.
+#
+# Aucun client ne les appelait — ni le front, ni les tests, ni un script. Mais
+# tous deux lisaient le fichier entier en memoire (`f.read()`), et /pdf-data y
+# ajoutait un encodage base64, qui gonfle de 33 %. Sur le document le plus lourd
+# du corpus (26 Mo), un seul appel demandait donc une pointe de ~61 Mo dans un
+# conteneur qui n'en a que 512 — le plus gros risque de saturation memoire du
+# service, au profit de personne.
+#
+# Le besoin d'origine (contourner les gestionnaires de telechargement qui
+# interceptent les requetes) est couvert par /download, qui sert le fichier en
+# flux depuis le disque sans jamais le charger en memoire.
 
 @router.get("/{law_id}/pdf-info")
 async def get_law_pdf_info(
@@ -469,7 +422,7 @@ async def get_law_pdf_info(
     if not law.file_id:
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
-    file_path = _law_file_path(law)
+    file_path = await _law_file_path(law)
 
     # Get page count
     try:
@@ -520,7 +473,7 @@ async def get_law_pdf_page_image(
     if not law.file_id:
         raise HTTPException(status_code=404, detail="No source file found for this law")
 
-    file_path = _law_file_path(law)
+    file_path = await _law_file_path(law)
 
     # Convert page to image using Poppler
     try:

@@ -11,6 +11,7 @@ from app.models.conversation import (
     PersonaInteraction,
     PersonaStat,
 )
+from app.models.email_token import EmailToken
 from app.models.law import Article, Category, Law
 from app.models.user import User
 
@@ -27,4 +28,5 @@ __all__ = [
     "PersonaInteraction",
     # User models
     "User",
+    "EmailToken",
 ]

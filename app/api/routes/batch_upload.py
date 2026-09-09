@@ -210,7 +210,7 @@ async def batch_upload(
                 content="Document en attente de traitement.",
                 status="pending",
                 # file_id etait genere mais JAMAIS persiste : sans lui,
-                # /laws/{id}/download, /pdf-data, /pdf-info et /page/{n}
+                # /laws/{id}/download, /pdf-info et /page/{n}
                 # renvoyaient 404 pour tout document issu d'un lot.
                 file_id=file_id,
                 original_filename=file.filename,

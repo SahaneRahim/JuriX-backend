@@ -329,10 +329,64 @@ tests/            unitaires et intégration
 
 ## Déploiement
 
-`Dockerfile` fourni. Points à vérifier avant de déployer :
+`Dockerfile` fourni. Il lance `alembic upgrade head` **puis** uvicorn : les
+migrations partent donc toutes seules à chaque démarrage. C'est voulu —
+`search_vector`, les index GIN et les déclencheurs n'existent que dans les
+migrations, jamais dans `Base.metadata`, si bien qu'un schéma créé par
+`create_all` serait incomplet.
 
-- `alembic upgrade head` n'est pas lancé par le conteneur — à exécuter séparément.
-- `data/` est éphémère : monter un volume ou un stockage objet, sinon les PDF
-  uploadés disparaissent au redéploiement alors que les lignes en base subsistent.
-- `--workers 1` : plusieurs états sont en mémoire du processus (connexions
-  WebSocket du suivi de lot, registre des tâches de fond).
+### L'URL de la base : deux pièges opposés
+
+**Ne mettez jamais `?sslmode=` ni `?channel_binding=` dans `DATABASE_URL`.** Le
+dialecte asyncpg de SQLAlchemy transmet les paramètres qu'il ne connaît pas
+directement à `asyncpg.connect()`, dont la signature ne les accepte pas :
+
+```
+TypeError: connect() got an unexpected keyword argument 'sslmode'
+```
+
+L'erreur ne survient qu'au premier accès à la base, donc bien après un démarrage
+en apparence réussi. Or c'est exactement l'URL que fournissent les boutons
+« copier » des bases infogérées. La configuration refuse maintenant de se
+charger dans ce cas, avec le remède dans le message : **posez `PGSSLMODE=require`
+en variable d'environnement**, lue aussi bien par asyncpg que par libpq.
+
+Symétriquement, `alembic/env.py` **retire la chaîne de requête** avant de passer
+l'URL à psycopg2 : `prepared_statement_cache_size`, indispensable côté
+application derrière un pooler en mode transaction, ferait échouer libpq
+(`invalid URI query parameter`) et donc le démarrage du conteneur.
+
+### Les autres points
+
+- **`data/` est éphémère.** Sans réglage, les PDF disparaissent au redéploiement
+  alors que les lignes en base subsistent. Poser `DOCUMENTS_BASE_URL` sur un
+  magasin HTTPS public : les documents sont alors récupérés en flux et mis en
+  cache sur disque, et rien d'autre ne change. Vide, le comportement historique
+  (lecture dans `./data/uploads`) est conservé.
+- **`--workers 1`** : plusieurs états sont en mémoire du processus (connexions
+  WebSocket du suivi de lot, étranglement des envois de courriel par IP).
+- **`SECRET_KEY`** : `openssl rand -hex 32`. Avec `ENVIRONMENT` différent de
+  `development`, le conteneur **refuse de démarrer** sur la valeur du dépôt.
+- **`ALLOWED_ORIGINS`** : origine exacte, sans slash final. `allow_credentials`
+  étant actif, le joker `"*"` est refusé par les navigateurs.
+- **Envoi de courriel** : `BREVO_API_KEY`, `BREVO_SENDER_EMAIL` et
+  `FRONTEND_BASE_URL`. Sans elles, l'inscription et la connexion fonctionnent
+  normalement ; seules la vérification d'adresse et la réinitialisation de mot
+  de passe restent inertes. Le transport est l'API HTTPS de Brevo et **jamais
+  SMTP** : les hébergeurs gratuits bloquent les ports sortants 25, 465 et 587.
+- **Extensions PostgreSQL** : `vector`, `pg_trgm` et `unaccent` doivent exister
+  **dans le schéma `public`**. Certains hébergeurs les installent ailleurs par
+  défaut, ce qui casse `immutable_unaccent` (migration `a6b7c8d9e0f1`). Créer
+  explicitement `CREATE EXTENSION ... WITH SCHEMA public;` avant la première
+  migration.
+- **Maintien en éveil** : `GET /health` ne touche pas la base, délibérément —
+  c'est la cible d'une sonde fréquente. Une seconde sonde, bien plus espacée,
+  doit viser une vraie route de lecture si l'hébergeur met la base en pause pour
+  inactivité.
+
+### Mot de passe oublié
+
+La réinitialisation par courriel existe (`POST /auth/password/forgot` puis
+`/auth/password/reset`). Sans clé Brevo configurée, elle est inerte : le seul
+recours reste alors `PUT /admin/users/{id}`, ou une reconnexion par Google si le
+compte y est lié.

@@ -174,3 +174,61 @@ class GoogleAuthRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     credential: str = Field(..., min_length=100, max_length=4096)
+
+
+# ==================== Courriel : verification et reinitialisation ====================
+
+
+class DemandeReinitialisation(BaseModel):
+    """
+    Demande de lien de reinitialisation. Une adresse, rien de plus.
+
+    `extra="forbid"` comme partout ailleurs : un champ inconnu doit produire un
+    422 visible, pas disparaitre en silence.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+
+
+class ReinitialisationMotDePasse(BaseModel):
+    """
+    Le jeton recu par courriel, et le nouveau mot de passe.
+
+    Le jeton est un `secrets.token_urlsafe(32)`, soit 43 caracteres. Les bornes
+    laissent de la marge sans accepter qu'on nous envoie un megaoctet a hacher.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(..., min_length=16, max_length=256)
+    password: str = Field(..., min_length=8, max_length=100)
+
+    @field_validator("password")
+    @classmethod
+    def valider_le_mot_de_passe(cls, v: str) -> str:
+        # Reutilise la politique commune plutot que de la recopier : elle a deja
+        # diverge une fois, et c'est pour cela qu'elle est une fonction module.
+        return valider_force_du_mot_de_passe(v)
+
+
+class VerificationAdresse(BaseModel):
+    """Le jeton de verification d'adresse, poste par la page du front."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(..., min_length=16, max_length=256)
+
+
+class MessageReponse(BaseModel):
+    """
+    Reponse neutre des routes de courriel.
+
+    UN SEUL MESSAGE, quelle que soit la branche empruntee : adresse inconnue,
+    compte desactive, etranglement atteint, ou envoi reel. Une reponse qui
+    varierait ferait de cette route un oracle permettant de savoir quelles
+    adresses possedent un compte.
+    """
+
+    message: str

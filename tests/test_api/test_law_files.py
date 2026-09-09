@@ -164,7 +164,7 @@ class TestPathResolution:
         await db_session.commit()
         await db_session.refresh(law)
 
-        for endpoint in ("download", "pdf-data", "pdf-info"):
+        for endpoint in ("download", "pdf-info"):
             response = await client.get(f"/api/v1/laws/{law.id}/{endpoint}")
             assert response.status_code == 404, (
                 f"{endpoint} devrait repondre 404 pour file_id={bad_file_id!r}, "

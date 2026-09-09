@@ -40,8 +40,13 @@ class Base(DeclarativeBase):
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG if hasattr(settings, 'DEBUG') else False,  # Log SQL queries in debug mode
-    pool_size=20,  # Connection pool size
-    max_overflow=10,  # Additional connections beyond pool_size
+    # 5 + 5, et non 20 + 10. L'ancien dimensionnement demandait jusqu'a 30
+    # connexions asynchrones (plus 10 synchrones) pour un service qui n'en
+    # utilise jamais trois. Derriere un pooler externe — le mode transaction de
+    # Supavisor, par exemple — le multiplexage est deja fait en amont, et un
+    # pool local surdimensionne ne fait que consommer le quota de connexions.
+    pool_size=5,
+    max_overflow=5,
     pool_pre_ping=True,  # Verify connections before using
     pool_recycle=3600,  # Recycle connections after 1 hour
 )
