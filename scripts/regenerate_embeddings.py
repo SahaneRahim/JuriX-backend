@@ -234,7 +234,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # coute rien — aucun appel reseau, le modele local n'est charge qu'au
         # premier encodage — mais exige une configuration valide :
         # GEMINI_API_KEY pour gemini, les fichiers du modele pour gemma.
-        service = EmbeddingService(use_cache=True)
+        # Sans cache : voir process_law._generate_article_embeddings.
+        service = EmbeddingService(use_cache=False)
         provider = service.provider
         empreinte = provider.fingerprint
         pause = args.sleep if args.sleep is not None else provider.inter_batch_delay_s

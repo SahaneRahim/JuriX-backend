@@ -16,7 +16,7 @@ article, réponses citées via Gemini.
 | Recherche sémantique | `pgvector` + index HNSW, embeddings EmbeddingGemma 768 dim. calculés en local (Gemini en option) |
 | Cache | tables `query_cache` et `embedding_cache` |
 | LLM | Gemini (`google-genai`) |
-| Extraction PDF | Gemini multimodal |
+| Extraction PDF | Docling en local, OCR pleine page (Gemini en option) |
 | Tâches de fond | `BackgroundTasks` FastAPI |
 
 Pas de Redis, pas de Meilisearch, pas de Celery : recherche, cache et files
@@ -29,7 +29,8 @@ d'attente sont assurés par PostgreSQL et par le serveur applicatif.
 - Une clé API Gemini (Google AI Studio), pour le chat
 - Le modèle EmbeddingGemma sur disque (voir plus bas), pour la recherche
   sémantique
-- Une clé LlamaCloud pour l'extraction OCR
+- Pour ingérer des PDF : Docling et torch (`requirements-ingestion.txt`), un GPU
+  CUDA de préférence
 
 Le plus simple pour la base :
 
@@ -182,36 +183,69 @@ gardant le fil.
 ## Chaîne d'ingestion
 
 ```
-upload → extraction Gemini → normalisation → découpage par article
-       → embeddings → tsvector (trigger) → published
+PDF → extraction Docling (OCR pleine page) → normalisation → découpage par article
+    → embeddings EmbeddingGemma → tsvector (trigger) → published
 ```
 
 Un document est créé en `processing`. Il passe à `published` en cas de succès,
-à `refused` avec `processing_error` en cas d'échec — jamais de contenu
-partiellement extrait dans le corpus public.
+à `refused` avec `processing_error` en cas d'échec. Une page que l'extraction
+n'a pas pu lire ne bloque pas le document : il est publié sans elle, et sa liste
+part dans `processing_error`.
 
-**Aucun repli dégradé.** L'extraction réessaie trois fois sur une saturation du
-fournisseur (503), jamais sur un quota épuisé (429) ; au-delà, l'ingestion
-échoue. La couche texte des PDF scannés du corpus a été mesurée à environ 20 %
-de rappel (filigrane inséré au milieu des phrases, cachets lus comme du
-charabia, un document sur cinq sans aucun texte exploitable) : la publier serait
-pire que de ne rien publier.
+**OCR sur toutes les pages, par Docling, en local.** 97 % des pages du corpus
+prc.cm sont des scans ; la couche texte que portent 55 % d'entre elles est l'OCR
+du scanner, bruité (« portantnomination deresponsables »), mesuré à environ 20 %
+de rappel. Docling l'ignore et relit l'image de chaque page (mode OCR pleine
+page), avec la mise en page et les tableaux sur le GPU s'il y en a un.
+`PDF_EXTRACTION_ENGINE=gemini` repasse sur l'API Gemini, payante.
 
-**Pagination.** Gemini rend un marqueur `<<PAGE:n>>` par page, ce que LlamaParse
-ne faisait pas — d'où des articles portant tous `page_number = 1`. C'est la
-raison du changement de moteur, pas le prix.
+**Pagination.** L'extraction rend un marqueur `<<PAGE:n>>` par page physique ;
+chaque article porte la page où il commence.
 
-**Refus de transcription.** Le modèle rend parfois `finish_reason=RECITATION`
-sur une page d'acte officiel dont la forme lui est familière : mesuré à une page
-de garde sur sept documents. Le refus est **par page** — le lot est alors rejoué
-page par page, et seule la page refusée est perdue, signalée dans
-`processing_error`. Reformuler la consigne n'y change rien (trois variantes
-essayées), réduire le lot non plus.
+### Ingérer le corpus
 
-**Quota.** Le palier gratuit plafonne à 20 appels de génération par jour et par
-modèle. Un document d'une page coûte un appel ; les 72 PDF locaux (481 pages) en
-coûtent 83. Le script de ré-extraction est reprenable : le cache `sha256` fait
-qu'un fichier déjà traité n'est jamais repayé.
+Deux passes, séparées pour la mémoire : Docling et EmbeddingGemma ne tiennent
+pas ensemble dans quelques Go de RAM. Toutes deux sont **reprenables** — une
+interruption, quelle qu'elle soit, ne coûte que le travail en cours, et relancer
+la même commande reprend où elle s'était arrêtée.
+
+```bash
+pip install -r requirements-ingestion.txt     # Docling, torch (voir le fichier)
+
+# Passe 1 — extraction, sans base. Une vingtaine d'heures pour les 13 970 pages.
+# Détachée : elle survit à la fermeture du terminal.
+setsid nohup .venv/bin/python scripts/extraire_corpus.py \
+    > data/ingestion/extraction.out 2>&1 &
+python scripts/extraire_corpus.py --etat      # avancement, durée restante estimée
+touch data/ingestion/STOP                     # arrêt propre après le lot en cours
+
+# Passe 2 — indexation en base. Ne relit que l'extraction faite : un document
+# que la passe 1 n'a pas fini est laissé pour la prochaine exécution.
+python scripts/ingest_corpus.py
+
+# Enfin : vecteurs manquants éventuels, puis index vectoriel reconstruit en masse
+python scripts/regenerate_embeddings.py --all
+python scripts/regenerate_embeddings.py --reindex
+```
+
+- **Passe 1** (`scripts/extraire_corpus.py`) : chaque document est converti par
+  lots de pages, chaque lot écrit en cache dès qu'il est fait
+  (`data/ocr_cache/docling/`). Le travail se fait dans un processus enfant,
+  recyclé régulièrement — la mémoire de Docling grossit au fil des pages. Si ce
+  processus meurt, le lot en cours compte une tentative perdue ; au bout de
+  trois, le lot est repris page à page, et seule la page qui échoue encore est
+  abandonnée et signalée, sans bloquer le reste. Les petits documents passent
+  d'abord ; aucun n'est exclu pour sa taille. Si `.env` ou les paquets changent
+  pendant l'extraction, elle s'arrête plutôt que d'écrire dans un autre cache :
+  relancer la commande. Suivi : `data/ingestion/extraction.log` et
+  `progression.json`.
+- **Passe 2** (`scripts/ingest_corpus.py`) : une loi en échec passe `refused` ;
+  la relance reprend les lois `refused`, `processing` et `pending`, et ignore
+  les `published`. Journal : `data/ingestion/indexation.log`.
+- **Cache d'extraction.** Son empreinte porte les versions de Docling et du
+  moteur OCR : changer de version, ou de moteur, extrait de nouveau dans un
+  autre dossier, sans rien écraser. Les versions sont donc épinglées dans
+  `requirements-ingestion.txt`.
 
 ## Découpage
 
@@ -223,8 +257,9 @@ qu'un fichier déjà traité n'est jamais repayé.
 | `article` | oui | le texte normatif |
 | `legal_basis`, `preamble` | non | les visas ne répondent à aucune question |
 | `boilerplate` | non | « sera enregistré, publié au Journal Officiel », identique dans des milliers de décrets |
-| `roster` | non | listes nominatives, effondrées en un seul chunk |
-| `fragment` | non | moins de 120 caractères : 62 % du corpus sous ce seuil sont des lignes de tableau ou de liste |
+| `roster` | un vecteur par liste | listes nominatives : le contenu garde tous les noms (affichage, plein texte), le vecteur n'en porte que le résumé ; une longue liste est coupée entre ses lignes |
+| `signature`, `annexe` | non, oui | la signature et ce qui suit le dernier article : lieu, date, signataire hors index ; une annexe reste un chunk à part entière |
+| `fragment` | non | moins de 120 caractères hors vrais articles (30 pour un article) : 62 % du corpus sous ce seuil sont des lignes de tableau ou de liste |
 | `table`, `continuation` | selon la taille | découpés aux alinéas au-delà de 3 000 caractères |
 
 **Rien n'est supprimé.** Un chunk non vectorisé reste en base, affichable et

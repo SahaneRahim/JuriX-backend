@@ -312,7 +312,10 @@ async def process_batch(laws: List[dict], session_id: str) -> None:
                     if succeeded:
                         law.status = "published"
                         law.processing_progress = 100
-                        law.processing_error = None
+                        # processing_error n'est PAS remis a None : le pipeline
+                        # y a ecrit ce qui manque a un document publie (pages
+                        # non extraites, aucun vecteur), le seul signal qu'il
+                        # est incomplet.
                     else:
                         law.status = "refused"
                         law.processing_error = str(result.get("errors", []))

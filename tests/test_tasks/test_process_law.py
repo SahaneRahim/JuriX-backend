@@ -213,6 +213,26 @@ class TestArticlePersistence:
         assert all(a.content for a in numbered)
 
     @pytest.mark.asyncio
+    async def test_embed_text_porte_la_categorie_des_la_premiere_ingestion(
+        self, db_session, law_row
+    ):
+        """
+        Le domaine est calcule avant le decoupage mais n'est ecrit en base
+        qu'apres : relu en base, il manquait a embed_text a la premiere
+        ingestion. Il est desormais transmis au decoupage.
+        """
+        pl._split_and_save_articles(
+            law_row.id, SAMPLE_TEXT, language="fr", category="Droit des Affaires"
+        )
+
+        rows = (await db_session.execute(
+            select(Article).where(Article.law_id == law_row.id, Article.embed.is_(True))
+        )).scalars().all()
+
+        assert rows
+        assert all("Droit des Affaires" in a.embed_text for a in rows)
+
+    @pytest.mark.asyncio
     async def test_reprocessing_replaces_instead_of_duplicating(self, db_session, law_row):
         pl._split_and_save_articles(law_row.id, SAMPLE_TEXT)
         first = (await db_session.execute(

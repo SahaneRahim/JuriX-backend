@@ -21,7 +21,8 @@ Version: 3.0.0 (PostgreSQL natif)
 import asyncio
 import logging
 import time
-from typing import Any, Dict
+from functools import lru_cache
+from typing import Any, Dict, Optional
 
 from sqlalchemy import text
 from sqlalchemy.exc import DataError
@@ -125,13 +126,17 @@ async def _update_fts_vectors_async(db: AsyncSession, law_id: int) -> None:
 # ==================== SYNC PIPELINE (core logic) ====================
 
 
-def _run_sync_pipeline(law_id: int, file_id: str = None) -> Dict[str, Any]:
+def _run_sync_pipeline(
+    law_id: int, file_id: str = None, extraction_cache_seulement: bool = False
+) -> Dict[str, Any]:
     """
     Exécute le pipeline de traitement de façon synchrone.
 
     Args:
         law_id: ID de la loi
         file_id: UUID du fichier uploadé (optionnel)
+        extraction_cache_seulement: ne relire que l'extraction deja faite (voir
+            _extract_pdf_text), sans jamais convertir
 
     Returns:
         Dict de résultats
@@ -148,7 +153,9 @@ def _run_sync_pipeline(law_id: int, file_id: str = None) -> Dict[str, Any]:
 
     # 2. Extraire le texte du fichier si fourni
     if file_id:
-        law, file_errors = _ingest_file_content(law_id, law, file_id)
+        law, file_errors = _ingest_file_content(
+            law_id, law, file_id, extraction_cache_seulement
+        )
         errors.extend(file_errors)
 
     # 3. Valider le contenu
@@ -164,12 +171,12 @@ def _run_sync_pipeline(law_id: int, file_id: str = None) -> Dict[str, Any]:
             logger.info(f"📝 Extracted title: {extracted_title}")
 
     # 5. Pipeline d'analyse
-    result = _run_analysis_pipeline(law_id, law, text, extracted_title)
+    result = _run_analysis_pipeline(law_id, law, text, extracted_title, errors)
     result["errors"] = errors
     return result
 
 
-def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None):
+def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None, file_errors=None):
     """
     Exécute le pipeline complet: langue → catégorie → articles → embeddings → metadata.
     """
@@ -191,8 +198,16 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None):
         f"({category_result['confidence']:.2%}, regle {category_result['rule']})"
     )
 
-    # Articles
-    articles_count = _split_and_save_articles(law_id, text)
+    # Articles. La langue et le domaine calcules ci-dessus partent avec le
+    # decoupage : ils etaient relus en base, ou ils ne sont ecrits qu'a la fin
+    # (_update_law_metadata). A la premiere ingestion, embed_text n'avait donc
+    # pas de categorie, et la langue etait la valeur par defaut de la ligne.
+    articles_count = _split_and_save_articles(
+        law_id,
+        text,
+        language=language_result["language"],
+        category=category_result["category"],
+    )
     logger.info(f"📑 Articles extracted: {articles_count}")
 
     # Embeddings
@@ -214,6 +229,11 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None):
         )
         logger.error(f"❌ {embeddings_error}")
 
+    # Les pages que l'extraction n'a pas pu lire restaient dans les journaux :
+    # le document passait pour complet. Elles rejoignent processing_error,
+    # visible et interrogeable par l'administrateur.
+    anomalies = [e for e in [*(file_errors or []), embeddings_error] if e]
+
     # Metadata
     _update_law_metadata(
         law_id,
@@ -224,7 +244,7 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None):
         category_confidence=category_result["confidence"],
         suggested_categories=category_result.get("suggested"),
         title=extracted_title,
-        processing_error=embeddings_error,
+        processing_error=" | ".join(anomalies) or None,
     )
 
     return {
@@ -242,7 +262,7 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None):
 # ==================== HELPER FUNCTIONS ====================
 
 
-def _ingest_file_content(law_id: int, law, file_id: str):
+def _ingest_file_content(law_id: int, law, file_id: str, extraction_cache_seulement: bool = False):
     """
     Extrait le texte depuis le fichier uploadé (PDF ou DOCX).
     Essaie LlamaParse d'abord, puis OCR, puis pypdf comme fallback.
@@ -271,7 +291,7 @@ def _ingest_file_content(law_id: int, law, file_id: str):
     extracted_text = ""
 
     if file_path.suffix == ".pdf":
-        extracted_text, pdf_errors = _extract_pdf_text(file_path)
+        extracted_text, pdf_errors = _extract_pdf_text(file_path, extraction_cache_seulement)
         errors.extend(pdf_errors)
     elif file_path.suffix == ".docx":
         extracted_text, docx_errors = _extract_docx_text(file_path)
@@ -279,11 +299,15 @@ def _ingest_file_content(law_id: int, law, file_id: str):
 
     if not extracted_text or len(extracted_text) <= 50:
         # Auparavant : un simple warning, puis le pipeline continuait et le
-        # document finissait publie avec son contenu de remplacement.
+        # document finissait publie avec son contenu de remplacement. Les
+        # erreurs d'extraction partent avec le message : « 0 caracteres » seul
+        # laissait croire que l'OCR n'avait rien trouve, quand le processus
+        # avait ete tue.
+        details = f" — {' | '.join(errors)}" if errors else ""
         raise ValueError(
             f"Extraction insuffisante pour {file_path.name} : "
             f"{len(extracted_text or '')} caracteres (minimum 50). "
-            "Document non publie."
+            f"Document non publie.{details}"
         )
 
     _update_law_content(law_id, extracted_text)
@@ -292,55 +316,63 @@ def _ingest_file_content(law_id: int, law, file_id: str):
     return law, errors
 
 
-def _extract_pdf_text(file_path) -> tuple:
+def _extract_pdf_text(file_path, cache_seulement: bool = False) -> tuple:
     """
-    Extrait le texte d'un PDF via Gemini multimodal. Aucun repli degrade.
+    Extrait le texte d'un PDF par le moteur configure (PDF_EXTRACTION_ENGINE).
 
-    Le repli LlamaParse -> Tesseract -> pypdf a ete supprime avant celui-ci, et
-    la raison tient toujours : pypdf renvoie la couche texte deja presente dans
-    les PDF prc.cm, mesuree a ~20% de rappel (filigrane injecte au milieu des
-    phrases, cachets lus comme du charabia, 21% des documents sans aucun texte
-    exploitable). Le document etait alors publie avec ce contenu et marque
-    "completed", sans aucun signal.
+    Docling par defaut, en local : OCR pleine page sur toutes les pages. La
+    couche texte des PDF prc.cm n'est jamais lue telle quelle : c'est l'OCR du
+    scanner, mesure a ~20 % de rappel (filigrane injecte au milieu des phrases,
+    cachets lus comme du charabia, 21 % des documents sans aucun texte
+    exploitable). Aucun repli degrade non plus : un document publie avec ce
+    contenu passait pour complet, sans aucun signal.
 
-    Le moteur a change pour la PAGINATION. LlamaParse ne signalait pas ses
-    coupures de page : les 710 articles en base portaient tous
-    `page_number = 1`, et 271 pages de PDF ne donnaient que 27 pages extraites.
-    Gemini rend un numero de page explicite, verifie exact sur un lot median.
+    Args:
+        cache_seulement: ne rien convertir, relire l'extraction deja faite. La
+            passe d'indexation (scripts/ingest_corpus.py) l'impose : charger
+            Docling a cote d'EmbeddingGemma doublerait la memoire, et un
+            document que la passe d'extraction n'a pas fini doit attendre.
 
     Returns:
-        (texte, erreurs) — `erreurs` nomme les pages que le modele a refuse de
-        transcrire, le cas echeant. Le document reste publie sans elles : perdre
-        une page de garde vaut mieux que perdre les soixante-huit autres.
+        (texte, erreurs) — `erreurs` nomme les pages que le moteur n'a pas pu
+        lire. Le document reste publie sans elles : perdre une page vaut mieux
+        que perdre les autres. La liste part dans `laws.processing_error`.
 
     Raises:
         PdfExtractionError: extraction impossible
     """
-
     from app.services.pdf_extraction_service import (
         PdfExtractionError,
+        _extracteur_docling,
         get_pdf_extractor,
     )
 
-    service = get_pdf_extractor()
+    # Le cache relu est celui de la passe d'extraction, donc celui de Docling,
+    # QUEL QUE SOIT PDF_EXTRACTION_ENGINE : un .env partage avec l'API et regle
+    # sur gemini faisait sinon refuser tout le corpus a l'indexation.
+    service = _extracteur_docling() if cache_seulement else get_pdf_extractor()
     if not service.is_available():
-        raise PdfExtractionError(
-            "GEMINI_API_KEY absente : extraction impossible. "
-            "Aucun repli degrade n'est utilise."
-        )
+        raise PdfExtractionError(service.raison_indisponible())
 
-    logger.info(f"📄 Extraction Gemini : {file_path.name}")
-    text = _run_blocking(service.extract_text(file_path))
-    logger.info(f"✅ Gemini : {len(text)} caracteres")
+    logger.info(f"📄 Extraction {service.nom} : {file_path.name}")
+    resultat = service.extraire(file_path, cache_seulement=cache_seulement)
+    logger.info(f"✅ {service.nom} : {len(resultat.texte)} caracteres, {resultat.nb_pages} page(s)")
 
     erreurs = []
-    if service.pages_refusees:
+    if resultat.pages_en_echec:
+        cause = f" ({resultat.erreurs[-1]})" if resultat.erreurs else ""
         erreurs.append(
-            "Pages non transcrites (refus du modele) : "
-            + ", ".join(str(n) for n in service.pages_refusees)
+            "Pages non extraites : "
+            + ", ".join(str(n) for n in resultat.pages_en_echec) + cause
         )
-        logger.error(f"❌ {file_path.name} : {erreurs[0]}")
-    return text, erreurs
+    if resultat.pages_illisibles:
+        erreurs.append(
+            "Pages sans texte lisible (rendu rate ou cachet seul) : "
+            + ", ".join(str(n) for n in resultat.pages_illisibles)
+        )
+    for erreur in erreurs:
+        logger.error(f"❌ {file_path.name} : {erreur}")
+    return resultat.texte, erreurs
 
 
 def _extract_docx_text(file_path) -> tuple:
@@ -355,21 +387,6 @@ def _extract_docx_text(file_path) -> tuple:
         return "", [f"DOCX extraction failed: {str(e)}"]
 
 
-def _run_blocking(coro):
-    """
-    Execute une coroutine depuis un thread d'executor.
-
-    asyncio.run() ne fonctionnait ici que par accident : le thread de
-    l'executor n'a pas de boucle ambiante. Boucle creee et fermee
-    explicitement, ce qui ne peut jamais toucher une boucle existante.
-    """
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
-
-
 def _load_law(law_id: int) -> Law:
     """Charge une loi depuis la base de données (synchrone)."""
     with SyncSessionLocal() as session:
@@ -379,12 +396,24 @@ def _load_law(law_id: int) -> Law:
         return law
 
 
+@lru_cache(maxsize=1)
+def _language_detector():
+    """
+    Un seul detecteur par processus.
+
+    Il etait recree a chaque document, et rechargeait donc les 131 Mo de
+    fastText (lid.176.bin) a chaque fois : 0,2 a 0,4 s par document, soit 7 a
+    15 minutes sur le corpus, pour un modele qui ne change jamais.
+    """
+    from app.services.language_detector import LanguageDetector
+
+    return LanguageDetector()
+
+
 def _detect_language(text: str) -> Dict[str, Any]:
     """Détecte la langue du texte."""
     try:
-        from app.services.language_detector import LanguageDetector
-        detector = LanguageDetector()
-        result = detector.detect(text)
+        result = _language_detector().detect(text)
         return {"language": result["language"], "confidence": result["confidence"]}
     except Exception as e:
         logger.warning(f"⚠️ Language detection failed, using fallback: {e}")
@@ -442,9 +471,19 @@ def _classify_category(title: str, text: str, doc_type: str = None) -> Dict[str,
     }
 
 
-def _split_and_save_articles(law_id: int, text: str) -> int:
+def _split_and_save_articles(
+    law_id: int,
+    text: str,
+    language: Optional[str] = None,
+    category: Optional[str] = None,
+) -> int:
     """
     Extrait les articles du texte de loi et les sauvegarde en base de données.
+
+    Args:
+        language: langue detectee ; sinon celle de la ligne. Elle decide du
+            role de « Section N » (article en anglais, subdivision en francais).
+        category: domaine juridique calcule ; sinon celui de la ligne.
 
     Returns:
         Nombre d'articles extraits et sauvegardés
@@ -456,23 +495,27 @@ def _split_and_save_articles(law_id: int, text: str) -> int:
         # markdown, et "**ARTICLE 1ER**:" n'est pas reconnu par les motifs
         # d'article, qui attendent "Article" en debut de ligne. Sans cette
         # passe, des documents entiers ressortaient sans un seul article.
-        normalized = normalize_for_chunking(text)
-        extracted = extract_articles(normalized, strict=False, min_article_length=1)
-        if not extracted:
-            logger.warning(f"⚠️ No articles extracted from law {law_id}")
-            return 0
-
-        logger.info(f"📋 Found {len(extracted)} articles")
-
         with SyncSessionLocal() as session:
             law = session.query(Law).filter(Law.id == law_id).first()
+            langue = language or (law.language if law else None) or "fr"
+
+            normalized = normalize_for_chunking(text)
+            extracted = extract_articles(
+                normalized, strict=False, min_article_length=1, language=langue
+            )
+            if not extracted:
+                logger.warning(f"⚠️ No articles extracted from law {law_id}")
+                return 0
+
+            logger.info(f"📋 Found {len(extracted)} articles")
+
             context = DocumentContext(
                 reference=(law.reference if law else "") or "",
                 title=(law.title if law else "") or "",
                 doc_type=(law.type if law else None),
                 date=law.publication_date.isoformat() if law and law.publication_date else None,
-                category=(law.category.name if law and law.category else None),
-                language=(law.language if law else "fr") or "fr",
+                category=category or (law.category.name if law and law.category else None),
+                language=langue,
             )
 
             # Raffinage : classe chaque chunk, decide ce qui merite un vecteur,
@@ -523,8 +566,13 @@ def _split_and_save_articles(law_id: int, text: str) -> int:
         logger.error(f"❌ Article rejete par la base (largeur de colonne) : {e}")
         raise
     except Exception as e:
+        # On RELEVE au lieu de rendre 0 : les articles existants ont deja ete
+        # supprimes plus haut, et rendre 0 publiait la loi sans un seul article,
+        # sans autre trace qu'une ligne de journal. Le pipeline la passe en
+        # 'refused' avec la cause dans processing_error, et une relance la
+        # reprendra.
         logger.error(f"❌ Error saving articles: {e}", exc_info=True)
-        return 0
+        raise
 
 
 def _generate_article_embeddings(law_id: int) -> int:
@@ -546,7 +594,12 @@ def _generate_article_embeddings(law_id: int) -> int:
     logger.info(f"🔢 Generating embeddings for law {law_id} chunks...")
 
     try:
-        embedding_service = EmbeddingService(use_cache=True)
+        # use_cache=False : le cache d'embeddings sert les QUESTIONS, qui se
+        # repetent. Un article ne se re-encode jamais — embed_text porte la
+        # reference du document, unique — et son vecteur est deja garde dans
+        # articles.embedding. Mesure : le cache aurait ajoute 0,2 a 0,4 Go a
+        # la base, plus que les vecteurs eux-memes, sans un seul succes.
+        embedding_service = EmbeddingService(use_cache=False)
         max_len = EmbeddingService.MAX_TEXT_LENGTH
 
         with SyncSessionLocal() as session:
@@ -760,14 +813,17 @@ delete_from_meilisearch = delete_from_search_index
 
 # ==================== LEGACY SYNC ENTRY POINT ====================
 
-def process_law_sync(law_id: int, file_id: str = None) -> Dict[str, Any]:
+def process_law_sync(
+    law_id: int, file_id: str = None, extraction_cache_seulement: bool = False
+) -> Dict[str, Any]:
     """
-    Version synchrone du pipeline (conservée pour compatibilité).
-    Préférer process_law_async() via BackgroundTasks.
+    Version synchrone du pipeline, celle de l'ingestion par script.
+    Depuis l'API, préférer process_law_async() via BackgroundTasks.
 
     Args:
         law_id: ID de la loi
         file_id: UUID du fichier uploadé
+        extraction_cache_seulement: voir _extract_pdf_text
 
     Returns:
         Dict avec status et résultats
@@ -777,7 +833,23 @@ def process_law_sync(law_id: int, file_id: str = None) -> Dict[str, Any]:
     start_time = time.time()
     logger.info(f"🔄 Starting synchronous processing for law {law_id}, file {file_id}")
 
-    result = _run_sync_pipeline(law_id, file_id)
+    try:
+        result = _run_sync_pipeline(law_id, file_id, extraction_cache_seulement)
+    except Exception as e:
+        # Sans ce marquage, une loi en echec restait 'processing' : ni publiee,
+        # ni signalee, et une relance de l'ingestion la sautait comme deja
+        # traitee. 'refused' + processing_error la rend visible et rejouable.
+        logger.error(f"❌ Synchronous pipeline failed for law {law_id}: {e}")
+        with SyncSessionLocal() as session:
+            session.execute(
+                text(
+                    "UPDATE laws SET status='refused', processing_error=:err, "
+                    "processing_progress=0 WHERE id=:id"
+                ),
+                {"err": str(e)[:2000] or type(e).__name__, "id": law_id},
+            )
+            session.commit()
+        raise
 
     # Mettre à jour les tsvectors synchroniquement
     try:
