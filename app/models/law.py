@@ -241,7 +241,7 @@ class Article(Base):
 
     # Classification produite par app/utils/chunk_refiner.py.
     # kind : article | legal_basis | preamble | boilerplate | roster | table |
-    #        fragment | continuation
+    #        fragment | continuation | signature | annexe
     # embed : faut-il vectoriser ce chunk. Rien n'est supprime — un visa reste
     #         consultable et cherchable en plein texte — mais il ne consomme
     #         plus d'appel d'embedding et ne pollue plus les resultats

@@ -5,6 +5,7 @@ Extracts articles from Cameroonian legal documents following
 common patterns: Article X, Art. X, Section X, etc.
 """
 
+import bisect
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,29 +41,81 @@ class ArticleExtractionError(Exception):
 # 41 articles indexes contre 193 reellement presents.
 _MARKER_PREFIX = r'(?:^|\n)[ \t]*[#>\-\*_]{0,4}[ \t]*'
 
-ARTICLE_PATTERNS = [
-    # === FRENCH PATTERNS ===
-    # Article + number (1, 2, 3...) OR ordinals (1er, 1ère, 2ème, 3ème...) OR words (premier, première, deuxième...)
-    _MARKER_PREFIX + r'Article[ \t]*(?:' +
-        r'(\d+(?:\.\d+)*)(?:er|ère|ème)?' +  # Article 1, Article 1er, Article 2ème, Article 1.1
-        r'|' +
-        r'(premier|première|deuxième|second|seconde|troisième|quatrième|cinquième|sixième|septième|huitième|neuvième|dixième)' +  # Article premier, Article deuxième...
-    r')\s*[.:\-–]?\s*',
-    
-    # Art. (abbreviation) + number OR ordinals
-    _MARKER_PREFIX + r'Art\.?[ \t]*(?:' +
-        r'(\d+(?:\.\d+)*)(?:er|ère|ème)?' +  # Art. 1, Art. 1er, Art. 2ème
-        r'|' +
-        r'(premier|première|deuxième|second|seconde|troisième|quatrième|cinquième|sixième|septième|huitième|neuvième|dixième)' +  # Art. premier
-    r')\s*[.:\-–]?\s*',
-    
-    # === ENGLISH PATTERNS ===
-    # Section + number OR words (one, first, second, third...)
+# Ce qui separe le numero d'article de son texte : « .- », « - », « : », « . ».
+_SEPARATEUR_ARTICLE = r'[ \t]*(?:\.?[ \t]*[-–—]|:|\.)'
+
+# Suffixe de « 1er » tel que l'OCR le rend : « 1er », « 1e », « 1r », « 1ºr », « 1° ».
+_SUFFIXE_ORDINAL = r'(?:er|ère|ème|e|r|º[ \t]*r|°[ \t]*r|°)?'
+
+# Le mot « Article » tel que l'OCR le rend : « ARTIiCLE », « ARTICLÈ »,
+# « ARTlCLE », « ARTICLES 170.- ». Mesure sur le Code minier extrait par
+# Docling : 3 articles sur 200 perdaient leur marqueur, et leur texte se
+# fondait dans l'article precedent. Le pluriel n'est admis que suivi d'un
+# numero ET d'un separateur : « Articles 7 et 8 de la loi » est un renvoi.
+_MOT_ARTICLE = (
+    r'Art[iíìl1]{1,2}cl[eèéê]'
+    r'(?:s(?=[ \t_]*\d+[^\s\d]{0,3}' + _SEPARATEUR_ARTICLE + r'))?'
+)
+
+# Docling numerote lui-meme les items de liste : « 2. ARTICLE 41.- », et
+# parfois « . ARTICLE 31.- ». Le prefixe est admis A CONDITION qu'un
+# separateur suive le numero : « 2. Article 12 de la loi » est une
+# enumeration, pas un en-tete. Mesure sur les sorties Docling du banc : 8
+# articles dans 3 documents fusionnaient avec le precedent.
+_PREFIXE_LISTE = (
+    r'(?:(?:\d{1,3}[.)]|\.)[ \t]*'
+    r'(?=(?:' + _MOT_ARTICLE + r'|Art\.)[ \t_]*\d+(?:er|ère|ème|e|r)?' + _SEPARATEUR_ARTICLE + r'))?'
+)
+
+# Ordinaux en toutes lettres, accentues ou non : l'OCR rend les capitales sans
+# accent (« ARTICLE DEUXIEME »), et les lois de finances numerotent bien
+# au-dela de « dixieme ». 17 articles de la loi de finances 2016 etaient
+# perdus, fondus dans le precedent.
+_ORDINAUX = (
+    r'premier|premi[èe]re|deuxi[èe]me|second|seconde|troisi[èe]me|quatri[èe]me'
+    r'|cinqui[èe]me|sixi[èe]me|septi[èe]me|huiti[èe]me|neuvi[èe]me|dixi[èe]me'
+    r'|onzi[èe]me|douzi[èe]me|treizi[èe]me|quatorzi[èe]me|quinzi[èe]me|seizi[èe]me'
+    r'|vingti[èe]me|trenti[èe]me|quaranti[èe]me|cinquanti[èe]me|soixanti[èe]me|centi[èe]me'
+)
+
+# « Section N » est un ARTICLE dans les textes anglais (« Section 1: This law
+# ... »), mais une SUBDIVISION dans les textes francais (« Section 1 : Des
+# dispositions generales »), entre le chapitre et les articles. Applique a un
+# texte francais, ce motif fabriquait des pseudo-articles : verifie, un code
+# numerote 1, 2, 3... ressortait en « 1, 5, 6, 2, 7 ». Ces deux motifs ne
+# servent donc qu'aux textes anglais (voir _semantique_anglaise).
+_SECTION_ARTICLE = (
     _MARKER_PREFIX + r'Section[ \t]*(?:' +
         r'(\d+(?:\.\d+)*)' +  # Section 1, Section 1.1
         r'|' +
         r'(one|first|two|second|three|third|four|fourth|five|fifth|six|sixth|seven|seventh|eight|eighth|nine|ninth|ten|tenth)' +  # Section one, Section first
+    r')\s*[.:\-–]?\s*'
+)
+_SEC_ARTICLE = _MARKER_PREFIX + r'Sec\.?[ \t]*(\d+(?:\.\d+)*)\s*[.:\-–]?[ \t]*'
+_MOTIFS_ARTICLE_ANGLAIS = (_SECTION_ARTICLE, _SEC_ARTICLE)
+
+ARTICLE_PATTERNS = [
+    # === FRENCH PATTERNS ===
+    # Article + numero (1, 1er, 1.1) OU ordinal en lettres (premier, deuxieme...).
+    # « [ \t_]* » : RapidOCR lit le soulignement du mot ARTICLE comme « _ »
+    # (« ARTICLE_1er.- », « Article_ 1 : ») ; 12 marqueurs du banc etaient
+    # perdus, leurs articles fondus dans la base legale.
+    _MARKER_PREFIX + _PREFIXE_LISTE + _MOT_ARTICLE + r'[ \t_]*(?:' +
+        r'(\d+(?:\.\d+)*)' + _SUFFIXE_ORDINAL +
+        r'|' +
+        r'(' + _ORDINAUX + r')' +
     r')\s*[.:\-–]?\s*',
+
+    # Art. (abbreviation) + number OR ordinals
+    _MARKER_PREFIX + _PREFIXE_LISTE + r'Art\.?[ \t_]*(?:' +
+        r'(\d+(?:\.\d+)*)' + _SUFFIXE_ORDINAL +
+        r'|' +
+        r'(' + _ORDINAUX + r')' +
+    r')\s*[.:\-–]?\s*',
+    
+    # === ENGLISH PATTERNS ===
+    # Section + number OR words (one, first, second, third...)
+    _SECTION_ARTICLE,
     
     # Article (English style) + number OR words
     _MARKER_PREFIX + r'Article[ \t]*(?:' +
@@ -72,12 +125,15 @@ ARTICLE_PATTERNS = [
     r')\s*[.:\-–]?\s*',
     
     # Sec. (abbreviation, English) + number
-    _MARKER_PREFIX + r'Sec\.?[ \t]*(\d+(?:\.\d+)*)\s*[.:\-–]?[ \t]*',
+    _SEC_ARTICLE,
 
     # === NUMEROTATION CODIFIEE (Code Général des Impôts, CGI) ===
     # "Article L 94 septies.-", "Article L 94", "Art. M 12 bis"
     # Rencontre dans les lois de finances qui modifient le CGI.
-    _MARKER_PREFIX + r'Art(?:icle|\.)?[ \t]*([A-Z][ \t]*\d+(?:[ \t]+(?:bis|ter|quater|quinquies|'
+    # La lettre de codification est une VRAIE majuscule ((?-i:...)) : sous
+    # IGNORECASE, le « s » de « Articles 413 a 419 » passait pour elle, et le
+    # chatbot citait « Article s 413 ».
+    _MARKER_PREFIX + r'Art(?:icles?|\.)?[ \t]*((?-i:[A-Z])[ \t]*\d+(?:[ \t]+(?:bis|ter|quater|quinquies|'
     r'sexies|septies|octies|novies|decies))?)\s*[.:\-–]?\s*',
 
     # === ORDINAUX COMPOSES (français) ===
@@ -117,80 +173,182 @@ TITLE_PATTERN = r'(?:^|\n)\s*Article\s+\d+\s*[.:]?\s*([^\n]+?)(?:\n|$)'
 # Autrement dit, tout article dont le titre commence par Titre/Chapitre etait
 # silencieusement PERDU. Remplace par [IVXLC]{1,7}, qui ne peut pas etre vide.
 # These define the section/chapter for subsequent articles
+# Numero d'une subdivision. Le chiffre romain est lu sans egard a la casse
+# (« TITRE il » pour « TITRE II »), le mot-cle, lui, reste en capitales. Il peut
+# etre colle au mot-cle (« CHAPITREII », « SECTIONI ») : l'OCR mange l'espace.
+_NUMERO_SUBDIVISION = (
+    r'(?:PREMIER|PREMI[ÈE]RE|UNIQUE|DEUXI[ÈE]ME|TROISI[ÈE]ME|QUATRI[ÈE]ME|CINQUI[ÈE]ME'
+    r'|SIXI[ÈE]ME|SEPTI[ÈE]ME|HUITI[ÈE]ME|NEUVI[ÈE]ME|DIXI[ÈE]ME|(?i:[IVXLC]{1,7})|\d+)\b'
+)
+
 SECTION_PATTERNS = [
-    # TITRE PREMIER - DE L'ÉTAT, TITRE I, TITRE 1, etc.
-    r'(?:^|\n)\s*(TITRE\s+(?:PREMIER|PREMI[ÈE]RE|DEUXI[ÈE]ME|TROISI[ÈE]ME|QUATRI[ÈE]ME|CINQUI[ÈE]ME|SIXI[ÈE]ME|SEPTI[ÈE]ME|HUITI[ÈE]ME|NEUVI[ÈE]ME|DIXI[ÈE]ME|[IVXLC]{1,7}|\d+)\s*[.:\-–]?\s*[^\n]*)',
-    # CHAPITRE PREMIER, CHAPITRE I, CHAPITRE 1, etc.
-    r'(?:^|\n)\s*(CHAPITRE\s+(?:PREMIER|PREMI[ÈE]RE|DEUXI[ÈE]ME|TROISI[ÈE]ME|QUATRI[ÈE]ME|CINQUI[ÈE]ME|SIXI[ÈE]ME|SEPTI[ÈE]ME|HUITI[ÈE]ME|NEUVI[ÈE]ME|DIXI[ÈE]ME|[IVXLC]{1,7}|\d+)\s*[.:\-–]?\s*[^\n]*)',
+    # TITRE PREMIER - DE L'ÉTAT, TITRE I, TITRE 1, TITREII, TITRE il, etc.
+    r'(?:^|\n)\s*(TITRE[ \t]*' + _NUMERO_SUBDIVISION + r'[ \t]*[.:\-–]?[ \t]*[^\n]*)',
+    # CHAPITRE PREMIER, CHAPITRE I, CHAPITRE 1, CHAPITREII, etc.
+    r'(?:^|\n)\s*(CHAPITRE[ \t]*' + _NUMERO_SUBDIVISION + r'[ \t]*[.:\-–]?[ \t]*[^\n]*)',
     # PART ONE, PART I, PART 1 (English)
     r'(?:^|\n)\s*(PART\s+(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|[IVXLC]{1,7}|\d+)\s*[.:\-–]?\s*[^\n]*)',
     # CHAPTER ONE, CHAPTER I, CHAPTER 1 (English)
     r'(?:^|\n)\s*(CHAPTER\s+(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|[IVXLC]{1,7}|\d+)\s*[.:\-–]?\s*[^\n]*)',
 ]
 
+# Sous-division francaise « Section 1 : Des ... », « SECTION II - ... ».
+# Ajoutee aux en-tetes des textes francais seulement. Exige un separateur ou
+# une fin de ligne apres le numero : « Section 2 du chapitre 3 est modifiee »,
+# en debut de ligne dans un article, n'est pas un en-tete et ne doit pas le
+# couper.
+_SECTION_FRANCAISE = (
+    r'(?:^|\n)\s*((?:SOUS-SECTION|SECTION|Section|PARAGRAPHE)[ \t]*' + _NUMERO_SUBDIVISION +
+    # separateur puis titre, ou titre en capitales sur la meme ligne
+    # (« SECTION II DES DÉFINITIONS »), ou fin de ligne
+    r'[ \t]*(?:[.:\-–][^\n]*|[^\na-zà-ÿ]*)(?=\n|$))'
+)
+
+# Marqueur de page pose par l'extracteur : `<<PAGE:n>>`, n = page physique.
+_PAGE_MARKER = re.compile(r'<<PAGE:(\d+)>>')
+
+
+class _PageIndex:
+    """
+    Page physique de chaque position du texte, d'apres les marqueurs.
+
+    La page d'un chunk se lisait sur le PREMIER marqueur trouve DANS son
+    contenu. Or le marqueur qui ouvre une page tombe a la fin du chunk qui la
+    precede : le dernier article de chaque page recevait la page SUIVANTE
+    (« Art.1 p.1 <<PAGE:2>> Art.2 » donnait 2 a l'article 1), et cette page
+    fausse partait aussi dans embed_text. La page d'un chunk est desormais
+    celle du dernier marqueur place AVANT son debut : la convention des
+    citations, un article se cite a la page ou il commence.
+    """
+
+    def __init__(self, text: str):
+        self._debuts: List[int] = []
+        self._pages: List[int] = []
+        for m in _PAGE_MARKER.finditer(text):
+            self._debuts.append(m.start())
+            self._pages.append(int(m.group(1)))
+
+    def page(self, position: int) -> int:
+        i = bisect.bisect_right(self._debuts, position) - 1
+        return self._pages[i] if i >= 0 else 1
+
+
+def _premier_contenu(text: str, debut: int, fin: int) -> int:
+    """Position du premier caractere qui n'est ni un blanc ni un marqueur de page."""
+    i = debut
+    while i < fin:
+        if text[i].isspace():
+            i += 1
+            continue
+        marqueur = _PAGE_MARKER.match(text, i)
+        if marqueur:
+            i = marqueur.end()
+            continue
+        return i
+    return debut
+
+
+def _sans_marqueurs(text: str) -> str:
+    return _PAGE_MARKER.sub('', text).strip()
+
+
+# Valeurs des mots de nombre, sans accent. « second » vaut 2.
+_NOMBRES = {
+    "un": 1, "une": 1, "premier": 1, "premiere": 1, "deux": 2, "second": 2, "seconde": 2,
+    "trois": 3, "quatre": 4, "cinq": 5, "six": 6, "sept": 7, "huit": 8, "neuf": 9,
+    "dix": 10, "onze": 11, "douze": 12, "treize": 13, "quatorze": 14, "quinze": 15,
+    "seize": 16, "vingt": 20, "trente": 30, "quarante": 40, "cinquante": 50,
+    "soixante": 60, "cent": 100,
+}
+# Radical d'un ordinal -> mot de nombre : « cinquieme » -> cinq, « neuvieme » -> neuf
+_RADICAUX = {"cinqu": "cinq", "neuv": "neuf", "un": "un"}
+
+_NOMBRES_ANGLAIS = {
+    'one': '1', 'first': '1', 'two': '2', 'second': '2', 'three': '3', 'third': '3',
+    'four': '4', 'fourth': '4', 'five': '5', 'fifth': '5', 'six': '6', 'sixth': '6',
+    'seven': '7', 'seventh': '7', 'eight': '8', 'eighth': '8', 'nine': '9', 'ninth': '9',
+    'ten': '10', 'tenth': '10',
+}
+
+
+def _sans_accents(texte: str) -> str:
+    import unicodedata
+
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", texte) if not unicodedata.combining(c)
+    )
+
+
+def _ordinal_en_nombre(mot: str) -> Optional[int]:
+    """
+    Ordinal francais en toutes lettres -> nombre, ou None.
+
+    « deuxieme » -> 2, « trente-et-unieme » -> 31, « quatre-vingt-dix-
+    septieme » -> 97, « cent-deuxieme » -> 102. Sans accent, insensible a la
+    casse. Un mot inconnu rend None : l'appelant garde alors le texte.
+    """
+    jetons = [j for j in re.split(r"[-\s]+", _sans_accents(mot).lower()) if j and j != "et"]
+    if not jetons:
+        return None
+    dernier = jetons[-1]
+    if dernier in ("premier", "premiere", "second", "seconde"):
+        jetons[-1] = dernier
+    else:
+        radical = re.sub(r"iemes?$|emes?$", "", dernier)
+        if radical == dernier:
+            return None
+        # « seizieme » -> seize, « trentieme » -> trente : le e final tombe
+        if radical not in _NOMBRES and radical + "e" in _NOMBRES:
+            radical += "e"
+        jetons[-1] = _RADICAUX.get(radical, radical)
+    total = 0
+    for jeton in jetons:
+        valeur = _NOMBRES.get(jeton.rstrip("s"))
+        if valeur is None:
+            return None
+        if valeur == 100:
+            total = (total or 1) * 100
+        elif valeur == 20 and total % 100 == 4:      # quatre-vingt
+            total += 76
+        else:
+            total += valeur
+    return total or None
+
 
 def normalize_article_number(number: str) -> str:
     """
     Normalize article/section numbers to standard format.
-    
+
     Converts ALL variants to numeric format:
-    - French: 'premier', 'première' -> '1', 'deuxième', 'second' -> '2', etc.
+    - French: 'premier', 'deuxieme', 'SEIZIEME', 'quatre-vingt-dix-septieme' -> '1', '2', '16', '97'
     - English: 'one', 'first' -> '1', 'two', 'second' -> '2', etc.
     - Ordinals: '1er', '1ère', '2ème' -> '1', '2', etc.
     - Special: 'PRÉAMBULE', 'PREAMBULE', 'PREAMBLE' -> 'PREAMBULE'
     """
     if not number:
         return number
-    
+
     lower = number.lower().strip()
-    
-    # === FRENCH WORD-TO-NUMBER MAPPING ===
-    french_numbers = {
-        'premier': '1', 'première': '1',
-        'deuxième': '2', 'second': '2', 'seconde': '2',
-        'troisième': '3',
-        'quatrième': '4',
-        'cinquième': '5',
-        'sixième': '6',
-        'septième': '7',
-        'huitième': '8',
-        'neuvième': '9',
-        'dixième': '10',
-    }
-    
-    # === ENGLISH WORD-TO-NUMBER MAPPING ===
-    english_numbers = {
-        'one': '1', 'first': '1',
-        'two': '2', 'second': '2',
-        'three': '3', 'third': '3',
-        'four': '4', 'fourth': '4',
-        'five': '5', 'fifth': '5',
-        'six': '6', 'sixth': '6',
-        'seven': '7', 'seventh': '7',
-        'eight': '8', 'eighth': '8',
-        'nine': '9', 'ninth': '9',
-        'ten': '10', 'tenth': '10',
-    }
-    
-    # Check French word numbers
-    if lower in french_numbers:
-        return french_numbers[lower]
-    
-    # Check English word numbers
-    if lower in english_numbers:
-        return english_numbers[lower]
-    
+
+    if lower in _NOMBRES_ANGLAIS:
+        return _NOMBRES_ANGLAIS[lower]
+
     # Handle preamble
     if lower in ['préambule', 'preambule', 'preamble']:
         return 'PREAMBULE'
-    
+
     # Remove French ordinal suffixes (1er, 1ère, 2ème, 3ème...)
     if lower.endswith(('er', 'ère', 'ème')):
-        # Extract just the number part
         number_clean = re.sub(r'(er|ère|ème)$', '', lower)
         if number_clean.replace('.', '').isdigit():
             return number_clean
-    
+
+    # Ordinal en toutes lettres, simple ou compose
+    if re.fullmatch(r"[a-zà-ÿ\s-]+", lower):
+        valeur = _ordinal_en_nombre(lower)
+        if valeur is not None:
+            return str(valeur)
+
     # Return as-is for numeric values (1, 2, 3, 1.1, 2.3, etc.)
     return number
 
@@ -216,51 +374,36 @@ def _make_chunk(
     }
 
 
-def _update_page(text: str, page_marker_pattern: re.Pattern, current_page: int) -> int:
-    """Extract page number from text if present, else return current page."""
-    page_match = page_marker_pattern.search(text)
-    if page_match:
-        return int(page_match.group(1))
-    return current_page
-
-
 def _extract_pre_article_chunks(
-    processed_text: str, pattern: re.Pattern,
-    page_marker_pattern: re.Pattern, current_page: int,
-) -> Tuple[List[Dict[str, Any]], int, int]:
+    processed_text: str, pattern: re.Pattern, pages: _PageIndex,
+) -> Tuple[List[Dict[str, Any]], int]:
     """
     Extract legal basis and preamble chunks from pre-article text.
 
     Returns:
-        Tuple of (chunks, next_position, current_page)
+        Tuple of (chunks, next_position)
     """
     assert processed_text, "Processed text must not be empty"
     assert pattern is not None, "Article pattern must be provided"
 
-    chunks: List[Dict[str, Any]] = []
-    position = 0
-    matches = list(pattern.finditer(processed_text))
+    premier = pattern.search(processed_text)
+    if not premier:
+        return [], 0
 
-    if not matches:
-        return chunks, position, current_page
+    fin = premier.start()
+    # La vacuite se juge SANS les marqueurs de page. Un texte qui s'ouvre sur
+    # « <<PAGE:1>>\nArticle 1er.- » laissait le marqueur seul devant l'article :
+    # non vide avant nettoyage, vide apres, et _make_chunk levait
+    # AssertionError — avalee plus haut, la loi restait SANS AUCUN article.
+    if not _sans_marqueurs(processed_text[:fin]):
+        return [], 0
 
-    pre_article_text = processed_text[:matches[0].start()].strip()
-    if not pre_article_text:
-        return chunks, position, current_page
-
-    # Find earliest preamble marker
-    preamble_match = _find_earliest_preamble(pre_article_text)
-
+    preamble_match = _find_earliest_preamble(processed_text[:fin])
     if preamble_match:
-        chunks, position, current_page = _split_legal_basis_and_preamble(
-            pre_article_text, preamble_match, page_marker_pattern, current_page
-        )
+        chunks = _split_legal_basis_and_preamble(processed_text, fin, preamble_match, pages)
     else:
-        chunks, position, current_page = _classify_pre_article_text(
-            pre_article_text, page_marker_pattern, current_page
-        )
-
-    return chunks, position, current_page
+        chunks = _classify_pre_article_text(processed_text, fin, pages)
+    return chunks, len(chunks)
 
 
 def _find_earliest_preamble(pre_article_text: str) -> Optional[re.Match]:
@@ -276,73 +419,54 @@ def _find_earliest_preamble(pre_article_text: str) -> Optional[re.Match]:
 
 
 def _split_legal_basis_and_preamble(
-    pre_article_text: str, preamble_match: re.Match,
-    page_marker_pattern: re.Pattern, current_page: int,
-) -> Tuple[List[Dict[str, Any]], int, int]:
+    text: str, fin: int, preamble_match: re.Match, pages: _PageIndex,
+) -> List[Dict[str, Any]]:
     """Split pre-article text into legal basis and preamble chunks."""
     chunks: List[Dict[str, Any]] = []
-    position = 0
+    coupure = preamble_match.start()
 
-    legal_basis_text = pre_article_text[:preamble_match.start()].strip()
-    preamble_text = pre_article_text[preamble_match.start():].strip()
+    # Base legale, si substantielle
+    legal_basis = _sans_marqueurs(text[:coupure])
+    if len(legal_basis) > 20:
+        page = pages.page(_premier_contenu(text, 0, coupure))
+        chunks.append(_make_chunk('LEGAL_BASIS', 'Base légale', legal_basis, len(chunks), None, page))
 
-    # Add legal basis chunk (if substantial)
-    if legal_basis_text and len(legal_basis_text) > 20:
-        current_page = _update_page(legal_basis_text, page_marker_pattern, current_page)
-        clean = page_marker_pattern.sub('', legal_basis_text).strip()
-        chunks.append(_make_chunk('LEGAL_BASIS', 'Base légale', clean, position, None, current_page))
-        position += 1
+    preambule = _sans_marqueurs(text[coupure:fin])
+    if preambule:
+        page = pages.page(_premier_contenu(text, coupure, fin))
+        chunks.append(_make_chunk('PREAMBULE', 'Préambule', preambule, len(chunks), None, page))
 
-    # Add preamble chunk
-    if preamble_text:
-        current_page = _update_page(preamble_text, page_marker_pattern, current_page)
-        clean = page_marker_pattern.sub('', preamble_text).strip()
-        chunks.append(_make_chunk('PREAMBULE', 'Préambule', clean, position, None, current_page))
-        position += 1
-
-    return chunks, position, current_page
+    return chunks
 
 
-def _classify_pre_article_text(
-    pre_article_text: str, page_marker_pattern: re.Pattern, current_page: int,
-) -> Tuple[List[Dict[str, Any]], int, int]:
+def _classify_pre_article_text(text: str, fin: int, pages: _PageIndex) -> List[Dict[str, Any]]:
     """Classify pre-article text as either preamble or legal basis."""
-    is_preamble = any(
-        re.match(p, pre_article_text.strip(), re.IGNORECASE)
-        for p in PREAMBLE_PATTERNS[1:]
-    )
-
-    current_page = _update_page(pre_article_text, page_marker_pattern, current_page)
-    clean = page_marker_pattern.sub('', pre_article_text).strip()
+    clean = _sans_marqueurs(text[:fin])
+    if not clean:
+        return []
+    is_preamble = any(re.match(p, clean, re.IGNORECASE) for p in PREAMBLE_PATTERNS[1:])
 
     number = 'PREAMBULE' if is_preamble else 'LEGAL_BASIS'
     title = 'Préambule' if is_preamble else 'Base légale'
-
-    chunk = _make_chunk(number, title, clean, 0, None, current_page)
-    return [chunk], 1, current_page
+    page = pages.page(_premier_contenu(text, 0, fin))
+    return [_make_chunk(number, title, clean, 0, None, page)]
 
 
 def _extract_article_chunks(
-    processed_text: str, pattern: re.Pattern,
-    page_marker_pattern: re.Pattern, start_position: int,
-    current_page: int, min_article_length: int,
-) -> Tuple[List[Dict[str, Any]], int, int]:
-    """
-    Extract article chunks from text using detected pattern.
-
-    Returns:
-        Tuple of (chunks, next_position, current_page)
-    """
+    processed_text: str, pattern: re.Pattern, pages: _PageIndex,
+    start_position: int, min_article_length: int, english: bool,
+) -> List[Dict[str, Any]]:
+    """Extract article chunks from text using detected pattern."""
     assert processed_text, "Text must not be empty"
     assert min_article_length >= 0, "min_article_length must be non-negative"
 
     chunks: List[Dict[str, Any]] = []
     position = start_position
-    raw_articles = _split_by_pattern_with_sections(processed_text, pattern)
+    raw_articles = _split_by_pattern_with_sections(processed_text, pattern, english)
 
-    for number, content, section in raw_articles:
-        current_page = _update_page(content, page_marker_pattern, current_page)
-        clean_content = page_marker_pattern.sub('', content).strip()
+    for number, content, section, debut in raw_articles:
+        page = pages.page(_premier_contenu(processed_text, debut, len(processed_text)))
+        clean_content = _sans_marqueurs(content)
         normalized_number = normalize_article_number(number)
         parent_id = _get_parent_id(normalized_number)
 
@@ -354,10 +478,10 @@ def _extract_article_chunks(
         clean_content = _clean_article_content(clean_content, False, title)
         char_count = len(clean_content)
 
-        if char_count >= min_article_length:
+        if clean_content and char_count >= min_article_length:
             chunks.append(_make_chunk(
                 normalized_number, title, clean_content,
-                position, section, current_page, parent_id,
+                position, section, page, parent_id,
             ))
             position += 1
         else:
@@ -366,54 +490,68 @@ def _extract_article_chunks(
                 f"({char_count} chars), ignoré"
             )
 
-    return chunks, position, current_page
+    return chunks
 
 
 def _extract_paragraph_chunks(
-    processed_text: str, page_marker_pattern: re.Pattern,
-    current_page: int, min_article_length: int,
+    processed_text: str, pages: _PageIndex, min_article_length: int,
 ) -> List[Dict[str, Any]]:
-    """
-    Extract paragraph chunks from documents without articles.
-
-    Returns:
-        List of chunk dicts
-    """
+    """Extract paragraph chunks from documents without articles."""
     assert processed_text, "Text must not be empty"
     assert min_article_length >= 0, "min_article_length must be non-negative"
 
-    chunks: List[Dict[str, Any]] = []
-    position = 0
-    paragraphs = re.split(r'\n\s*\n', processed_text)
-    paragraphs = [p.strip() for p in paragraphs if p.strip()]
+    # Paragraphes avec leur position, pour lire la page de chacun. Un
+    # paragraphe reduit a un marqueur de page n'en est pas un.
+    paragraphs: List[Tuple[int, str]] = []
+    debut = 0
+    for separateur in re.finditer(r'\n\s*\n', processed_text):
+        paragraphs.append((debut, processed_text[debut:separateur.start()]))
+        debut = separateur.end()
+    paragraphs.append((debut, processed_text[debut:]))
+    paragraphs = [(d, p) for d, p in paragraphs if _sans_marqueurs(p)]
 
+    chunks: List[Dict[str, Any]] = []
     if len(paragraphs) > 1:
-        for i, paragraph in enumerate(paragraphs, start=1):
-            current_page = _update_page(paragraph, page_marker_pattern, current_page)
-            clean_para = page_marker_pattern.sub('', paragraph).strip()
+        for i, (debut, paragraph) in enumerate(paragraphs, start=1):
+            clean_para = _sans_marqueurs(paragraph)
             if len(clean_para) >= min_article_length:
+                page = pages.page(_premier_contenu(processed_text, debut, debut + len(paragraph)))
                 chunks.append(_make_chunk(
                     f'PARA_{i}', f'Paragraphe {i}', clean_para,
-                    position, None, current_page,
+                    len(chunks), None, page,
                 ))
-                position += 1
-    else:
+    elif paragraphs:
         logger.info("📄 Texte continu - stockage en un seul chunk")
-        current_page = _update_page(processed_text, page_marker_pattern, current_page)
-        clean_text = page_marker_pattern.sub('', processed_text).strip()
+        page = pages.page(_premier_contenu(processed_text, 0, len(processed_text)))
         chunks.append(_make_chunk(
-            'FULL_TEXT', 'Document complet', clean_text,
-            0, None, current_page,
+            'FULL_TEXT', 'Document complet', _sans_marqueurs(processed_text),
+            0, None, page,
         ))
 
     return chunks
+
+
+def _semantique_anglaise(text: str, language: Optional[str]) -> bool:
+    """
+    « Section N » est-il un article (texte anglais) ou une subdivision ?
+
+    La langue, quand l'appelant la connait, tranche. Sinon : un texte qui porte
+    au moins un marqueur « Article N » ou « Art. N » est traite en francais.
+    """
+    if language:
+        return language.lower().startswith("en")
+    for motif in ARTICLE_PATTERNS[:2]:
+        if re.search(motif, text, re.IGNORECASE | re.MULTILINE):
+            return False
+    return True
 
 
 def extract_articles(
     text: str,
     min_article_length: int = 10,
     preserve_formatting: bool = False,
-    strict: bool = True
+    strict: bool = True,
+    language: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Extract articles from legal document text with COMPLETE content preservation.
@@ -428,6 +566,8 @@ def extract_articles(
         min_article_length: Minimum characters per chunk
         preserve_formatting: Keep original whitespace/formatting
         strict: Raise errors vs warnings for validation failures
+        language: Langue du document ("fr", "en"), si connue. Decide du role
+            de « Section N » : article en anglais, subdivision en francais.
 
     Returns:
         List of chunk dicts with standard keys (number, title, content, etc.)
@@ -438,32 +578,28 @@ def extract_articles(
     """
     # 1. Validate input
     assert isinstance(text, str), "text must be a string"
-    if not text or not text.strip():
+    if not text or not _sans_marqueurs(text):
         raise ValueError("Le texte ne peut pas être vide")
     if len(text) > 5_000_000:
         raise ValueError(f"Texte trop volumineux ({len(text)} chars, max 5M)")
 
     # 2. Preprocess and detect pattern
     processed_text = _preprocess_text(text, preserve_formatting)
-    pattern = _detect_article_pattern(processed_text)
-    page_marker_pattern = re.compile(r'<<PAGE:(\d+)>>')
+    english = _semantique_anglaise(processed_text, language)
+    pattern = _detect_article_pattern(processed_text, english)
+    pages = _PageIndex(processed_text)
 
     # 3. Extract chunks based on document structure
     if pattern:
         logger.info("📋 Document avec articles détecté")
-        pre_chunks, position, page = _extract_pre_article_chunks(
-            processed_text, pattern, page_marker_pattern, 1
-        )
-        article_chunks, _, _ = _extract_article_chunks(
-            processed_text, pattern, page_marker_pattern,
-            position, page, min_article_length
+        pre_chunks, position = _extract_pre_article_chunks(processed_text, pattern, pages)
+        article_chunks = _extract_article_chunks(
+            processed_text, pattern, pages, position, min_article_length, english
         )
         chunks = pre_chunks + article_chunks
     else:
         logger.info("📄 Document sans articles - extraction par paragraphes")
-        chunks = _extract_paragraph_chunks(
-            processed_text, page_marker_pattern, 1, min_article_length
-        )
+        chunks = _extract_paragraph_chunks(processed_text, pages, min_article_length)
 
     # 4. Final validation
     if not chunks:
@@ -515,7 +651,7 @@ def _preprocess_text(text: str, preserve_formatting: bool) -> str:
 _SECONDARY_PATTERN_RATIO = 0.20
 
 
-def _detect_article_pattern(text: str) -> Optional[re.Pattern]:
+def _detect_article_pattern(text: str, english: bool = True) -> Optional[re.Pattern]:
     """
     Compose l'expression de detection des articles a partir du texte.
 
@@ -531,12 +667,18 @@ def _detect_article_pattern(text: str) -> Optional[re.Pattern]:
     fusionnes en une alternance. Chaque branche garde ses propres groupes de
     capture et l'appelant lit le premier groupe non nul, donc l'alternance ne
     change pas la lecture du numero.
+
+    Dans un texte francais, « Section N » est une subdivision : ses motifs ne
+    sont pas candidats (voir _SECTION_ARTICLE).
     """
+    candidats = [
+        p for p in ARTICLE_PATTERNS if english or p not in _MOTIFS_ARTICLE_ANGLAIS
+    ]
     counts = {
         pattern_str: len(
             re.compile(pattern_str, re.IGNORECASE | re.MULTILINE).findall(text)
         )
-        for pattern_str in ARTICLE_PATTERNS
+        for pattern_str in candidats
     }
 
     best = max(counts.values())
@@ -545,10 +687,10 @@ def _detect_article_pattern(text: str) -> Optional[re.Pattern]:
         return None
 
     seuil = max(1, best * _SECONDARY_PATTERN_RATIO)
-    retenus = [p for p in ARTICLE_PATTERNS if counts[p] >= seuil]
+    retenus = [p for p in candidats if counts[p] >= seuil]
 
     logger.info(
-        f"📋 {len(retenus)} motif(s) retenu(s) sur {len(ARTICLE_PATTERNS)}, "
+        f"📋 {len(retenus)} motif(s) retenu(s) sur {len(candidats)}, "
         f"{sum(counts[p] for p in retenus)} occurrence(s)"
     )
 
@@ -581,15 +723,41 @@ def _split_by_pattern(text: str, pattern: re.Pattern) -> List[Tuple[str, str]]:
     return articles
 
 
-def _split_by_pattern_with_sections(text: str, pattern: re.Pattern) -> List[Tuple[str, str, Optional[str]]]:
+def _renvoi_en_liste(match: re.Match) -> bool:
+    """
+    Une puce, puis un numero SANS separateur : un renvoi, pas un marqueur.
+
+    « - article 12 de la loi n° 2016/017 ; » dans une liste d'abrogations
+    coupait l'article en cours et inventait un article 12. Un marqueur que
+    Docling rend en element de liste porte toujours son separateur :
+    « - ARTICLE 12.- (1) ... ».
+    """
+    texte = match.string
+    debut = match.start() + len(match.group(0)) - len(match.group(0).lstrip("\r\n"))
+    fin = texte.find("\n", debut)
+    ligne = texte[debut:fin if fin != -1 else len(texte)]
+    # Une puce suivie d'un blanc : « **Article 3** : » est une emphase
+    puce = re.match(r"[ \t]*[-*•][ \t]+", ligne)
+    if not puce:
+        return False
+    return not re.match(
+        r"\S+[ \t_]*(?:\d+[^\s\d]{0,3}|[A-Za-zÀ-ÿ]{4,})[ \t]*[.:\-–—]", ligne[puce.end():]
+    )
+
+
+def _split_by_pattern_with_sections(
+    text: str, pattern: re.Pattern, english: bool = True
+) -> List[Tuple[str, str, Optional[str], int]]:
     """
     Split text by article pattern WITH section tracking.
-    
+
     Detects TITRE and CHAPITRE headers between articles and associates
-    each article with its current section.
-    
+    each article with its current section. In French texts, « Section N »
+    sub-divisions are section headers too.
+
     Returns:
-        List of tuples: (article_number, content, section_header)
+        List of tuples: (article_number, content, section_header, start), where
+        `start` is the position of the chunk in `text`, used to read its page.
     """
     articles = []
     
@@ -603,13 +771,14 @@ def _split_by_pattern_with_sections(text: str, pattern: re.Pattern) -> List[Tupl
     # silencieusement. Le compromis est asymetrique : rater un en-tete en
     # minuscules ne coute qu'une metadonnee de section, le confondre avec un
     # titre coute l'article entier.
+    motifs_section = SECTION_PATTERNS if english else SECTION_PATTERNS + [_SECTION_FRANCAISE]
     section_pattern = re.compile(
-        '|'.join(f'({p})' for p in SECTION_PATTERNS),
+        '|'.join(f'({p})' for p in motifs_section),
         re.MULTILINE
     )
     
     # Find all article matches
-    article_matches = list(pattern.finditer(text))
+    article_matches = [m for m in pattern.finditer(text) if not _renvoi_en_liste(m)]
     
     # Track current section
     current_section = None
@@ -659,17 +828,18 @@ def _split_by_pattern_with_sections(text: str, pattern: re.Pattern) -> List[Tupl
         # Article content (from this match to next match or end)
         start = match.end()
         end = article_matches[i + 1].start() if i + 1 < len(article_matches) else len(text)
-        content = text[start:end].strip()
 
         # Un en-tete de section trouve DANS le contenu marque la fin de
         # l'article : ce qui suit appartient a la nouvelle section.
-        section_in_content = section_pattern.search(content)
+        section_in_content = section_pattern.search(text, start, end)
         chapeau = ""
         if section_in_content:
-            chapeau = content[section_in_content.end():].strip()
-            content = content[:section_in_content.start()].strip()
+            chapeau = text[section_in_content.end():end].strip()
+            content = text[start:section_in_content.start()].strip()
+        else:
+            content = text[start:end].strip()
 
-        articles.append((number, content, current_section))
+        articles.append((number, content, current_section, match.start()))
 
         # Le chapeau de section etait purement SUPPRIME : le texte situe entre
         # l'en-tete TITRE/CHAPITRE et l'article suivant n'etait rattache a
@@ -688,6 +858,7 @@ def _split_by_pattern_with_sections(text: str, pattern: re.Pattern) -> List[Tupl
                 f"SECTION_{section_seq}",
                 chapeau,
                 section_in_content.group(0).strip(),
+                section_in_content.end(),
             ))
             section_seq += 1
 

@@ -599,3 +599,210 @@ class TestMarkdownArticleHeadings:
                 "Article 2. Seconde disposition du texte, elle aussi de longueur "
                 "raisonnable pour le decoupage.")
         assert self._numbers(text) == ["1", "2"]
+
+
+class TestPagesEtMarqueurs:
+    """
+    Le numero de page d'un article et les textes qui s'ouvrent sur un marqueur.
+
+    Deux defauts verifies avec la sortie Gemini, et qui auraient touche Docling
+    de la meme facon : la page lue sur le PREMIER marqueur du contenu donnait au
+    dernier article de chaque page la page suivante ; et un texte ouvrant sur
+    « <<PAGE:1>> » puis directement sur un article levait AssertionError, avalee
+    plus haut — la loi ressortait sans un seul article.
+    """
+
+    def _pages(self, text, **kw):
+        return [
+            (c["number"], c["page_number"])
+            for c in extract_articles(text, strict=False, min_article_length=1, **kw)
+        ]
+
+    def test_un_article_se_cite_a_la_page_ou_il_commence(self):
+        text = (
+            "<<PAGE:1>>\nArticle 1.- Premiere disposition, entierement en page un.\n\n"
+            "<<PAGE:2>>\nArticle 2.- Seconde disposition, qui commence en page deux\n"
+            "et continue.\n\n<<PAGE:3>>\nfin de l'article deux en page trois.\n"
+            "Article 3.- Troisieme disposition."
+        )
+        assert self._pages(text) == [("1", 1), ("2", 2), ("3", 3)]
+
+    def test_le_marqueur_ne_reste_dans_aucun_contenu(self):
+        text = "<<PAGE:1>>\nArticle 1.- Premiere.\n\n<<PAGE:2>>\nArticle 2.- Seconde."
+        chunks = extract_articles(text, strict=False, min_article_length=1)
+        assert all("<<PAGE" not in c["content"] for c in chunks)
+
+    def test_un_texte_qui_s_ouvre_sur_un_article(self):
+        text = "<<PAGE:1>>\nArticle 1er.- Le present decret entre en vigueur ce jour."
+        assert self._pages(text) == [("1", 1)]
+
+    def test_une_premiere_page_blanche_omise(self):
+        text = "<<PAGE:2>>\nArticle 1er.- Disposition unique, en page deux."
+        assert self._pages(text) == [("1", 2)]
+
+    def test_un_texte_fait_seulement_de_marqueurs_est_vide(self):
+        with pytest.raises(ValueError):
+            extract_articles("<<PAGE:1>>\n\n<<PAGE:2>>\n", strict=False)
+
+    def test_paragraphes_sans_article_portent_leur_page(self):
+        text = "<<PAGE:1>>\nPremier paragraphe du texte.\n\n<<PAGE:2>>\nSecond paragraphe."
+        chunks = extract_articles(text, strict=False, min_article_length=1)
+        assert [c["page_number"] for c in chunks] == [1, 2]
+
+
+class TestSectionsFrancaises:
+    """
+    « Section N » : un article en anglais, une subdivision en francais.
+
+    Le motif anglais s'appliquait aux textes francais et fabriquait des
+    pseudo-articles : un code numerote 1, 2, 3... ressortait « 1, 5, 6, 2, 7 ».
+    """
+
+    TEXTE = (
+        "Article 1.- Objet du present texte, en vigueur des sa signature.\n"
+        "Section 1 : Des organes\n"
+        "Article 2.- Les organes sont le conseil et la direction generale.\n"
+        "Section 2 : Du fonctionnement\n"
+        "Article 3.- Le conseil se reunit deux fois par an en session ordinaire."
+    )
+
+    def test_section_francaise_est_une_subdivision(self):
+        chunks = extract_articles(self.TEXTE, strict=False, min_article_length=1)
+        numeros = [c["number"] for c in chunks]
+        assert numeros == ["1", "2", "3"]
+        assert chunks[1]["section"] == "Section 1 : Des organes"
+        assert chunks[2]["section"] == "Section 2 : Du fonctionnement"
+
+    def test_langue_fournie_par_l_appelant(self):
+        chunks = extract_articles(
+            self.TEXTE, strict=False, min_article_length=1, language="fr"
+        )
+        assert [c["number"] for c in chunks] == ["1", "2", "3"]
+
+    def test_section_reste_un_article_en_anglais(self):
+        text = (
+            "Section 1: This law lays down the rules governing companies.\n"
+            "Section 2: It shall apply throughout the national territory."
+        )
+        chunks = extract_articles(text, strict=False, min_article_length=1, language="en")
+        assert [c["number"] for c in chunks] == ["1", "2"]
+
+    def test_renvoi_en_debut_de_ligne_ne_coupe_pas_l_article(self):
+        text = (
+            "Article 1.- Dispositions modificatives applicables au present texte.\n"
+            "Section 2 du chapitre 3 est modifiee comme suit.\n"
+            "Article 2.- Suite."
+        )
+        chunks = extract_articles(text, strict=False, min_article_length=1, language="fr")
+        assert [c["number"] for c in chunks] == ["1", "2"]
+        assert "Section 2 du chapitre 3" in chunks[0]["content"]
+
+
+class TestFormesDocling:
+    """Marqueurs d'article tels que Docling et son OCR les rendent (corpus reel)."""
+
+    @staticmethod
+    def numeros(texte):
+        return [
+            c["number"]
+            for c in extract_articles(texte, strict=False, min_article_length=1, language="fr")
+        ]
+
+    def test_souligne_entre_article_et_numero(self):
+        """4008 : « ARTICLE_1er.- »."""
+        texte = (
+            "ARTICLE_1er.- Le présent décret fixe les indemnités.\n\n"
+            "ARTICLE_2.- (1) Les indemnités sont prises en charge."
+        )
+        assert self.numeros(texte) == ["1", "2"]
+
+    def test_prefixe_de_liste_avant_l_article(self):
+        """5858 : Docling numerote en liste des paragraphes qui sont des articles."""
+        texte = (
+            "ARTICLE 40.- (1) Le Conseil comprend :\n\n- tous les enseignants;\n\n"
+            "2. ARTICLE 41.- (1) Le Conseil se réunit.\n"
+            "5. ARTICLE 42.- L'EGCIM comprend des Départements.\n"
+            ". ARTICLE 31.- (1) Le Conseil d'Etablissement est composé."
+        )
+        assert self.numeros(texte) == ["40", "41", "42", "31"]
+
+    def test_suffixe_ordinal_ecorche(self):
+        assert self.numeros("Article 1 º r.- Texte un.\nArticle 2.- Texte deux.") == ["1", "2"]
+
+    def test_numeros_en_toutes_lettres(self):
+        texte = (
+            "ARTICLE PREMIER.- Texte un.\nARTICLE DEUXIEME.- Texte deux.\n"
+            "ARTICLE SEIZIEME.- Texte seize.\nARTICLE QUATRE-VINGT-DIX-NEUVIEME.- Texte."
+        )
+        assert self.numeros(texte) == ["1", "2", "16", "99"]
+
+    def test_en_tetes_colles_par_l_ocr(self):
+        """10360, 9866 : « CHAPITREII », « SECTIONI », « TITRE il »."""
+        texte = (
+            "ARTICLE 6.- Texte six du chapitre.\n\n"
+            "CHAPITREII DES MESURES DE LUTTE PREVENTIVE\n\n"
+            "SECTIONI DE L'ANALYSE DES RISQUES\n\n"
+            "ARTICLE 7.- Texte sept.\n\n"
+            "TITRE il DU REGIME JURIDIQUE DES MINES\n\n"
+            "ARTICLE 8.- Texte huit."
+        )
+        chunks = extract_articles(texte, strict=False, min_article_length=1, language="fr")
+        par_numero = {c["number"]: c for c in chunks}
+        # L'en-tete ne se colle pas a l'article qui le precede
+        assert "CHAPITRE" not in par_numero["6"]["content"]
+        assert par_numero["6"]["content"].endswith("Texte six du chapitre.")
+        assert par_numero["7"]["section"] == "SECTIONI DE L'ANALYSE DES RISQUES"
+        assert par_numero["8"]["section"] == "TITRE il DU REGIME JURIDIQUE DES MINES"
+
+
+@pytest.mark.parametrize("mot, numero", [
+    ("PREMIER", "1"),
+    ("1er", "1"),
+    ("SEIZIEME", "16"),
+    ("seizième", "16"),
+    ("TRENTIEME", "30"),
+    ("vingt et unième", "21"),
+    ("soixante-et-onzième", "71"),
+    ("QUATRE-VINGT-ONZIEME", "91"),
+    ("quatre-vingt-dix-neuvième", "99"),
+    ("centième", "100"),
+])
+def test_ordinal_en_nombre(mot, numero):
+    from app.utils.text_chunker import normalize_article_number
+
+    assert normalize_article_number(mot) == numero
+
+
+class TestMarqueursEcorches:
+    """Code minier (9866) extrait par Docling : 3 marqueurs sur 200 perdus."""
+
+    @staticmethod
+    def numeros(texte):
+        return [
+            c["number"]
+            for c in extract_articles(texte, strict=False, min_article_length=1, language="fr")
+        ]
+
+    def test_mot_article_ecorche(self):
+        texte = (
+            "ARTICLE 80.- (1) Texte quatre-vingt.\n\n"
+            "ARTIiCLE 81.- Le permis de reconnaissance est incessible.\n\n"
+            "ARTICLÈ 114.- (1) La détention est soumise.\n\n"
+            "4. ARTICLES 170.- (1) Les titres miniers."
+        )
+        assert self.numeros(texte) == ["80", "81", "114", "170"]
+
+    def test_renvoi_en_liste_ne_coupe_pas_l_article(self):
+        texte = (
+            "ARTICLE 171.- Sont abrogées :\n"
+            "- articles 7 et 8 de la loi n° 2016/017 ;\n"
+            "- article 12 de la loi n° 2001/015 ;\n"
+            "- article premier de la loi n° 2001/016.\n"
+            "ARTICLE 172.- Texte."
+        )
+        chunks = extract_articles(texte, strict=False, min_article_length=1, language="fr")
+        assert [c["number"] for c in chunks] == ["171", "172"]
+        assert "article 12 de la loi" in chunks[0]["content"]
+
+    def test_marqueur_en_liste_avec_separateur_reconnu(self):
+        assert self.numeros("- ARTICLE 12.- (1) Texte.\n- Article 13 : Suite.") == ["12", "13"]
