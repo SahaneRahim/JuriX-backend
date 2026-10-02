@@ -41,6 +41,24 @@ VERIFY = "/api/v1/auth/verify-email"
 
 
 @pytest.fixture
+def sans_brevo(monkeypatch):
+    """
+    Impose l'absence de configuration d'envoi.
+
+    Le test lisait `settings.BREVO_API_KEY` tel quel et affirmait qu'il etait
+    vide : il ne prouvait donc son invariant que sur une machine ou Brevo
+    n'etait pas configure. Le jour ou une cle est posee dans `.env` — ce qui
+    est le cas normal en production et desormais en developpement — le test
+    tombait, alors que le comportement protege, lui, n'avait pas bouge.
+    """
+    monkeypatch.setattr(settings, "BREVO_API_KEY", "")
+    monkeypatch.setattr(settings, "BREVO_SENDER_EMAIL", "")
+    reinitialiser_letranglement_ip()
+    yield
+    reinitialiser_letranglement_ip()
+
+
+@pytest.fixture
 def brevo(monkeypatch):
     monkeypatch.setattr(settings, "BREVO_API_KEY", "xkeysib-cle-de-test")
     monkeypatch.setattr(settings, "BREVO_SENDER_EMAIL", "expediteur@example.cm")
@@ -62,14 +80,15 @@ async def _inscrire(client, email="rahim@example.cm"):
 class TestSansConfiguration:
     @pytest.mark.asyncio
     @respx.mock
-    async def test_sans_cle_brevo_l_inscription_est_inchangee(self, client, db_session):
+    async def test_sans_cle_brevo_l_inscription_est_inchangee(
+        self, client, db_session, sans_brevo
+    ):
         """
         LA PREUVE QUE RIEN NE BOUGE. Voir le point 1 du docstring.
 
         Aucune requete sortante, aucun jeton cree, et la reponse est celle
         d'avant : 201 avec un jeton de session.
         """
-        assert settings.BREVO_API_KEY == ""
         route = respx.post(API_BREVO).mock(return_value=httpx.Response(201))
 
         r = await _inscrire(client)
