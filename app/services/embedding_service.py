@@ -22,11 +22,15 @@ Version: 4.0.0 (fournisseurs interchangeables)
 
 import asyncio
 import hashlib
+import importlib.util
 import json
 import logging
+import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -151,8 +155,215 @@ class GeminiProvider:
         return [np.array(emb.values, dtype=np.float32) for emb in result.embeddings]
 
 
-def _construire_fournisseur(api_key: Optional[str] = None) -> GeminiProvider:
-    """Fournisseur par defaut, selon la configuration."""
+GEMMA_MODEL_ID = "onnx-community/embeddinggemma-300m-ONNX"
+
+# Prefixes d'EmbeddingGemma, AU CARACTERE PRES : espace final, « none » en
+# minuscules, barres ASCII. Source : la fiche du modele. Sans eux, ou avec le
+# meme des deux cotes, le classement change sans la moindre erreur (mesure).
+# Ils entrent dans l'empreinte : les modifier change la cle de cache et la
+# provenance des vecteurs.
+#
+# Document : « title: none » et non le titre de la loi. La regle R2 de
+# app/utils/chunk_refiner.py place DEJA l'en-tete du document dans embed_text ;
+# le remettre ici le doublerait et rapprocherait tous les articles d'une meme
+# loi, au detriment du classement a l'interieur du document.
+_GEMMA_PREFIXES = {
+    "RETRIEVAL_QUERY": "task: search result | query: ",
+    "RETRIEVAL_DOCUMENT": "title: none | text: ",
+}
+
+# Session ONNX et tokenizer : charges UNE fois par processus, partages par
+# toutes les instances. process_law.py construit un EmbeddingService par loi ;
+# un chargement par instance relirait 300 Mo et 1,5 s de tokenizer a chaque
+# loi. Le dictionnaire est garde par un verrou parce que lru_cache n'est pas
+# atomique au premier appel : deux threads chargeraient chacun leur copie.
+_gemma_ressources: Dict[tuple, tuple] = {}
+_gemma_verrou_chargement = threading.Lock()
+
+# Verrou pose sur l'encodage de DOCUMENTS seulement. Deux ingestions
+# simultanees occuperaient chacune tous les coeurs et cumuleraient leur
+# memoire ; les requetes, elles, ne doivent jamais attendre un lot entier.
+_gemma_verrou_documents = threading.Lock()
+
+
+def _charger_gemma(chemin_onnx: str, chemin_tokenizer: str, max_tokens: int, threads: int):
+    """
+    Charge (ou rend) la session et le tokenizer, configures une seule fois.
+
+    Le tokenizer est configure ICI et n'est plus jamais modifie : appeler
+    enable_truncation sur un objet partage entre threads provoque des erreurs
+    « Already borrowed » intermittentes, cote Rust.
+    """
+    cle = (chemin_onnx, chemin_tokenizer, max_tokens, threads)
+    with _gemma_verrou_chargement:
+        if cle not in _gemma_ressources:
+            import onnxruntime as ort
+            from tokenizers import Tokenizer
+
+            tok = Tokenizer.from_file(chemin_tokenizer)
+            # Sans troncature, un texte de plus de 2048 jetons part entier et
+            # onnxruntime leve une erreur RotaryEmbedding. tokenizer.json porte
+            # « truncation: null » : il faut l'activer soi-meme.
+            tok.enable_truncation(max_length=max_tokens)
+            # Un « <eos> » ou un « <image_soft_token> » laisse par l'OCR doit
+            # etre lu comme du TEXTE. Sinon il devient un jeton de controle :
+            # le vecteur est altere en silence, et l'id 262144 de
+            # <image_soft_token>, hors de la table d'embeddings, fait echouer
+            # le lot entier.
+            tok.encode_special_tokens = True
+
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = threads
+            options.inter_op_num_threads = 1
+            session = ort.InferenceSession(
+                chemin_onnx, sess_options=options, providers=["CPUExecutionProvider"]
+            )
+            _gemma_ressources[cle] = (session, tok)
+            logger.info(f"✅ EmbeddingGemma charge ({chemin_onnx}, {threads} fils)")
+        return _gemma_ressources[cle]
+
+
+def _fils_par_defaut() -> int:
+    """Coeurs physiques moins un : la recherche doit respirer pendant une ingestion."""
+    try:
+        import psutil
+
+        physiques = psutil.cpu_count(logical=False)
+    except ImportError:
+        physiques = None
+    physiques = physiques or max(1, (os.cpu_count() or 2) // 2)
+    return max(1, physiques - 1)
+
+
+class GemmaProvider:
+    """
+    EmbeddingGemma, execute EN LOCAL par onnxruntime. Gratuit, sans reseau.
+
+    Respecte le contrat decrit sur GeminiProvider. Trois differences de nature :
+    il ne rejoue pas (un modele local qui echoue echouera pareil), il ne fait
+    pas de pause entre lots, et il charge ses ressources paresseusement — le
+    mode Gemini et les tests n'importent jamais onnxruntime.
+    """
+
+    name = "gemma"
+    label = "EmbeddingGemma ONNX (local)"
+    model = GEMMA_MODEL_ID
+    native_dim = 768
+    retryable = False
+    inter_batch_delay_s = 0.0
+
+    # Budget de jetons par appel au modele (nombre de textes x longueur du plus
+    # long, une fois completes). Une tranche fixe de vingt textes de 2048
+    # jetons demanderait plusieurs Go ; un budget borne la memoire quelle que
+    # soit la longueur des articles.
+    JETONS_PAR_APPEL = 6000
+
+    def __init__(self):
+        self.dossier = Path(settings.GEMMA_MODEL_DIR)
+        self.fichier = settings.GEMMA_ONNX_FILE
+        self.revision = settings.GEMMA_REVISION
+        self.max_tokens = settings.GEMMA_MAX_TOKENS
+        self.fils = settings.GEMMA_INTRA_OP_THREADS or _fils_par_defaut()
+
+        # Controles BON MARCHE, a la construction : une installation
+        # incomplete doit se voir ici, pas au premier encodage, ou la recherche
+        # hybride avalerait l'erreur et repondrait en plein texte seul.
+        manquants = [m for m in ("onnxruntime", "tokenizers") if importlib.util.find_spec(m) is None]
+        if manquants:
+            raise EmbeddingServiceError(f"Dependances absentes : {', '.join(manquants)}")
+        for relatif in (self.fichier, self.fichier + "_data", "tokenizer.json"):
+            if not (self.dossier / relatif).is_file():
+                raise EmbeddingServiceError(
+                    f"Fichier du modele introuvable : {self.dossier / relatif}. "
+                    f"GEMMA_MODEL_DIR={settings.GEMMA_MODEL_DIR}"
+                )
+
+    @property
+    def fingerprint(self) -> str:
+        prefixes = hashlib.sha256(
+            json.dumps(_GEMMA_PREFIXES, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:8]
+        return (
+            f"{self.name}|{self.model}@{self.revision[:12]}|{self.fichier}"
+            f"|t{self.max_tokens}|p{prefixes}"
+        )
+
+    def embed(self, texts: List[str], task_type: str, dim: int) -> List[np.ndarray]:
+        prefixe = _GEMMA_PREFIXES.get(task_type)
+        if prefixe is None:
+            # Refuser plutot qu'ignorer : un task_type inconnu encode sans
+            # prefixe, donc dans un espace legerement different, sans erreur.
+            raise EmbeddingServiceError(f"task_type inconnu pour EmbeddingGemma : {task_type}")
+        if dim > self.native_dim:
+            raise EmbeddingServiceError(f"Dimension {dim} > {self.native_dim}, native d'EmbeddingGemma")
+
+        session, tok = _charger_gemma(
+            str(self.dossier / self.fichier),
+            str(self.dossier / "tokenizer.json"),
+            self.max_tokens,
+            self.fils,
+        )
+
+        encodages = tok.encode_batch([prefixe + t for t in texts])
+        for i, enc in enumerate(encodages):
+            if enc.overflowing:
+                # 10 000 caracteres valent ~2 100 a 2 500 jetons : la fin des
+                # articles les plus longs disparait. La taire serait mentir.
+                logger.warning(
+                    f"✂️ Texte tronque a {self.max_tokens} jetons "
+                    f"({len(texts[i])} caracteres) : la fin n'est pas encodee"
+                )
+
+        if task_type == "RETRIEVAL_DOCUMENT":
+            with _gemma_verrou_documents:
+                vecteurs = self._encoder(session, encodages)
+        else:
+            vecteurs = self._encoder(session, encodages)
+
+        # Matryoshka : sous 768, tronquer suffit ; le service renormalise.
+        return [v[:dim].astype(np.float32) for v in vecteurs]
+
+    def _encoder(self, session, encodages) -> List[np.ndarray]:
+        """Lots par budget de jetons, tries par longueur ; ordre d'origine rendu."""
+        ordre = sorted(range(len(encodages)), key=lambda i: len(encodages[i].ids))
+        sortie: Dict[int, np.ndarray] = {}
+
+        lot: List[int] = []
+        for i in ordre + [None]:
+            if i is not None:
+                candidat = lot + [i]
+                longueur = len(encodages[i].ids)  # ordre croissant : le plus long est le dernier
+                if not lot or len(candidat) * longueur <= self.JETONS_PAR_APPEL:
+                    lot = candidat
+                    continue
+            if lot:
+                for j, v in zip(lot, self._passe(session, [encodages[k] for k in lot])):
+                    sortie[j] = v
+            lot = [i] if i is not None else []
+
+        return [sortie[i] for i in range(len(encodages))]
+
+    @staticmethod
+    def _passe(session, encodages) -> np.ndarray:
+        """Un appel au modele. Complete A DROITE, par id 0 et masque 0."""
+        longueur = max(len(e.ids) for e in encodages)
+        ids = np.zeros((len(encodages), longueur), dtype=np.int64)
+        masque = np.zeros((len(encodages), longueur), dtype=np.int64)
+        for r, e in enumerate(encodages):
+            ids[r, : len(e.ids)] = e.ids
+            masque[r, : len(e.ids)] = e.attention_mask
+        # PAR NOM, jamais par position : la sortie 0 est last_hidden_state, des
+        # etats PAR JETON. Les moyenner donne un vecteur de 768, de norme 1 une
+        # fois normalise, d'apparence parfaitement saine — et quasi orthogonal
+        # au vrai (cosinus 0,0188 mesure). sentence_embedding inclut les deux
+        # couches Dense et la normalisation.
+        return session.run(["sentence_embedding"], {"input_ids": ids, "attention_mask": masque})[0]
+
+
+def _construire_fournisseur(api_key: Optional[str] = None):
+    """Fournisseur par defaut, selon settings.EMBEDDING_PROVIDER."""
+    if settings.EMBEDDING_PROVIDER == "gemma":
+        return GemmaProvider()
     return GeminiProvider(api_key=api_key)
 
 
@@ -175,7 +386,9 @@ class EmbeddingService:
         use_cache: Flag activation cache
     """
 
-    EMBEDDING_MODEL = settings.GEMINI_EMBEDDING_MODEL
+    EMBEDDING_MODEL = (
+        GEMMA_MODEL_ID if settings.EMBEDDING_PROVIDER == "gemma" else settings.GEMINI_EMBEDDING_MODEL
+    )
     EMBEDDING_DIM = settings.EMBEDDING_DIM
     # Version de la cle de cache. A incrementer si la facon de construire les
     # vecteurs change sans que l'empreinte du fournisseur ni la dimension ne
@@ -221,8 +434,11 @@ class EmbeddingService:
             try:
                 provider = _construire_fournisseur(api_key)
             except Exception as e:
-                logger.error(f"❌ Échec configuration Gemini API: {e}")
-                raise EmbeddingServiceError(f"Impossible de configurer Gemini API: {e}") from e
+                fournisseur = settings.EMBEDDING_PROVIDER
+                logger.error(f"❌ Échec configuration du fournisseur « {fournisseur} »: {e}")
+                raise EmbeddingServiceError(
+                    f"Impossible de configurer le fournisseur d'embeddings « {fournisseur} »: {e}"
+                ) from e
         self._provider = provider
 
         # Refuse a la construction ce qui echouerait au premier appel. Sans ce

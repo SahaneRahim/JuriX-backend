@@ -26,6 +26,7 @@ coverage.xml
 
 # ML models (large binary files — store elsewhere or use git LFS)
 models/fasttext/
+models/embeddinggemma-300m-onnx/
 models/*.bin
 models/*.pkl
 

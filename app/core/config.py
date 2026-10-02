@@ -1,5 +1,7 @@
 """Configuration application - Toutes les variables d'environnement."""
 
+from typing import Literal
+
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
@@ -42,6 +44,47 @@ class Settings(BaseSettings):
     # la pleine precision en stockage et un index utilisable.
     # Doit rester egal a la dimension declaree sur Article.embedding.
     EMBEDDING_DIM: int = 3072
+
+    # ---- Fournisseur d'embeddings (app/services/embedding_service.py) ----
+    # "gemini" : API payante. "gemma" : EmbeddingGemma execute EN LOCAL par
+    # onnxruntime, gratuit, sans reseau. Changer de fournisseur change l'espace
+    # vectoriel : TOUT le corpus doit etre re-encode
+    # (scripts/regenerate_embeddings.py --all --force).
+    #
+    # PIEGE : `class Config` porte `extra = "ignore"`. Une cle mal
+    # orthographiee dans .env est ignoree EN SILENCE et le defaut s'applique.
+    EMBEDDING_PROVIDER: Literal["gemini", "gemma"] = "gemini"
+
+    # Dossier du modele EmbeddingGemma exporte en ONNX
+    # (onnx-community/embeddinggemma-300m-ONNX). Le `.onnx` et son
+    # `.onnx_data` doivent rester DANS LE MEME DOSSIER et sous leur nom
+    # d'origine : le graphe reference ses poids par nom. Telecharger avec
+    # `hf download ... --local-dir`, jamais dans le cache Hugging Face, dont
+    # les blobs partages separent les deux fichiers — onnxruntime refuse alors
+    # le chargement (« External data path escapes model directory »).
+    GEMMA_MODEL_DIR: str = "models/embeddinggemma-300m-onnx"
+    # int8, et non q4 — MESURE, pas preference. Sur cette machine :
+    #   int8 : requete 196 ms, 1,5 Go de RAM, quasi identique au fp32 de
+    #          reference (ecart de score <= 0,005, meme classement) ;
+    #   q4   : requete 35 ms, 434 Mo, mais sur 180 articles du Code Minier et
+    #          15 questions, cosinus moyen 0,954 avec l'int8, premier resultat
+    #          DIFFERENT pour 2 questions sur 15, ~12 % du top-10 change.
+    # La fidelite prime pour un corpus juridique. q4 reste l'option mesuree
+    # d'un hebergement contraint en memoire : l'empreinte du fournisseur rend
+    # le changement sur — il declenche une regeneration, jamais un melange.
+    # Les variantes fp16 (model_fp16, model_q4f16) ne sont pas supportees.
+    GEMMA_ONNX_FILE: str = "onnx/model_quantized.onnx"
+    # Revision EPINGLEE du depot onnx-community. Un nouvel export changerait
+    # les vecteurs des requetes, mais pas ceux des documents deja stockes : les
+    # deux espaces divergeraient sans erreur. Elle entre dans l'empreinte du
+    # fournisseur, donc dans la cle de cache.
+    GEMMA_REVISION: str = "5090578d9565bb06545b4552f76e6bc2c93e4a66"
+    # Contexte du modele, <bos> et <eos> compris. Au-dela, onnxruntime leve une
+    # erreur RotaryEmbedding : la troncature est obligatoire, et journalisee.
+    GEMMA_MAX_TOKENS: int = 2048
+    # Fils de calcul d'onnxruntime. 0 = coeurs physiques moins un, pour laisser
+    # respirer la recherche pendant une ingestion.
+    GEMMA_INTRA_OP_THREADS: int = 0
 
     # Delai maximal d'un appel Gemini, en SECONDES. Sans lui, le client
     # n'impose AUCUN delai : une prise reseau qui ne repond plus bloque

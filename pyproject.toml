@@ -50,6 +50,10 @@ scikit-learn = "^1.3.2"
 joblib = "^1.3.2"
 
 # Embeddings & RAG
+# EmbeddingGemma en local. Bornes etroites, alignees sur requirements.txt :
+# une autre version produit d'autres vecteurs.
+onnxruntime = ">=1.30,<1.31"
+tokenizers = ">=0.23,<0.24"
 
 # LLM - Gemini API (SDK google-genai ; l'ancien google-generativeai est retire)
 google-genai = "^1.0.0"
