@@ -47,7 +47,7 @@ import time
 import unicodedata
 import warnings
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 warnings.filterwarnings("ignore")
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))

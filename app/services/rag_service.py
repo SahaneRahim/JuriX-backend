@@ -35,12 +35,12 @@ from app.services.gemini_service import (
     GeminiServiceError,
     get_gemini_service,
 )
-from app.services.postgres_search_service import escape_like
 from app.services.intent_classifier import (
     INTENT_JURIDIQUE,
     IntentResult,
     classify_intent,
 )
+from app.services.postgres_search_service import escape_like
 from app.services.prompts import (
     CONTEXT_TEMPLATE,
     NO_RESULTS_MESSAGE,

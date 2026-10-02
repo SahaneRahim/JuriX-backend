@@ -12,11 +12,11 @@ import asyncio
 
 import pytest
 
-from app.services.gemini_service import GeminiQuotaError, GeminiOverloadedError
+from app.services.gemini_service import GeminiOverloadedError, GeminiQuotaError
 from app.services.intent_classifier import (
     INTENT_JURIDIQUE,
-    classify_intent,
     _parse_intent,
+    classify_intent,
 )
 
 
