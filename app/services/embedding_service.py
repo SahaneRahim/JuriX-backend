@@ -1,17 +1,23 @@
 """
 Service de génération d'embeddings vectoriels pour recherche sémantique.
 
-Ce service utilise Gemini API pour générer des embeddings 3072-dim
-multilingues (FR/EN) avec cache PostgreSQL pour optimiser les performances.
+Le service ne parle plus directement a un modele : il delegue a un FOURNISSEUR
+interchangeable, et garde pour lui tout le reste — validation, cache
+PostgreSQL, gardes de dimension, normalisation, reprises, ordre des lots.
+
+POURQUOI CETTE SEPARATION. Le modele d'embeddings est le composant que JuriX
+changera le plus souvent : gratuit en local pour le lancement, meilleur et
+payant quand les moyens le permettront. Le changer doit etre un reglage, pas
+un chantier. Un fournisseur ne sait qu'une chose — transformer des textes en
+vecteurs — et laisse remonter ses exceptions brutes.
 
 Architecture:
-- Model: models/gemini-embedding-001 (Gemini API)
-- Dimensions: 3072 (settings.EMBEDDING_DIM ; index HNSW via une expression halfvec)
+- Fournisseur: Gemini API (models/gemini-embedding-001)
+- Dimensions: settings.EMBEDDING_DIM
 - Cache: Table embedding_cache PostgreSQL avec TTL 7 jours (cache en base)
-- Performance: <300ms single, <2s batch(10)
 
 Author: JuriX Team
-Version: 3.0.0 (cache PostgreSQL)
+Version: 4.0.0 (fournisseurs interchangeables)
 """
 
 import asyncio
@@ -64,20 +70,106 @@ class EmbeddingServiceError(Exception):
     pass
 
 
+# ==================== FOURNISSEURS ====================
+
+
+class GeminiProvider:
+    """
+    Embeddings par l'API Gemini.
+
+    CONTRAT D'UN FOURNISSEUR, que tout autre doit respecter :
+
+    - `name`        : identifiant court ("gemini")
+    - `label`       : libelle affiche par health_check
+    - `model`       : nom du modele
+    - `fingerprint` : identite EXACTE de ce qui produit les vecteurs. Elle entre
+                      dans la cle de cache : deux fournisseurs, ou deux
+                      variantes d'un meme modele, ne doivent jamais se servir
+                      leurs vecteurs. A la meme dimension, rien d'autre ne les
+                      distingue.
+    - `native_dim`  : dimension maximale que le modele sait produire
+    - `retryable`   : un echec merite-t-il une nouvelle tentative ? Vrai pour
+                      une API distante, faux pour un modele local, ou rejouer
+                      ne ferait que rejouer la meme erreur
+    - `inter_batch_delay_s` : pause entre deux lots, pour menager un quota
+    - `embed(texts, task_type, dim)` : rend EXACTEMENT un vecteur float32 par
+                      texte, de longueur `dim`, normalise ou non. Le service
+                      verifie le nombre et la dimension, et normalise : le
+                      fournisseur n'a pas a s'en charger.
+    """
+
+    name = "gemini"
+    label = "Gemini API"
+    native_dim = 3072
+    retryable = True
+    inter_batch_delay_s = 0.5
+
+    def __init__(self, api_key: Optional[str] = None):
+        api_key = api_key or settings.GEMINI_API_KEY
+        if not api_key:
+            raise EmbeddingServiceError("GEMINI_API_KEY non configurée")
+        self.model = settings.GEMINI_EMBEDDING_MODEL
+        # SDK google-genai (le meme que gemini_service.py). L'ancien
+        # google-generativeai et celui-ci ne peuvent pas cohabiter : le
+        # projet declarait l'ancien alors que gemini_service.py importe
+        # le nouveau, ce qui empechait l'application de demarrer.
+        # http_options impose un delai maximal. Sans lui le client attend
+        # indefiniment : une ingestion est restee figee 40 minutes sur un
+        # appel d'embeddings, le processus endormi sur une lecture de
+        # prise reseau. Aucune exception n'etant levee, la boucle de
+        # reprise juste en dessous ne se declenchait jamais.
+        #
+        # `genai.Client` est appele PAR ATTRIBUT DU MODULE, et ce n'est pas un
+        # detail de style : les tests remplacent
+        # `app.services.embedding_service.genai.Client`. Un
+        # `from google.genai import Client` contournerait la doublure, et les
+        # tests appelleraient la vraie API — payante.
+        self.client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(
+                timeout=settings.GEMINI_TIMEOUT_S * 1000  # en millisecondes
+            ),
+        )
+
+    @property
+    def fingerprint(self) -> str:
+        return f"{self.name}|{self.model}"
+
+    def embed(self, texts: List[str], task_type: str, dim: int) -> List[np.ndarray]:
+        # `self.client.models` est relu a CHAQUE appel, jamais memorise a la
+        # construction : un test remplace `embed_content` apres coup.
+        result = self.client.models.embed_content(
+            model=self.model,
+            # Un texte seul part en chaine, un lot en liste : c'est la forme
+            # d'appel historique, conservee a l'identique.
+            contents=texts[0] if len(texts) == 1 else texts,
+            config=types.EmbedContentConfig(
+                task_type=task_type,
+                output_dimensionality=dim,
+            ),
+        )
+        return [np.array(emb.values, dtype=np.float32) for emb in result.embeddings]
+
+
+def _construire_fournisseur(api_key: Optional[str] = None) -> GeminiProvider:
+    """Fournisseur par defaut, selon la configuration."""
+    return GeminiProvider(api_key=api_key)
+
+
 class EmbeddingService:
     """
     Service de génération d'embeddings vectoriels pour recherche sémantique.
 
-    Utilise Gemini API avec cache PostgreSQL (table embedding_cache).
-    Supporte FR/EN, normalisation L2 automatique.
+    Delegue la production des vecteurs a un fournisseur (voir GeminiProvider),
+    avec cache PostgreSQL (table embedding_cache). Supporte FR/EN,
+    normalisation L2 inconditionnelle.
 
-    Dimension : settings.EMBEDDING_DIM (3072), demandée à l'API via
-    output_dimensionality. C'est la sortie native du modèle ; le plafond
-    d'indexation de 2000 dimensions de pgvector est contourné par un index sur
-    une expression halfvec, pas par une troncature du vecteur.
+    Dimension : settings.EMBEDDING_DIM, demandee au fournisseur a CHAQUE appel
+    et jamais figee en lui — scripts/eval/validate_slicing.py change la
+    dimension d'une instance apres coup.
 
     Attributes:
-        EMBEDDING_MODEL: Nom du modèle Gemini
+        EMBEDDING_MODEL: Nom du modèle du fournisseur par defaut
         EMBEDDING_DIM: Dimension des embeddings (settings.EMBEDDING_DIM)
         CACHE_TTL_SECONDS: Durée de vie cache (7 jours)
         use_cache: Flag activation cache
@@ -85,15 +177,16 @@ class EmbeddingService:
 
     EMBEDDING_MODEL = settings.GEMINI_EMBEDDING_MODEL
     EMBEDDING_DIM = settings.EMBEDDING_DIM
-    # Dimension native du modele. En dessous, l'API tronque le vecteur
-    # (Matryoshka) et NE le renormalise PAS : c'est a nous de le faire.
-    NATIVE_EMBEDDING_DIM = 3072
     # Version de la cle de cache. A incrementer si la facon de construire les
-    # vecteurs change sans que le modele ni la dimension ne changent.
+    # vecteurs change sans que l'empreinte du fournisseur ni la dimension ne
+    # changent.
     # v3 : la normalisation est devenue inconditionnelle, donc le vecteur
-    # produit pour un meme (modele, dimension, tache, texte) a change. C'est
-    # exactement le cas que cette constante existe pour couvrir.
-    CACHE_KEY_VERSION = "v3"
+    # produit pour un meme (modele, dimension, tache, texte) a change.
+    # v4 : la cle porte l'EMPREINTE du fournisseur de l'instance, et non plus le
+    # nom du modele Gemini fige a l'import. Sans cela, deux fournisseurs a la
+    # meme dimension se resserviraient leurs vecteurs pendant toute la duree de
+    # vie du cache, et la garde de dimension ne verrait rien.
+    CACHE_KEY_VERSION = "v4"
     CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 jours
     MAX_TEXT_LENGTH = 10000
     MAX_RETRIES = 3
@@ -109,45 +202,37 @@ class EmbeddingService:
         self,
         use_cache: bool = True,
         api_key: Optional[str] = None,
+        provider: Optional[Any] = None,
     ):
         """
         Initialise le service d'embeddings.
 
-        Configure Gemini API et optionnellement le cache PostgreSQL.
-
         Args:
             use_cache: Active/désactive le cache PostgreSQL
             api_key: Clé API Gemini (si None, utilise settings.GEMINI_API_KEY)
+            provider: Fournisseur a utiliser. None construit celui de la
+                configuration ; un test y injecte sa doublure.
 
         Raises:
-            EmbeddingServiceError: Si Gemini API ne peut pas être initialisée
+            EmbeddingServiceError: Si le fournisseur ne peut pas être initialisé,
+                ou si la dimension configuree depasse ce qu'il sait produire
         """
-        logger.info("🚀 Initialisation EmbeddingService (Gemini API)...")
+        if provider is None:
+            try:
+                provider = _construire_fournisseur(api_key)
+            except Exception as e:
+                logger.error(f"❌ Échec configuration Gemini API: {e}")
+                raise EmbeddingServiceError(f"Impossible de configurer Gemini API: {e}") from e
+        self._provider = provider
 
-        # Initialisation Gemini API
-        try:
-            api_key = api_key or settings.GEMINI_API_KEY
-            if not api_key:
-                raise EmbeddingServiceError("GEMINI_API_KEY non configurée")
-            # SDK google-genai (le meme que gemini_service.py). L'ancien
-            # google-generativeai et celui-ci ne peuvent pas cohabiter : le
-            # projet declarait l'ancien alors que gemini_service.py importe
-            # le nouveau, ce qui empechait l'application de demarrer.
-            # http_options impose un delai maximal. Sans lui le client attend
-            # indefiniment : une ingestion est restee figee 40 minutes sur un
-            # appel d'embeddings, le processus endormi sur une lecture de
-            # prise reseau. Aucune exception n'etant levee, la boucle de
-            # reprise juste en dessous ne se declenchait jamais.
-            self.client = genai.Client(
-                api_key=api_key,
-                http_options=types.HttpOptions(
-                    timeout=settings.GEMINI_TIMEOUT_S * 1000  # en millisecondes
-                ),
+        # Refuse a la construction ce qui echouerait au premier appel. Sans ce
+        # controle, une dimension trop grande ne se revele qu'apres trois
+        # tentatives, et la recherche hybride avale l'erreur sans bruit.
+        if self.EMBEDDING_DIM > provider.native_dim:
+            raise EmbeddingServiceError(
+                f"EMBEDDING_DIM={self.EMBEDDING_DIM} depasse la dimension native "
+                f"de {provider.label} ({provider.native_dim})"
             )
-            logger.info(f"✅ Gemini API configurée (model: {self.EMBEDDING_MODEL})")
-        except Exception as e:
-            logger.error(f"❌ Échec configuration Gemini API: {e}")
-            raise EmbeddingServiceError(f"Impossible de configurer Gemini API: {e}") from e
 
         # Cache PostgreSQL (connexion synchrone pour les taches de fond).
         # Le service ne POSSEDE plus de moteur : il emprunte celui de
@@ -158,8 +243,22 @@ class EmbeddingService:
 
         logger.info(
             f"✅ EmbeddingService initialisé "
-            f"(dim={self.EMBEDDING_DIM}, cache={self.use_cache}, provider=Gemini)"
+            f"(dim={self.EMBEDDING_DIM}, cache={self.use_cache}, provider={provider.label})"
         )
+
+    @property
+    def client(self):
+        """
+        Client du fournisseur, s'il en a un. Conserve parce que des appelants
+        et des tests le lisent : le delai du client Gemini, ou le remplacement
+        de `client.models.embed_content` par une doublure.
+        """
+        return getattr(self._provider, "client", None)
+
+    @property
+    def provider(self):
+        """Fournisseur de cette instance."""
+        return self._provider
 
     # ==================== PUBLIC API ====================
 
@@ -205,18 +304,10 @@ class EmbeddingService:
                 logger.debug(f"🔍 Cache HIT ({elapsed:.1f}ms): {cache_key[:20]}...")
                 return cached_embedding
 
-        # Génération embedding via Gemini API avec retry
+        # Génération par le fournisseur, avec reprises s'il en vaut la peine
         for attempt in range(self.MAX_RETRIES):
             try:
-                result = self.client.models.embed_content(
-                    model=self.EMBEDDING_MODEL,
-                    contents=text,
-                    config=types.EmbedContentConfig(
-                        task_type=task_type,
-                        output_dimensionality=self.EMBEDDING_DIM,
-                    ),
-                )
-                embedding = np.array(result.embeddings[0].values, dtype=np.float32)
+                embedding = self._provider.embed([text], task_type, self.EMBEDDING_DIM)[0]
 
                 if embedding.shape[0] != self.EMBEDDING_DIM:
                     raise EmbeddingServiceError(
@@ -239,7 +330,7 @@ class EmbeddingService:
                         f"Quota journalier d'embeddings epuise: {e}"
                     ) from e
 
-                if attempt < self.MAX_RETRIES - 1:
+                if attempt < self.MAX_RETRIES - 1 and self._provider.retryable:
                     logger.warning(f"⚠️ Tentative {attempt + 1} échouée, retry: {e}")
                     time.sleep(self.RETRY_DELAY * (attempt + 1))
                 else:
@@ -305,8 +396,8 @@ class EmbeddingService:
                     current_chunk, chunk_count, normalize, max_retries, retry_delay,
                 )
 
-                if chunk_idx + batch_size < total:
-                    time.sleep(0.5)
+                if chunk_idx + batch_size < total and self._provider.inter_batch_delay_s:
+                    time.sleep(self._provider.inter_batch_delay_s)
 
         # Phase 3: Reconstitute original order
         embeddings_list = [embeddings_dict[i] for i in range(len(texts))]
@@ -330,8 +421,8 @@ class EmbeddingService:
         """Vérifie l'état de santé du service."""
         status_info: Dict[str, Any] = {
             "service": "EmbeddingService",
-            "provider": "Gemini API",
-            "model": self.EMBEDDING_MODEL,
+            "provider": self._provider.label,
+            "model": self._provider.model,
             "dimensions": self.EMBEDDING_DIM,
             "cache_enabled": self.use_cache,
             "cache_backend": "PostgreSQL" if self.use_cache else "disabled",
@@ -467,28 +558,19 @@ class EmbeddingService:
 
         for attempt in range(max_retries):
             try:
-                result = self.client.models.embed_content(
-                    model=self.EMBEDDING_MODEL,
-                    contents=chunk_texts,
-                    config=types.EmbedContentConfig(
-                        task_type=self.TASK_DOCUMENT,
-                        output_dimensionality=self.EMBEDDING_DIM,
-                    ),
+                new_embeddings = self._provider.embed(
+                    chunk_texts, self.TASK_DOCUMENT, self.EMBEDDING_DIM
                 )
 
-                # L'API peut renvoyer MOINS de vecteurs que de textes. Sans ce
-                # controle, zip() perdait silencieusement la queue du lot, puis
-                # embeddings_dict[idx] levait un KeyError bien plus loin, sans
-                # rapport apparent avec la cause.
-                if len(result.embeddings) != len(chunk_texts):
+                # Un fournisseur peut renvoyer MOINS de vecteurs que de textes.
+                # Sans ce controle, zip() perdait silencieusement la queue du
+                # lot, puis embeddings_dict[idx] levait un KeyError bien plus
+                # loin, sans rapport apparent avec la cause.
+                if len(new_embeddings) != len(chunk_texts):
                     raise EmbeddingServiceError(
-                        f"Réponse incomplète: {len(result.embeddings)} vecteurs "
+                        f"Réponse incomplète: {len(new_embeddings)} vecteurs "
                         f"pour {len(chunk_texts)} textes"
                     )
-
-                new_embeddings = [
-                    np.array(emb.values, dtype=np.float32) for emb in result.embeddings
-                ]
 
                 # Garde de dimension, absente de ce chemin alors que le chemin
                 # unitaire l'avait : un lot mal dimensionne allait directement
@@ -523,7 +605,7 @@ class EmbeddingService:
                         f"Quota journalier d'embeddings epuise: {e}"
                     ) from e
 
-                if attempt < max_retries - 1:
+                if attempt < max_retries - 1 and self._provider.retryable:
                     wait_time = retry_delay * (attempt + 1)
                     logger.warning(
                         f"  ⚠️ Chunk {current_chunk} failed (attempt {attempt + 1}): {e}. "
@@ -554,20 +636,24 @@ class EmbeddingService:
         """
         Clé de cache SHA-256.
 
-        Contient le modèle, la DIMENSION et le type de tâche, pas seulement le
-        texte : sans la dimension, un vecteur écrit sous une autre dimension
-        serait resservi tel quel, et sans le type de tâche un
-        même texte encodé comme document ou comme question partagerait une
-        entrée alors que les vecteurs diffèrent.
+        Contient l'EMPREINTE du fournisseur, la DIMENSION et le type de tâche,
+        pas seulement le texte : sans l'empreinte, deux fournisseurs a la meme
+        dimension se resserviraient leurs vecteurs ; sans la dimension, un
+        vecteur écrit sous une autre dimension serait resservi tel quel ; sans
+        le type de tâche, un même texte encodé comme document ou comme question
+        partagerait une entrée alors que les vecteurs diffèrent.
 
-        Le texte n'est PLUS mis en minuscules. Gemini est sensible à la casse
-        et le français juridique la porte ("Article PREMIER" n'est pas
+        L'empreinte est celle du fournisseur de L'INSTANCE, pas une constante
+        de classe figee a l'import.
+
+        Le texte n'est PLUS mis en minuscules. Les modeles sont sensibles à la
+        casse et le français juridique la porte ("Article PREMIER" n'est pas
         "article premier") : minusculer confondait des textes distincts sous
         une seule clé.
         """
         payload = "\x00".join([
             self.CACHE_KEY_VERSION,
-            self.EMBEDDING_MODEL,
+            self._provider.fingerprint,
             str(self.EMBEDDING_DIM),
             task_type,
             self._preprocess_text(text),
