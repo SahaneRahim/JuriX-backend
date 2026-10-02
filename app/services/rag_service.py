@@ -36,11 +36,17 @@ from app.services.gemini_service import (
     get_gemini_service,
 )
 from app.services.postgres_search_service import escape_like
+from app.services.intent_classifier import (
+    INTENT_JURIDIQUE,
+    IntentResult,
+    classify_intent,
+)
 from app.services.prompts import (
     CONTEXT_TEMPLATE,
     NO_RESULTS_MESSAGE,
     build_context_string,
     format_conversation_history,
+    get_conversational_prompt,
     get_system_prompt,
 )
 from app.services.reranker import rerank_with_llm
@@ -90,6 +96,53 @@ def _normalize_article_number(number: str) -> str:
 
 # Budget de generation. Doit couvrir la reflexion du modele ET la reponse.
 ANSWER_MAX_TOKENS = 4096
+
+# Budget d'une reponse conversationnelle. Deux phrases sont attendues, et
+# pourtant 2048 : la reflexion du modele est facturee sur ce budget avant la
+# premiere phrase, exactement comme ci-dessus. Un plafond serre ne rendrait pas
+# une reponse courte, il rendrait une reponse VIDE.
+CONVERSATION_MAX_TOKENS = 2048
+
+# Une reponse conversationnelle est certaine ET sans source : les deux vont
+# ensemble. C'est deja le choix de la sortie anticipee « article absent »
+# (confidence=1.0, sources=[]). 0.0 serait un mensonge : ce score dit « je ne
+# suis pas sur », et une salutation notee 0 % de confiance serait faux le jour
+# ou le score sera affiche.
+CONFIANCE_CONVERSATIONNELLE = 1.0
+
+# Sous ce seuil, le meilleur chunk n'est pas une source : c'est le moins
+# mauvais resultat d'une recherche qui a echoue. Lui donner le rang de source
+# transforme un echec de recuperation en affirmation juridique.
+SOURCE_FALLBACK_MIN_RELEVANCE = 0.35
+
+# Aveux d'ignorance du modele. Une reponse qui dit « ce n'est pas dans les
+# documents » et qui porte quand meme une source dit deux choses
+# contradictoires, et la source est celle qu'on croit le moins.
+#
+# LES MARQUEURS SONT ANCRES SUR LE MOT « DOCUMENT », VOLONTAIREMENT. « ne
+# contiennent pas » tout seul attraperait « la loi ne contient pas de
+# disposition sur ce point », qui est une VRAIE reponse juridique et doit
+# garder sa source. Ce n'est pas la negation qui trahit l'aveu, c'est ce sur
+# quoi elle porte : les documents fournis, ou la loi elle-meme.
+#
+# La liste vient de sorties reellement observees, pas d'une intuition. Cas
+# fondateur, mesure sur « que dit l'article 33 du Code Minier ? » : « Les
+# documents fournis ne contiennent pas l'article 33 [...] » — et une source
+# pointant l'article 1, fabriquee par le repli, s'affichait dessous.
+_ABSTENTION_MARKERS = (
+    "documents fournis ne contiennent",
+    "documents ne contiennent",
+    "documents fournis ne comportent",
+    "n'est pas présent dans les documents",
+    "n'est pas présente dans les documents",
+    "ne figure pas dans les documents",
+    "ne figurent pas dans les documents",
+    "je ne trouve pas cette information",
+    "documents provided do not contain",
+    "documents do not contain",
+    "not present in the documents",
+    "i could not find",
+)
 
 
 class RAGQuotaError(Exception):
@@ -173,7 +226,13 @@ class RAGService:
     CITATION_REGEX = (
         r"[Aa]rticle\s+"
         r"([LRD]\s*)?(\d+(?:[-.]\d+)*(?:\s*(?:er|bis|ter|quater|septies))?)"
-        r"\s+(?:du\s+|de\s+la\s+|de\s+l['’]\s*|des\s+|de\s+)?"
+        # `of the` / `of` : sans eux, AUCUNE reponse anglaise n'a jamais produit
+        # une seule citation extraite. « According to Article 161 of the OHADA
+        # Code » echouait sur la contrainte de majuscule du groupe suivant, qui
+        # butait sur le « of » minuscule. Toutes les sources anglaises affichees
+        # jusqu'ici venaient donc du repli `_create_sources_from_results`,
+        # c'est-a-dire n'etaient pas des citations mais des devinettes.
+        r"\s+(?:du\s+|de\s+la\s+|de\s+l['’]\s*|des\s+|de\s+|of\s+the\s+|of\s+)?"
         r"([A-ZÀ-Ý][^,\.]+)"
     )
     
@@ -241,6 +300,28 @@ class RAGService:
             conversation, history = await self._load_or_create_conversation(
                 request.session_id, request.persona, request.language
             )
+
+            # 1bis. Aiguillage d'intention. APRES l'historique, parce que
+            # « et l'article 12 ? » n'est juridique que par ce qui precede ;
+            # AVANT la recuperation, parce que c'est tout l'interet : un
+            # message conversationnel ne doit declencher ni embedding, ni
+            # recherche hybride, ni re-ranking.
+            #
+            # `law_id` court-circuite le classificateur : l'utilisateur lit un
+            # document precis, la preuve contextuelle vaut mieux que n'importe
+            # quel verdict de modele, et l'appel est economise.
+            if request.law_id:
+                intention = IntentResult(INTENT_JURIDIQUE, 1.0, "court-circuit-law-id")
+            else:
+                intention = await classify_intent(
+                    request.question, llm=self.llm, history=history
+                )
+            logger.info("🧭 Intention=%s (%s)", intention.intent, intention.rule)
+
+            if intention.intent != INTENT_JURIDIQUE:
+                return await self._repondre_conversationnel(
+                    request, conversation, history, intention, start_time
+                )
 
             # 2. Retrieve and merge document context
             retrieval_start = time.time()
@@ -376,7 +457,7 @@ class RAGService:
 
         # Extract citations
         citations = self._extract_citations(answer, search_results)
-        if not citations and search_results:
+        if not citations and self._peut_fabriquer_une_source(answer, search_results):
             citations = self._create_sources_from_results(search_results, request.question)
 
         confidence = self._calculate_confidence(answer, citations, search_results)
@@ -401,6 +482,74 @@ class RAGService:
             total_time_ms=total_time_ms, persona=request.persona
         )
 
+    async def _repondre_conversationnel(
+        self,
+        request: RAGRequest,
+        conversation: Conversation,
+        history: List[Message],
+        intention: IntentResult,
+        start_time: float,
+    ) -> RAGResponse:
+        """
+        Repond a un message qui n'est pas une question de droit.
+
+        AUCUNE RECUPERATION : ni extraction de mots-cles, ni embedding, ni
+        recherche hybride, ni re-ranking, ni repli multilingue, ni contexte
+        documentaire. `retrieval_time_ms` vaut donc 0, et c'est la valeur
+        EXACTE, pas une approximation : rien n'a ete cherche. Rien n'est ecrit
+        non plus dans `query_cache`, `embedding_cache` ni `search_events`.
+
+        `sources` est vide PAR CONSTRUCTION, jamais par accident. Le front
+        masque le bloc Sources sur une liste vide : c'est ce qui fait
+        disparaitre le « Code Minier » affiche sous une salutation.
+        """
+        generation_start = time.time()
+
+        if self.llm is None:
+            raise RAGServiceError("LLM service not configured. Please set up Gemini API.")
+
+        system_prompt = get_conversational_prompt(intention.intent, request.language)
+        prompt = (
+            format_conversation_history(history)
+            + "\n\nMessage de l'utilisateur :\n"
+            + request.question
+        )
+
+        llm_response = await self.llm.generate(
+            prompt=prompt, system=system_prompt, temperature=0.7,
+            max_tokens=CONVERSATION_MAX_TOKENS,
+        )
+        generation_time_ms = int((time.time() - generation_start) * 1000)
+        answer = llm_response["response"]
+
+        # `_calculate_confidence` n'est PAS appele : ses quatre facteurs
+        # mesurent l'ancrage documentaire d'une reponse (citations, pertinence
+        # moyenne, longueur, mots de couverture). Aucun n'a de sens ici, et le
+        # facteur longueur penaliserait justement la brievete demandee.
+        await self._save_interaction(
+            conversation=conversation, question=request.question, answer=answer,
+            citations=[], confidence=CONFIANCE_CONVERSATIONNELLE,
+            retrieval_time_ms=0, generation_time_ms=generation_time_ms,
+            # Une salutation ne fait pas un titre de conversation. Une question
+            # sur le produit, si : elle en dit assez pour s'y retrouver.
+            titrer=(intention.intent == "meta"),
+        )
+
+        total_time_ms = int((time.time() - start_time) * 1000)
+        logger.info(
+            "✅ Reponse conversationnelle (%s) : %sms, aucune recherche",
+            intention.intent, total_time_ms,
+        )
+
+        return RAGResponse(
+            answer=answer, confidence=CONFIANCE_CONVERSATIONNELLE, sources=[],
+            session_id=conversation.session_id,
+            retrieval_time_ms=0,
+            generation_time_ms=generation_time_ms,
+            total_time_ms=total_time_ms, persona=request.persona,
+            intent=intention.intent,
+        )
+
     async def ask_stream(
         self,
         request: RAGRequest
@@ -418,9 +567,49 @@ class RAGService:
         assert isinstance(request.question, str) and len(request.question) > 0, "Question must be non-empty"
 
         try:
-            # `start_time` etait mesure ici et jamais lu : le chemin en flux ne
-            # rapporte pas de duree totale, contrairement a `ask`. Mesurer sans
-            # rendre compte ne sert personne.
+            start_time = time.time()
+
+            # L'historique est charge AVANT la recherche, alors qu'il l'etait
+            # apres. Deux raisons : le classificateur en a besoin (« et
+            # l'article 12 ? » n'est juridique que par ce qui precede), et ce
+            # chemin retournait jusqu'ici sans jamais creer la conversation
+            # quand la recherche ne rendait rien, la ou `ask` l'enregistre via
+            # `_handle_no_results`. Contrepartie : une conversation est
+            # desormais creee meme si la generation echoue ensuite.
+            conversation, history = await self._load_or_create_conversation(
+                request.session_id,
+                request.persona,
+                request.language
+            )
+
+            # Meme aiguillage que `ask`. Le front n'emprunte pas ce chemin
+            # aujourd'hui, mais `POST /rag/ask/stream` est une route publique et
+            # documentee : l'y laisser non route, c'est y laisser le bug intact
+            # derriere une URL que le schema OpenAPI expose. Ce depot a deja paye
+            # une divergence entre les deux portes d'entree du meme service.
+            if request.law_id:
+                intention = IntentResult(INTENT_JURIDIQUE, 1.0, "court-circuit-law-id")
+            else:
+                intention = await classify_intent(
+                    request.question, llm=self.llm, history=history
+                )
+            logger.info("🧭 Intention=%s (%s, flux)", intention.intent, intention.rule)
+
+            if intention.intent != INTENT_JURIDIQUE:
+                # Une reponse de deux phrases n'a rien a gagner a etre
+                # decoupee : un chunk terminal unique, ce que le contrat SSE
+                # autorise deja (`chunk` et `done` dans le meme evenement).
+                reponse = await self._repondre_conversationnel(
+                    request, conversation, history, intention, start_time
+                )
+                yield RAGStreamChunk(
+                    chunk=reponse.answer, done=True, sources=[],
+                    confidence=reponse.confidence,
+                    session_id=reponse.session_id,
+                    intent=reponse.intent,
+                ).model_dump_json(exclude_none=True)
+                return
+
             retrieval_start = time.time()
             search_results = await self._retrieve_chunks(
                 request.question,
@@ -429,18 +618,21 @@ class RAGService:
             retrieval_time_ms = int((time.time() - retrieval_start) * 1000)
 
             if not search_results:
+                # Enregistre, comme `_handle_no_results` le fait sur `ask` : ce
+                # tour disparaissait de l'historique.
+                await self._save_interaction(
+                    conversation=conversation, question=request.question,
+                    answer=NO_RESULTS_MESSAGE[request.language], citations=[],
+                    confidence=0.0, retrieval_time_ms=retrieval_time_ms,
+                    generation_time_ms=0,
+                )
                 yield RAGStreamChunk(
                     chunk=NO_RESULTS_MESSAGE[request.language],
                     done=True, sources=[], confidence=0.0,
+                    session_id=conversation.session_id,
+                    intent=INTENT_JURIDIQUE,
                 ).model_dump_json(exclude_none=True)
                 return
-
-            # Load history & build prompt
-            conversation, history = await self._load_or_create_conversation(
-                request.session_id,
-                request.persona,
-                request.language
-            )
 
             prompt = self._build_prompt(
                 request.question,
@@ -496,6 +688,7 @@ class RAGService:
             yield RAGStreamChunk(
                 chunk="", done=True, sources=citations,
                 confidence=confidence, session_id=conversation.session_id,
+                intent=INTENT_JURIDIQUE,
             ).model_dump_json(exclude_none=True)
 
         except Exception as e:
@@ -1094,6 +1287,25 @@ class RAGService:
         logger.info(f"📎 Extracted {len(citations)} citations")
         return citations
 
+    def _peut_fabriquer_une_source(self, answer: str, chunks: List[ChunkResult]) -> bool:
+        """
+        Faut-il fabriquer une source quand le modele n'a rien cite ?
+
+        Le repli existe pour une bonne raison : un modele cite rarement dans la
+        forme exacte que `CITATION_REGEX` reconnait, et une reponse juste sans
+        source affichee dessert le lecteur. Mais applique sans condition, il a
+        produit le bloc « Sources : Code Minier » sous une salutation. Le
+        routage d'intention regle ce cas-la ; restent les vraies questions de
+        droit a mauvaise recuperation, ou l'on accrochait la loi la mieux
+        classee a une reponse qui dit elle-meme ne rien avoir trouve.
+        """
+        if not chunks:
+            return False
+        if (chunks[0].relevance_score or 0.0) < SOURCE_FALLBACK_MIN_RELEVANCE:
+            return False
+        reponse = (answer or "").lower()
+        return not any(marqueur in reponse for marqueur in _ABSTENTION_MARKERS)
+
     def _create_sources_from_results(
         self, chunks: List[ChunkResult], question: str
     ) -> List[Citation]:
@@ -1211,13 +1423,25 @@ class RAGService:
         citations: List[Citation],
         confidence: float,
         retrieval_time_ms: int,
-        generation_time_ms: int
+        generation_time_ms: int,
+        *,
+        titrer: bool = True,
     ):
-        """Save question and answer to database."""
+        """
+        Save question and answer to database.
+
+        `titrer` est NOMME et vaut True par defaut : les trois appelants
+        historiques (`ask`, `ask_stream`, `_handle_no_results`) ne changent pas
+        de comportement. Seul le chemin conversationnel le passe a False, pour
+        que la barre laterale ne se remplisse pas de conversations intitulees
+        « bonjour » et « comment vas tu ? ». Le titre reste alors a None
+        jusqu'a la premiere vraie question, et le front sait deja afficher un
+        repli pour un titre nul.
+        """
         # Titre de la conversation, ecrit UNE SEULE FOIS. `_save_interaction`
         # est le point de passage commun a `ask`, `ask_stream` et
         # `_handle_no_results` : le poser ici couvre les trois chemins.
-        if conversation.title is None:
+        if titrer and conversation.title is None:
             conversation.title = titre_de_conversation(question)
 
         # User message

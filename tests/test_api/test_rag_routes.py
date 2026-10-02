@@ -89,6 +89,43 @@ class TestAskEndpoint:
         assert "sources" in data
         assert "session_id" in data
         assert data["persona"] == "citoyen"
+        # Defaut du routeur : une reponse construite sans `intent` reste
+        # juridique, ce qui garde vertes toutes les constructions existantes.
+        assert data["intent"] == "juridique"
+
+    @patch('app.api.routes.rag.RAGService')
+    def test_ask_conversationnel_sans_sources(self, mock_rag_service_class, sync_client):
+        """
+        La reponse conversationnelle vue depuis la route : aucune source,
+        aucune recuperation, et l'intention dite en clair.
+
+        L'assertion porte sur `intent`, pas sur la phrase francaise rendue par
+        le modele : un test qui ne depend pas de l'humeur du LLM.
+        """
+        mock_service = AsyncMock()
+        mock_service.ask = AsyncMock(return_value=RAGResponse(
+            answer="Je vais bien, merci. Je suis là pour vos questions de droit camerounais.",
+            confidence=1.0,
+            sources=[],
+            session_id="test-session-123",
+            retrieval_time_ms=0,
+            generation_time_ms=420,
+            total_time_ms=430,
+            persona="citoyen",
+            intent="smalltalk",
+        ))
+        mock_rag_service_class.return_value = mock_service
+
+        response = sync_client.post(
+            "/api/v1/rag/ask",
+            json={"question": "comment vas tu ?", "persona": "citoyen", "language": "fr"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["intent"] == "smalltalk"
+        assert data["sources"] == []
+        assert data["retrieval_time_ms"] == 0
 
     def test_ask_invalid_persona(self, sync_client):
         """Test ask with invalid persona."""

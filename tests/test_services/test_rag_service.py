@@ -13,13 +13,15 @@ Total: 15 tests
 Author: JuriX Team
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.models.conversation import Conversation
+from app.models.conversation import Conversation, Message
 from app.schemas.rag import Citation, RAGRequest, RAGResponse
 from app.schemas.search import ChunkResult
+from app.services.intent_classifier import IntentResult
+from app.services.prompts import get_conversational_prompt, get_system_prompt
 from app.services.rag_service import RAGService, RAGServiceError
 
 # ==================== FIXTURES ====================
@@ -55,6 +57,28 @@ def rag_service(mock_db_session):
     service.search_service.search = AsyncMock()
 
     return service
+
+
+@pytest.fixture(autouse=True)
+def routage_juridique(request):
+    """
+    Epingle l'intention a « juridique » pour tout ce module.
+
+    Sans cela, `ask()` appelle le modele DEUX fois — classification puis
+    generation — et toute assertion `llm.generate.assert_called_once()` tombe,
+    a commencer par test_ask_complete_pipeline. Pire : `assert_not_called()`
+    dans test_ask_with_no_search_results deviendrait faux alors que le
+    comportement teste, lui, n'a pas bouge.
+
+    L'epingler ici plutot que dans chaque test dit aussi ce que ces tests
+    couvrent : le chemin juridique, pas le routage. Les tests de routage
+    reaffectent `return_value` sur cette meme doublure.
+    """
+    with patch(
+        "app.services.rag_service.classify_intent",
+        new=AsyncMock(return_value=IntentResult("juridique", 1.0, "test")),
+    ) as double:
+        yield double
 
 
 @pytest.fixture
@@ -560,3 +584,294 @@ class TestConversationManagement:
         # Should add 2 messages (user + assistant)
         assert mock_db_session.add.call_count == 2
         mock_db_session.commit.assert_called_once()
+
+
+# ==================== ROUTAGE D'INTENTION ====================
+
+class TestRoutageIntention:
+    """
+    Le chemin conversationnel : ce qu'il fait, et surtout ce qu'il NE fait pas.
+
+    La fixture `routage_juridique` (autouse) epingle l'intention a
+    « juridique » ; ces tests reaffectent son `return_value`.
+    """
+
+    @pytest.fixture
+    def conversation_neuve(self, mock_db_session):
+        """Aucune conversation existante : `ask` en cree une."""
+        resultat = MagicMock()
+        resultat.scalar_one_or_none.return_value = None
+        mock_db_session.execute.return_value = resultat
+        return resultat
+
+    @pytest.fixture
+    def smalltalk(self, routage_juridique, rag_service):
+        routage_juridique.return_value = IntentResult("smalltalk", 0.97, "llm")
+        rag_service.llm.generate.return_value = {
+            "response": "Je vais bien, merci. Je suis là pour vos questions de droit camerounais."
+        }
+        return routage_juridique
+
+    @pytest.mark.asyncio
+    async def test_smalltalk_ne_declenche_aucune_recherche(
+        self, rag_service, sample_rag_request, conversation_neuve, smalltalk
+    ):
+        """Le gain qui justifie tout : ni embedding facture, ni recherche hybride."""
+        await rag_service.ask(sample_rag_request)
+
+        rag_service.search_service.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_smalltalk_ne_renvoie_aucune_source(
+        self, rag_service, sample_rag_request, conversation_neuve, smalltalk
+    ):
+        """Le bug d'origine : un article du Code Minier sous « comment vas tu ? »."""
+        reponse = await rag_service.ask(sample_rag_request)
+
+        assert reponse.sources == []
+
+    @pytest.mark.asyncio
+    async def test_smalltalk_ne_fait_aucune_recuperation(
+        self, rag_service, sample_rag_request, conversation_neuve, smalltalk
+    ):
+        reponse = await rag_service.ask(sample_rag_request)
+
+        assert reponse.retrieval_time_ms == 0
+
+    @pytest.mark.asyncio
+    async def test_smalltalk_renvoie_son_intention(
+        self, rag_service, sample_rag_request, conversation_neuve, smalltalk
+    ):
+        reponse = await rag_service.ask(sample_rag_request)
+
+        assert reponse.intent == "smalltalk"
+
+    @pytest.mark.asyncio
+    async def test_smalltalk_utilise_le_prompt_conversationnel(
+        self, rag_service, sample_rag_request, conversation_neuve, smalltalk
+    ):
+        await rag_service.ask(sample_rag_request)
+
+        systeme = rag_service.llm.generate.await_args.kwargs["system"]
+        assert systeme == get_conversational_prompt("smalltalk", "fr")
+        assert systeme != get_system_prompt("citoyen", "fr")
+
+    @pytest.mark.asyncio
+    async def test_smalltalk_n_envoie_aucun_document_au_modele(
+        self, rag_service, sample_rag_request, conversation_neuve, smalltalk
+    ):
+        await rag_service.ask(sample_rag_request)
+
+        prompt = rag_service.llm.generate.await_args.kwargs["prompt"]
+        assert "Documents juridiques pertinents" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_smalltalk_est_enregistre_dans_la_conversation(
+        self, rag_service, sample_rag_request, conversation_neuve, smalltalk, mock_db_session
+    ):
+        """L'historique doit rester continu : la question suivante voit la salutation."""
+        await rag_service.ask(sample_rag_request)
+
+        messages = [
+            appel.args[0] for appel in mock_db_session.add.call_args_list
+            if isinstance(appel.args[0], Message)
+        ]
+        assert [m.role for m in messages] == ["user", "assistant"]
+
+    @pytest.mark.asyncio
+    async def test_smalltalk_ne_titre_pas_la_conversation(
+        self, rag_service, sample_rag_request, conversation_neuve, smalltalk, mock_db_session
+    ):
+        """Sinon la barre laterale se remplit de « bonjour » et « comment vas tu ? »."""
+        await rag_service.ask(sample_rag_request)
+
+        conversations = [
+            appel.args[0] for appel in mock_db_session.add.call_args_list
+            if isinstance(appel.args[0], Conversation)
+        ]
+        assert conversations and conversations[0].title is None
+
+    @pytest.mark.asyncio
+    async def test_meta_titre_la_conversation(
+        self, rag_service, sample_rag_request, conversation_neuve,
+        routage_juridique, mock_db_session
+    ):
+        """Une question sur le produit en dit assez pour s'y retrouver."""
+        routage_juridique.return_value = IntentResult("meta", 0.95, "llm")
+        rag_service.llm.generate.return_value = {"response": "Je suis JuriX."}
+
+        await rag_service.ask(sample_rag_request)
+
+        conversations = [
+            appel.args[0] for appel in mock_db_session.add.call_args_list
+            if isinstance(appel.args[0], Conversation)
+        ]
+        assert conversations and conversations[0].title is not None
+
+    @pytest.mark.asyncio
+    async def test_law_id_court_circuite_le_classificateur(
+        self, rag_service, conversation_neuve, routage_juridique, mock_search_results
+    ):
+        """
+        L'utilisateur lit un document precis : la preuve contextuelle vaut mieux
+        qu'un verdict de modele, et l'appel est economise.
+        """
+        reponse_recherche = MagicMock()
+        reponse_recherche.results = []
+        reponse_recherche.chunks = mock_search_results
+        reponse_recherche.search_time_ms = 10
+        rag_service.search_service.search.return_value = reponse_recherche
+        rag_service.llm.generate.return_value = {
+            "response": "Selon l'article 161 du Code OHADA, les dirigeants sont responsables."
+        }
+
+        await rag_service.ask(
+            RAGRequest(question="et ce document, il dit quoi ?", law_id=1)
+        )
+
+        routage_juridique.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_intention_juridique_conserve_le_pipeline(
+        self, rag_service, sample_rag_request, conversation_neuve,
+        mock_search_results, mock_llm_response
+    ):
+        """Non-regression : le chemin qui compte n'a pas bouge."""
+        reponse_recherche = MagicMock()
+        reponse_recherche.results = []
+        reponse_recherche.chunks = mock_search_results
+        reponse_recherche.search_time_ms = 150
+        rag_service.search_service.search.return_value = reponse_recherche
+        rag_service.llm.generate.return_value = mock_llm_response
+
+        reponse = await rag_service.ask(sample_rag_request)
+
+        rag_service.search_service.search.assert_called_once()
+        assert reponse.intent == "juridique"
+        assert reponse.sources
+
+    @pytest.mark.asyncio
+    async def test_echec_du_classificateur_conserve_le_pipeline(
+        self, rag_service, sample_rag_request, conversation_neuve, routage_juridique,
+        mock_search_results, mock_llm_response
+    ):
+        """
+        Le defaut sur panne est « juridique », donc le comportement anterieur :
+        une saturation du fournisseur ne fait pas basculer la plateforme en
+        mode bavardage.
+        """
+        routage_juridique.return_value = IntentResult("juridique", 0.0, "defaut-erreur")
+        reponse_recherche = MagicMock()
+        reponse_recherche.results = []
+        reponse_recherche.chunks = mock_search_results
+        reponse_recherche.search_time_ms = 150
+        rag_service.search_service.search.return_value = reponse_recherche
+        rag_service.llm.generate.return_value = mock_llm_response
+
+        await rag_service.ask(sample_rag_request)
+
+        rag_service.search_service.search.assert_called_once()
+
+
+# ==================== SOURCES FABRIQUEES : LE GARDE-FOU ====================
+
+class TestGardeFouDesSources:
+    """
+    `_create_sources_from_results` fabrique une source quand le modele n'a rien
+    cite. Utile, mais applique sans condition il accroche la loi la mieux
+    classee a une reponse qui dit elle-meme n'avoir rien trouve.
+    """
+
+    @pytest.mark.parametrize(
+        "aveu",
+        [
+            # Cas fondateur, mesure en conditions reelles sur « que dit
+            # l'article 33 du Code Minier ? » : la reponse avouait l'absence et
+            # portait quand meme une source vers l'article 1.
+            "Les documents fournis ne contiennent pas l'article 33 de la Loi N°2023/014.",
+            "Cette information ne figure pas dans les documents fournis.",
+            "Les documents ne contiennent aucune information sur ce point.",
+            "The documents provided do not contain this information.",
+        ],
+    )
+    def test_pas_de_source_quand_la_reponse_avoue_ne_pas_savoir(
+        self, rag_service, mock_search_results, aveu
+    ):
+        assert not rag_service._peut_fabriquer_une_source(aveu, mock_search_results)
+
+    @pytest.mark.parametrize(
+        "reponse",
+        [
+            # L'aveu porte sur LES DOCUMENTS ; ici la negation porte sur la LOI,
+            # ce qui est une vraie reponse juridique et garde sa source.
+            "La loi ne contient pas de disposition sur ce point, mais l'article 5 encadre le cas voisin.",
+            "Le Code ne comporte pas d'exception pour ce cas.",
+            "Les dirigeants sont responsables de leurs actes de gestion.",
+        ],
+    )
+    def test_une_negation_portant_sur_la_loi_n_est_pas_un_aveu(
+        self, rag_service, mock_search_results, reponse
+    ):
+        assert rag_service._peut_fabriquer_une_source(reponse, mock_search_results)
+
+    def test_pas_de_source_quand_la_reponse_avoue_en_anglais(
+        self, rag_service, mock_search_results
+    ):
+        assert not rag_service._peut_fabriquer_une_source(
+            "The supplied documents do not contain this information.",
+            mock_search_results,
+        )
+
+    def test_pas_de_source_sous_le_seuil_de_pertinence(
+        self, rag_service, mock_search_results
+    ):
+        """Le moins mauvais resultat d'une recherche ratee n'est pas une source."""
+        mock_search_results[0].relevance_score = 0.1
+
+        assert not rag_service._peut_fabriquer_une_source(
+            "Les dirigeants sont responsables.", mock_search_results
+        )
+
+    def test_source_fabriquee_au_dessus_du_seuil(self, rag_service, mock_search_results):
+        """Non-regression du cas utile : le repli sert encore."""
+        assert rag_service._peut_fabriquer_une_source(
+            "Les dirigeants sont responsables.", mock_search_results
+        )
+
+    def test_pas_de_source_sans_resultat(self, rag_service):
+        assert not rag_service._peut_fabriquer_une_source("Peu importe.", [])
+
+
+# ==================== EXTRACTION DES CITATIONS ====================
+
+class TestCitationsMultilingues:
+
+    def test_forme_anglaise_reconnue(self, rag_service, mock_search_results):
+        """
+        Avant l'ajout des connecteurs `of the` / `of`, AUCUNE reponse anglaise
+        n'a jamais produit une citation extraite : toutes les sources anglaises
+        affichees venaient du repli, donc n'etaient pas des citations mais des
+        devinettes.
+        """
+        mock_search_results[0].law_title = "OHADA Code"
+
+        citations = rag_service._extract_citations(
+            "According to Article 161 of the OHADA Code, directors are liable.",
+            mock_search_results,
+        )
+
+        assert len(citations) == 1
+        assert citations[0].article_id == 161
+
+    def test_pluriel_non_reconnu(self, rag_service, mock_search_results):
+        """
+        Limitation connue, epinglee ici plutot que laissee en commentaire :
+        c'est la raison d'etre de la contrainte « au singulier » des prompts.
+        Si ce test se met a echouer, la regex a gagne le pluriel et les prompts
+        peuvent se relacher.
+        """
+        citations = rag_service._extract_citations(
+            "Les articles 161 et 5 du Code OHADA le prevoient.", mock_search_results
+        )
+
+        assert citations == []

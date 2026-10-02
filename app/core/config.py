@@ -62,6 +62,32 @@ class Settings(BaseSettings):
     RERANK_LLM_TOP_N: int = 20
     RERANK_LLM_TIMEOUT_S: float = 4.0
 
+    # ---- Routage d'intention (app/services/intent_classifier.py) ----
+    # Interrupteur de repli. A False, `ask()` retrouve exactement le
+    # comportement anterieur : toute question part au RAG. C'est le levier de
+    # retour arriere sans redeploiement, sur le modele de RERANK_LLM_ENABLED.
+    INTENT_ROUTING_ENABLED: bool = True
+    # MESURE, PAS ESTIME. Premiere valeur posee au jugé : 3,0 s, « large pour
+    # un verdict d'un seul mot ». Mesure sur gemini-3-flash-preview, six
+    # classifications reelles : 2583, 2826, 2983, 3309, 3843, 6531 ms —
+    # mediane 3,3 s, maximum 6,5 s. A 3,0 s, CINQ appels sur six expiraient,
+    # et une expiration retombe silencieusement sur "juridique" : le routeur
+    # aurait cesse de router sans qu'aucune erreur, aucun test et aucun
+    # journal ne le signale.
+    #
+    # 10 s couvre le maximum observe avec de la marge, tout en restant douze
+    # fois sous GEMINI_TIMEOUT_S : une prise reseau qui ne repond plus est
+    # abandonnee vite, au lieu de bloquer deux minutes.
+    INTENT_TIMEOUT_S: float = 10.0
+    # PAS 16 jetons, malgre une sortie d'un seul mot. Le modele est un modele
+    # a raisonnement : sa reflexion est facturee sur ce budget AVANT la
+    # premiere ligne de sortie. Le piege est deja documente sur
+    # ANSWER_MAX_TOKENS (rag_service.py) et il est ici PIRE, parce que
+    # silencieux : un budget trop court rend une reponse vide, donc le repli
+    # "juridique" a chaque appel, donc un routeur qui ne route jamais, sans
+    # qu'aucun test ne le voie — ils doublent tous le modele.
+    INTENT_MAX_TOKENS: int = 1024
+
     # ---- Fusion hybride ----
     # Valeurs par defaut NON calibrees sur ce corpus : RRF_K = 60 vient du
     # papier d'origine sur des runs TREC. A remplacer par les valeurs issues

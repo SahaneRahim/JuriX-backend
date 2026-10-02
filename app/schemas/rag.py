@@ -115,6 +115,13 @@ class RAGResponse(BaseModel):
     generation_time_ms: int = Field(..., description="Time for answer generation")
     total_time_ms: int = Field(..., description="Total processing time")
     persona: str = Field(..., description="Persona used for response")
+    # Defaut OBLIGATOIRE, pas une commodite : `RAGResponse` est construite sans
+    # ce champ a plusieurs endroits (sortie anticipee « article absent »,
+    # `_handle_no_results`, doublures de tests). Un champ requis les casserait.
+    intent: str = Field(
+        "juridique",
+        description="Intention retenue par le routeur : juridique | smalltalk | meta | hors_sujet",
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -157,6 +164,10 @@ class RAGStreamChunk(BaseModel):
     session_id: Optional[str] = Field(
         None,
         description="Session ID (only in final chunk)"
+    )
+    intent: Optional[str] = Field(
+        None,
+        description="Intention retenue par le routeur (only in final chunk)"
     )
     error: Optional[str] = Field(
         None,
