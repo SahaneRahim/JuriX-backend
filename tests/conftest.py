@@ -259,8 +259,17 @@ class _EmbeddingsDeterministes:
     TASK_DOCUMENT = "RETRIEVAL_DOCUMENT"
     TASK_QUERY = "RETRIEVAL_QUERY"
 
+    class _Fournisseur:
+        label = "doublure de test"
+        fingerprint = "doublure|tests"
+
+    provider = _Fournisseur()
+
     def __init__(self, dim: int):
         self.EMBEDDING_DIM = dim
+
+    def prechauffer(self):
+        pass
 
     def generate_embedding(self, text, normalize=True, task_type=TASK_DOCUMENT):
         import hashlib
@@ -275,6 +284,40 @@ class _EmbeddingsDeterministes:
 
     async def generate_embedding_async(self, text, task_type=TASK_QUERY):
         return self.generate_embedding(text, True, task_type)
+
+
+@pytest.fixture(autouse=True)
+def _epingler_le_fournisseur_d_embeddings(request):
+    """
+    Les tests construisent un EmbeddingService sur Gemini, sauf ceux marques
+    `gemma`.
+
+    Le defaut de production est EmbeddingGemma, en local. Sans cet
+    epinglage, tout test qui construit un service par defaut exigerait le
+    modele sur disque — 300 Mo, absents d'une machine d'integration — et le
+    chargerait en memoire. Sur Gemini, la cle de test est fausse et les
+    tests doublent le client : rien ne part sur le reseau.
+
+    Les tests qui portent sur le choix du fournisseur le reglent eux-memes ;
+    ceux du vrai modele sont marques `gemma`.
+
+    Affectation directe et non `monkeypatch` : une fixture automatique qui le
+    demanderait l'instancierait AVANT la doublure ci-dessous, donc le
+    demonterait APRES elle. Les `monkeypatch` des tests sur les singletons de
+    search_service seraient alors defaits apres la restauration, et la
+    doublure fuirait d'un test a l'autre.
+    """
+    if request.node.get_closest_marker("gemma"):
+        yield
+        return
+    from app.core.config import settings
+
+    avant = settings.EMBEDDING_PROVIDER
+    settings.EMBEDDING_PROVIDER = "gemini"
+    try:
+        yield
+    finally:
+        settings.EMBEDDING_PROVIDER = avant
 
 
 @pytest.fixture(autouse=True)

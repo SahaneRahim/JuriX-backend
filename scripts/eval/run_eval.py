@@ -3,12 +3,13 @@ Mesure la recuperation sur le jeu d'evaluation.
 
 Trois questions distinctes, trois chemins :
 
-1. LA DIMENSION (--dims). Compare 3072, 1536 et 768 en FORCE BRUTE, en numpy,
+1. LA DIMENSION (--dims). Compare 768, 512 et 256 en FORCE BRUTE, en numpy,
    sur les memes chunks : la question est la qualite de l'EMBEDDING, pas celle
    de l'index. Les vecteurs des dimensions inferieures sont obtenus en
-   tronquant puis renormalisant les vecteurs 3072 — gemini-embedding-001 est
-   entraine en Matryoshka, ce que scripts/eval/validate_slicing.py verifie
-   contre l'API. Cout : zero appel supplementaire pour le corpus.
+   tronquant puis renormalisant les vecteurs stockes : EmbeddingGemma est
+   entraine en Matryoshka (768, 512, 256, 128), gemini-embedding-001 aussi —
+   ce que scripts/eval/validate_slicing.py verifie contre son API. Cout : zero
+   encodage supplementaire pour le corpus.
 
 2. LE MODE ET LE RE-RANKING (--modes, --rerank). Passe par le vrai
    SearchService, donc par l'index et le cache : c'est le systeme reel qui est
@@ -22,7 +23,7 @@ resultat, et la conclusion « aucune difference mesurable, prends le moins
 cher » est une conclusion valide.
 
 Usage:
-    python -m scripts.eval.run_eval --dims 3072 1536 768
+    python -m scripts.eval.run_eval --dims 768 512 256
     python -m scripts.eval.run_eval --modes text semantic hybrid --rerank none stage1
     python -m scripts.eval.run_eval --sweep rrf
 """

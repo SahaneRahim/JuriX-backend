@@ -13,7 +13,7 @@ article, réponses citées via Gemini.
 | API | FastAPI (Python 3.11) |
 | Base | PostgreSQL 16 + `pgvector` + `pg_trgm` |
 | Recherche plein texte | `tsvector` / `websearch_to_tsquery`, index GIN, triggers |
-| Recherche sémantique | `pgvector` + index HNSW, embeddings `gemini-embedding-001` tronqués à 1536 dim. |
+| Recherche sémantique | `pgvector` + index HNSW, embeddings EmbeddingGemma 768 dim. calculés en local (Gemini en option) |
 | Cache | tables `query_cache` et `embedding_cache` |
 | LLM | Gemini (`google-genai`) |
 | Extraction PDF | Gemini multimodal |
@@ -26,7 +26,9 @@ d'attente sont assurés par PostgreSQL et par le serveur applicatif.
 
 - Python 3.11
 - PostgreSQL 16 avec les extensions `vector` et `pg_trgm`
-- Une clé API Gemini (Google AI Studio)
+- Une clé API Gemini (Google AI Studio), pour le chat
+- Le modèle EmbeddingGemma sur disque (voir plus bas), pour la recherche
+  sémantique
 - Une clé LlamaCloud pour l'extraction OCR
 
 Le plus simple pour la base :
@@ -73,6 +75,23 @@ curl -L -o models/fasttext/lid.176.bin \
 Sans lui, `POST /api/v1/language/detect` échoue ; le pipeline d'ingestion
 retombe sur une heuristique par mots vides.
 
+### Modèle d'embeddings
+
+EmbeddingGemma (330 Mo), à la révision épinglée dans `app/core/config.py`.
+Toujours avec `--local-dir` : le cache Hugging Face sépare le `.onnx` de son
+`.onnx_data`, et onnxruntime refuse alors de le charger.
+
+```bash
+hf download onnx-community/embeddinggemma-300m-ONNX \
+  onnx/model_quantized.onnx onnx/model_quantized.onnx_data tokenizer.json \
+  --revision 5090578d9565bb06545b4552f76e6bc2c93e4a66 \
+  --local-dir models/embeddinggemma-300m-onnx
+```
+
+Il est chargé au démarrage de l'API (~1,5 Go de RAM). Sans lui, l'API démarre
+quand même — plein texte, chat et comptes fonctionnent — mais la recherche
+sémantique est coupée et `GET /api/v1/search/health` répond `degraded`.
+
 ## Configuration
 
 Toutes les variables de `.env.example` sont réellement lues par
@@ -82,6 +101,8 @@ Toutes les variables de `.env.example` sont réellement lues par
 |---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://…` — le driver asyncpg est obligatoire |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | LLM des réponses. Modèles Flash actuels : `gemini-3.8-flash`, `3.7`, `3.6`, `3.5` |
+| `EMBEDDING_PROVIDER` | `gemma` (défaut, local et gratuit) ou `gemini` (API payante). En changer impose de régénérer les vecteurs |
+| `GEMMA_MODEL_DIR` | Dossier du modèle EmbeddingGemma (défaut `models/embeddinggemma-300m-onnx`) |
 | `PDF_EXTRACTION_PAGES_PER_CALL` | Pages envoyées par appel d'extraction (défaut 20) |
 | `SECRET_KEY` | Signature JWT. **Obligatoire hors développement** : l'application refuse de démarrer si la valeur du dépôt est conservée |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Valeurs par défaut de `scripts/create_admin.py` |
@@ -224,13 +245,19 @@ La recherche renvoie des **chunks** — un article, pas un document. `SearchResu
 section, leur page et leur contenu intégral. C'est ce que consomme le RAG, et
 c'est ce qui permet à une citation de pointer un `article_id`.
 
-Les embeddings font **1536 dimensions** (`output_dimensionality`, troncature
-Matryoshka renormalisée) et non les 3072 natifs : au-dessus de 2000, pgvector
-refuse tout index HNSW ou IVFFlat, et chaque recherche sémantique balayait la
-table.
+Les embeddings font **768 dimensions** et sont calculés **en local** par
+EmbeddingGemma (`onnx-community/embeddinggemma-300m-ONNX`, int8, exécuté par
+onnxruntime) : gratuit, sans réseau, ~1,5 Go de RAM dans le processus de l'API.
+`EMBEDDING_PROVIDER=gemini` repasse sur l'API Gemini, à 768 dimensions elle
+aussi : le schéma ne change pas. Le modèle se télécharge une fois — commande
+dans `.env.example` — et il est chargé au démarrage : s'il manque,
+`GET /api/v1/search/health` répond `degraded` au lieu de laisser la recherche
+retomber en silence sur le plein texte.
 
-Après un changement de dimension ou une restauration, les vecteurs doivent être
-régénérés :
+Chaque vecteur porte l'empreinte du modèle qui l'a produit
+(`articles.embedding_model`). Après une migration de dimension, une
+restauration ou un changement de fournisseur, les vecteurs manquants ou
+d'un autre modèle doivent être régénérés :
 
 ```bash
 alembic upgrade head
@@ -239,7 +266,8 @@ python scripts/regenerate_embeddings.py --reindex               # index en masse
 ```
 
 Tant que le backfill n'est pas terminé, la recherche sémantique ne renvoie rien
-et le mode hybride dégrade en recherche plein texte.
+et le mode hybride dégrade en recherche plein texte ; la santé de la recherche
+le signale (`vectors.missing`, `vectors.foreign`).
 
 ### Re-ranking
 
@@ -279,8 +307,7 @@ corpus. Le harnais qui les calibre :
 
 ```bash
 python -m scripts.eval.generate_eval_set --sample 120   # puis RELECTURE
-python -m scripts.eval.validate_slicing --dim 768       # 40 appels
-python -m scripts.eval.run_eval --dims 3072 1536 768    # la dimension vaut-elle son coût ?
+python -m scripts.eval.run_eval --dims 768 512 256      # la dimension vaut-elle son coût ?
 python -m scripts.eval.run_eval --sweep rrf             # les poids
 ```
 

@@ -459,6 +459,7 @@ async def search_health(db: AsyncSession = Depends(get_db)) -> dict:
         "fts_index": "unknown",
         "cache": "unknown",
         "embedding_service": "unknown",
+        "vectors": "unknown",
     }
 
     try:
@@ -485,13 +486,59 @@ async def search_health(db: AsyncSession = Depends(get_db)) -> dict:
     except Exception:
         report["cache"] = "unavailable"
 
+    # Embeddings. Ces deux sondes repondaient « healthy » pendant que la
+    # recherche hybride retombait en plein texte seul, faute de service ou de
+    # vecteurs comparables : la panne la plus probable du semantique etait
+    # aussi la seule invisible.
+    service = None
     try:
-        from app.services.search_service import _embedding_service_instance
+        from app.services import search_service
 
-        report["embedding_service"] = (
-            "ready" if _embedding_service_instance is not None else "unavailable"
-        )
+        search_service._init_global_singletons()
+        service = search_service._embedding_service_instance
     except Exception:
+        service = None
+    if service is None:
         report["embedding_service"] = "unavailable"
+        report["status"] = "degraded"
+    else:
+        report["embedding_service"] = "ready"
+
+    # Provenance des vecteurs. « foreign » : produits par un AUTRE fournisseur
+    # que celui qui encode les questions — leurs cosinus ne veulent rien dire,
+    # sans la moindre erreur. « missing » : a vectoriser.
+    # scripts/regenerate_embeddings.py --all traite les deux. Sans service,
+    # pas d'empreinte de reference : la sonde n'aurait rien a comparer.
+    if service is None:
+        report["vectors"] = "unknown"
+        return report
+    try:
+        empreinte = service.provider.fingerprint
+        compte = (await db.execute(text("""
+            SELECT
+                count(*) FILTER (
+                    WHERE embedding IS NOT NULL AND embedding_model = :empreinte
+                ) AS current,
+                count(*) FILTER (
+                    WHERE embedding IS NOT NULL
+                      AND embedding_model IS DISTINCT FROM :empreinte
+                ) AS foreign_,
+                count(*) FILTER (WHERE embed AND embedding IS NULL) AS missing
+            FROM articles
+        """), {"empreinte": empreinte})).one()
+        report["vectors"] = {
+            "current": compte.current,
+            "foreign": compte.foreign_,
+            "missing": compte.missing,
+        }
+        # Degrade si des vecteurs d'un autre modele se melent aux autres, ou si
+        # AUCUN article n'a de vecteur exploitable alors qu'il y en a a
+        # vectoriser — l'etat exact d'une base juste apres une migration de
+        # dimension.
+        if compte.foreign_ or (compte.missing and not compte.current):
+            report["status"] = "degraded"
+    except Exception as e:
+        report["vectors"] = f"error: {type(e).__name__}"
+        report["status"] = "degraded"
 
     return report

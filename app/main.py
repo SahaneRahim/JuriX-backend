@@ -26,6 +26,7 @@ from app.api.routes import (
 )
 from app.core.config import settings
 from app.core.database import close_db
+from app.services.search_service import precharger_les_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,13 @@ async def lifespan(app: FastAPI):
             "peut forger un jeton d'administration."
         )
     logger.info(f"🚀 {settings.APP_NAME} v{settings.VERSION} ({settings.ENVIRONMENT})")
+
+    # Modele d'embeddings charge AVANT d'accepter des requetes : une
+    # installation incomplete se voit ici, pas a la premiere question. Un echec
+    # n'empeche pas le demarrage — plein texte, chat et comptes fonctionnent
+    # sans embeddings — mais il est journalise et la sante passe en degraded.
+    # Hors de la boucle : le chargement prend quelques secondes de calcul.
+    await asyncio.to_thread(precharger_les_embeddings)
 
     # Purge des caches expires, en tache de fond.
     #

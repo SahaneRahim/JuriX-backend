@@ -322,6 +322,64 @@ class TestChargement:
         assert cree["tok"].encode_special_tokens is True
 
 
+# ==================== PAR DEFAUT, ET AU DEMARRAGE ====================
+
+
+class TestParDefaut:
+
+    def test_le_defaut_de_production_est_gemma(self):
+        """
+        Lu sur la DECLARATION et non sur l'instance : la suite epingle gemini
+        pour ne pas dependre du modele (tests/conftest.py), et un .env peut
+        surcharger le reglage.
+        """
+        from app.core.config import Settings
+
+        assert Settings.model_fields["EMBEDDING_PROVIDER"].default == "gemma"
+
+
+class TestPrechauffage:
+
+    def test_charge_le_modele_et_encode_une_question(self, modele_factice):
+        GemmaProvider().prechauffer()
+
+        assert modele_factice["tok"].recus == ["task: search result | query: prechauffage"]
+        assert modele_factice["session"].appels, "le modele n'a pas tourne"
+
+    def test_une_sortie_de_mauvaise_forme_est_refusee(self, modele_factice):
+        """Le prechauffage valide la chaine entiere, pas seulement le chargement."""
+
+        class _SessionBancale(_Session):
+            def run(self, noms, feed):
+                return [np.zeros((1, 512), dtype=np.float32)]
+
+        modele_factice["session"] = _SessionBancale()
+
+        with pytest.raises(EmbeddingServiceError, match="attendu"):
+            GemmaProvider().prechauffer()
+
+    def test_le_service_delegue_au_fournisseur_local(self, modele_factice):
+        EmbeddingService(use_cache=False, provider=GemmaProvider()).prechauffer()
+
+        assert modele_factice["session"].appels
+
+    def test_sans_effet_pour_une_api(self):
+        """Pas de prechauffage pour Gemini : un appel couterait du quota."""
+
+        class _Api:
+            label = "API doublee"
+            model = "modele"
+            fingerprint = "api|modele"
+            native_dim = 768
+            retryable = True
+            inter_batch_delay_s = 0.0
+
+            def embed(self, *args):
+                raise AssertionError("aucun appel attendu")
+
+        EmbeddingService(use_cache=False, provider=_Api()).prechauffer()
+
+
 # ==================== LE VRAI MODELE ====================
 
 
@@ -343,9 +401,6 @@ class TestModeleReel:
     def service(self, monkeypatch):
         pytest.importorskip("onnxruntime")
         monkeypatch.setattr(module.settings, "GEMMA_MODEL_DIR", str(_dossier_reel()))
-        # Fixee AVANT la construction : le service refuse une dimension que
-        # le fournisseur ne sait pas produire.
-        monkeypatch.setattr(EmbeddingService, "EMBEDDING_DIM", 768)
         return EmbeddingService(use_cache=False, provider=GemmaProvider())
 
     def test_vecteur_de_768_unitaire(self, service):
@@ -377,3 +432,6 @@ class TestModeleReel:
         v = service.generate_embedding("texte OCR avec <image_soft_token> et <eos>")
 
         assert abs(float(np.linalg.norm(v)) - 1.0) < 1e-5
+
+    def test_prechauffage_du_demarrage(self, service):
+        service.prechauffer()

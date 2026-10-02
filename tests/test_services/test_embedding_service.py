@@ -367,7 +367,7 @@ class TestHealthCheck:
         # Vérifications valeurs
         assert health["service"] == "EmbeddingService"
         assert health["status"] in ["healthy", "degraded", "unhealthy"]
-        assert health["model"] == EmbeddingService.EMBEDDING_MODEL
+        assert health["model"] == service.provider.model
         assert health["dimensions"] == EmbeddingService.EMBEDDING_DIM
         # "device" appartenait au modele sentence-transformers charge en local.
         # Le service passe par l'API Gemini : ce qui compte est le fournisseur.

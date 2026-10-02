@@ -83,3 +83,31 @@ async def test_secret_key_par_defaut_refuse_le_demarrage_hors_developpement():
     finally:
         settings.ENVIRONMENT = environnement
         settings.SECRET_KEY = secret
+
+
+@pytest.mark.asyncio
+async def test_le_demarrage_precharge_le_modele_d_embeddings(monkeypatch):
+    """
+    Le modele d'embeddings est charge AVANT que l'API n'accepte de requete.
+
+    Sans ce prechargement, un modele absent ou corrompu ne se revelait qu'a la
+    premiere question, et la recherche hybride repondait en plein texte seul
+    sans que rien ne le signale.
+    """
+    import app.main as main
+
+    appels = []
+
+    def _precharger():
+        appels.append("prechargement")
+        return True
+
+    async def _ne_rien_fermer():
+        pass
+
+    monkeypatch.setattr(main, "precharger_les_embeddings", _precharger)
+    # L'arret de lifespan ferme le pool partage : pas dans un test.
+    monkeypatch.setattr(main, "close_db", _ne_rien_fermer)
+
+    async with main.lifespan(app):
+        assert appels == ["prechargement"]

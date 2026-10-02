@@ -12,8 +12,9 @@ un chantier. Un fournisseur ne sait qu'une chose — transformer des textes en
 vecteurs — et laisse remonter ses exceptions brutes.
 
 Architecture:
-- Fournisseur: Gemini API (models/gemini-embedding-001)
-- Dimensions: settings.EMBEDDING_DIM
+- Fournisseurs: EmbeddingGemma en local (defaut, GemmaProvider) ou
+  Gemini API (GeminiProvider), selon settings.EMBEDDING_PROVIDER
+- Dimensions: settings.EMBEDDING_DIM (768)
 - Cache: Table embedding_cache PostgreSQL avec TTL 7 jours (cache en base)
 
 Author: JuriX Team
@@ -297,12 +298,7 @@ class GemmaProvider:
         if dim > self.native_dim:
             raise EmbeddingServiceError(f"Dimension {dim} > {self.native_dim}, native d'EmbeddingGemma")
 
-        session, tok = _charger_gemma(
-            str(self.dossier / self.fichier),
-            str(self.dossier / "tokenizer.json"),
-            self.max_tokens,
-            self.fils,
-        )
+        session, tok = self._ressources()
 
         encodages = tok.encode_batch([prefixe + t for t in texts])
         for i, enc in enumerate(encodages):
@@ -322,6 +318,30 @@ class GemmaProvider:
 
         # Matryoshka : sous 768, tronquer suffit ; le service renormalise.
         return [v[:dim].astype(np.float32) for v in vecteurs]
+
+    def prechauffer(self) -> None:
+        """
+        Charge le modele et encode une question, MAINTENANT.
+
+        Appele au demarrage de l'API. Sans lui, le chargement — 1,5 s et
+        ~1,2 Go — tombait sur la premiere question d'un utilisateur, et un
+        fichier tronque ou une version d'onnxruntime incompatible ne se
+        revelaient qu'a ce moment-la. Encoder pour de bon valide la chaine
+        entiere : session, sortie nommee, dimension.
+        """
+        vecteur = self.embed(["prechauffage"], "RETRIEVAL_QUERY", self.native_dim)[0]
+        if vecteur.shape != (self.native_dim,):
+            raise EmbeddingServiceError(
+                f"EmbeddingGemma rend {vecteur.shape}, attendu ({self.native_dim},)"
+            )
+
+    def _ressources(self):
+        return _charger_gemma(
+            str(self.dossier / self.fichier),
+            str(self.dossier / "tokenizer.json"),
+            self.max_tokens,
+            self.fils,
+        )
 
     def _encoder(self, session, encodages) -> List[np.ndarray]:
         """Lots par budget de jetons, tries par longueur ; ordre d'origine rendu."""
@@ -379,16 +399,16 @@ class EmbeddingService:
     et jamais figee en lui — scripts/eval/validate_slicing.py change la
     dimension d'une instance apres coup.
 
+    Le modele n'est PAS un attribut de classe : il depend du fournisseur de
+    chaque instance (service.provider.model). Un attribut fige a l'import
+    mentait des qu'un fournisseur etait injecte.
+
     Attributes:
-        EMBEDDING_MODEL: Nom du modèle du fournisseur par defaut
         EMBEDDING_DIM: Dimension des embeddings (settings.EMBEDDING_DIM)
         CACHE_TTL_SECONDS: Durée de vie cache (7 jours)
         use_cache: Flag activation cache
     """
 
-    EMBEDDING_MODEL = (
-        GEMMA_MODEL_ID if settings.EMBEDDING_PROVIDER == "gemma" else settings.GEMINI_EMBEDDING_MODEL
-    )
     EMBEDDING_DIM = settings.EMBEDDING_DIM
     # Version de la cle de cache. A incrementer si la facon de construire les
     # vecteurs change sans que l'empreinte du fournisseur ni la dimension ne
@@ -475,6 +495,15 @@ class EmbeddingService:
     def provider(self):
         """Fournisseur de cette instance."""
         return self._provider
+
+    def prechauffer(self) -> None:
+        """
+        Charge le modele local maintenant. Sans effet pour une API : un appel
+        couterait du quota pour ne rien verifier de plus que la construction.
+        """
+        prechauffer = getattr(self._provider, "prechauffer", None)
+        if prechauffer is not None:
+            prechauffer()
 
     # ==================== PUBLIC API ====================
 

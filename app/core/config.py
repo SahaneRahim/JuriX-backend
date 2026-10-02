@@ -52,15 +52,20 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = _DIMENSION_DU_SCHEMA
 
     # ---- Fournisseur d'embeddings (app/services/embedding_service.py) ----
-    # "gemini" : API payante. "gemma" : EmbeddingGemma execute EN LOCAL par
-    # onnxruntime, gratuit, sans reseau. Changer de fournisseur change l'espace
-    # vectoriel : TOUT le corpus doit etre re-encode
-    # (scripts/regenerate_embeddings.py --all, qui reconnait les vecteurs d'un
-    # autre fournisseur a leur colonne articles.embedding_model).
+    # "gemma", le defaut : EmbeddingGemma execute EN LOCAL par onnxruntime,
+    # gratuit, sans reseau. Il exige le modele sur disque (GEMMA_MODEL_DIR) et
+    # ~1,5 Go de RAM dans le processus de l'API. Gemini ne sert plus alors
+    # qu'au chat. "gemini" : l'API payante, a 768 dimensions elle aussi.
+    #
+    # Changer de fournisseur change l'espace vectoriel : TOUT le corpus doit
+    # etre re-encode (scripts/regenerate_embeddings.py --all, qui reconnait
+    # les vecteurs d'un autre fournisseur a leur colonne
+    # articles.embedding_model). D'ici la, GET /search/health repond
+    # « degraded ».
     #
     # PIEGE : `class Config` porte `extra = "ignore"`. Une cle mal
     # orthographiee dans .env est ignoree EN SILENCE et le defaut s'applique.
-    EMBEDDING_PROVIDER: Literal["gemini", "gemma"] = "gemini"
+    EMBEDDING_PROVIDER: Literal["gemini", "gemma"] = "gemma"
 
     # Dossier du modele EmbeddingGemma exporte en ONNX
     # (onnx-community/embeddinggemma-300m-ONNX). Le `.onnx` et son

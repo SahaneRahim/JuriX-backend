@@ -448,6 +448,111 @@ class TestHealthEndpoint:
         assert response.json()["status"] in ("healthy", "degraded")
 
 
+class TestHealthEmbeddings:
+    """
+    La sante du semantique. Ces sondes repondaient « healthy » pendant que la
+    recherche hybride retombait en plein texte seul — faute de service, ou de
+    vecteurs comparables. La panne la plus probable etait la seule invisible.
+
+    Les singletons de search_service sont affectes directement : la doublure
+    de tests/conftest.py restaure leur etat apres chaque test.
+    """
+
+    @staticmethod
+    async def _article(db_session, embedding_model, vectorise=True):
+        import numpy as np
+
+        from app.models.law import Article, Law
+        from app.services.embedding_service import EmbeddingService
+
+        db_session.add(Law(id=950, reference="LOI-SANTE", title="Loi", content="Contenu.",
+                           type="loi", language="fr", status="published"))
+        await db_session.flush()
+        vecteur = None
+        if vectorise:
+            v = np.random.default_rng(0).normal(size=EmbeddingService.EMBEDDING_DIM)
+            vecteur = (v / np.linalg.norm(v)).tolist()
+        db_session.add(Article(law_id=950, number="1", content="Article de sante.", order=1,
+                               embedding=vecteur, embedding_model=embedding_model))
+        await db_session.commit()
+
+    @staticmethod
+    async def _rapport(client):
+        response = await client.get("/api/v1/search/health")
+        assert response.status_code == status.HTTP_200_OK
+        return response.json()
+
+    @pytest.mark.asyncio
+    async def test_vecteurs_a_jour(self, client, db_session):
+        from app.services import search_service
+
+        empreinte = search_service._embedding_service_instance.provider.fingerprint
+        await self._article(db_session, empreinte)
+
+        data = await self._rapport(client)
+
+        assert data["embedding_service"] == "ready"
+        assert data["vectors"] == {"current": 1, "foreign": 0, "missing": 0}
+        assert data["status"] == "healthy"
+
+    @pytest.mark.asyncio
+    async def test_vecteurs_d_un_autre_modele(self, client, db_session):
+        """Leurs cosinus avec une question ne veulent rien dire, sans erreur."""
+        await self._article(db_session, "un|autre@modele")
+
+        data = await self._rapport(client)
+
+        assert data["vectors"]["foreign"] == 1
+        assert data["status"] == "degraded"
+
+    @pytest.mark.asyncio
+    async def test_aucun_vecteur_exploitable(self, client, db_session):
+        """L'etat exact d'une base juste apres une migration de dimension."""
+        await self._article(db_session, None, vectorise=False)
+
+        data = await self._rapport(client)
+
+        assert data["vectors"] == {"current": 0, "foreign": 0, "missing": 1}
+        assert data["status"] == "degraded"
+
+    @pytest.mark.asyncio
+    async def test_service_indisponible(self, client):
+        from app.services import search_service
+
+        search_service._embedding_service_instance = None
+        search_service._singletons_initialized = True
+
+        data = await self._rapport(client)
+
+        assert data["embedding_service"] == "unavailable"
+        assert data["vectors"] == "unknown"
+        assert data["status"] == "degraded"
+
+    @pytest.mark.asyncio
+    async def test_modele_absent_de_bout_en_bout(self, client, tmp_path, monkeypatch):
+        """
+        Sans doublure : configuration gemma, dossier du modele VIDE. Le
+        demarrage le signale, la sante le dit.
+        """
+        from app.core.config import settings
+        from app.services import search_service
+        from app.services.embedding_service import get_embedding_service
+
+        monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "gemma")
+        monkeypatch.setattr(settings, "GEMMA_MODEL_DIR", str(tmp_path))
+        search_service._embedding_service_instance = None
+        search_service._singletons_initialized = False
+        get_embedding_service.cache_clear()
+        try:
+            assert search_service.precharger_les_embeddings() is False
+            data = await self._rapport(client)
+        finally:
+            get_embedding_service.cache_clear()
+
+        assert data["embedding_service"] == "unavailable"
+        assert data["status"] == "degraded"
+
+
 class TestErrorResponses:
     """Test various error response scenarios."""
 

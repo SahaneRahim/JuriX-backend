@@ -86,6 +86,49 @@ def _init_global_singletons() -> None:
     logger.info("✅ All global singletons ready")
 
 
+def precharger_les_embeddings() -> bool:
+    """
+    Construit le service d'embeddings et charge son modele. Appele au demarrage.
+
+    Une installation incomplete — modele absent, fichier tronque, dependance
+    manquante — ne se revelait qu'a la premiere question : la recherche
+    hybride avalait l'erreur et repondait en plein texte seul, sans rien
+    signaler. Ici l'echec est journalise au demarrage, et GET /search/health
+    repond « degraded ».
+
+    Un service qui echoue a son prechauffage est ECARTE (None). Garde, il
+    retenterait de charger 300 Mo a chaque question, pour echouer pareil.
+
+    Synchrone, et bloquant : a lancer hors de la boucle d'evenements.
+
+    Returns:
+        True si la recherche semantique est operationnelle.
+    """
+    global _embedding_service_instance
+
+    _init_global_singletons()
+    service = _embedding_service_instance
+    if service is None:
+        logger.error(
+            "❌ Service d'embeddings indisponible : la recherche semantique est "
+            "coupee, l'hybride repondra en plein texte seul"
+        )
+        return False
+
+    try:
+        service.prechauffer()
+    except Exception as e:
+        logger.error(
+            f"❌ Prechauffage du modele d'embeddings en echec, recherche "
+            f"semantique coupee : {e}"
+        )
+        _embedding_service_instance = None
+        return False
+
+    logger.info("✅ Modele d'embeddings pret")
+    return True
+
+
 # ==================== EXCEPTIONS ====================
 
 
