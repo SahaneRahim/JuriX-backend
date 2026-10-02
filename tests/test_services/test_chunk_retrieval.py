@@ -295,115 +295,103 @@ class TestLawLevelDerivation:
 
 class TestTwoStageSemantic:
     """
-    L'index est parcouru en fp16 (halfvec), le classement final se fait en fp32.
+    L'index HNSW fournit des candidats, un second etage les trie strictement.
 
-    Le type `vector` n'est indexable que jusqu'a 2000 dimensions, `halfvec`
-    jusqu'a 4000 : c'est ce qui permet de garder 3072 dimensions en stockage
-    exact tout en ayant un index. Le fp16 ne doit servir qu'a SELECTIONNER des
-    candidats, jamais a les classer.
+    Sous filtre, la recherche active `hnsw.iterative_scan = 'relaxed_order'` :
+    le parcours reprend tant que le filtre elague, au prix de lignes
+    legerement desordonnees. Le second etage remet l'ordre — a condition que
+    le planificateur ne le supprime pas, ce que verifie sur plan reel
+    tests/test_migrations/test_vector_schema.py.
+
+    Ici, le resultat vu de l'appelant : ordre et scores exacts, filtre
+    respecte.
     """
 
+    # Similarites cosinus imposees avec la question, et langue de chaque
+    # article. Les ids ne suivent PAS l'ordre de similarite : un tri par id ou
+    # par ordre d'insertion ne passerait pas pour un tri par pertinence.
+    SIMILARITES = {
+        3001: (0.50, "fr"),
+        3002: (0.90, "fr"),
+        3003: (0.30, "fr"),
+        3004: (0.70, "fr"),
+        3005: (0.95, "en"),  # la plus proche, exclue par le filtre de langue
+    }
+
     @pytest.fixture
-    async def near_ties(self, db_session):
+    async def angles(self, db_session):
         """
-        Deux articles dont l'ecart de distance est inferieur a la resolution
-        du fp16 : c'est la seule configuration ou les deux ordres divergent.
+        Des vecteurs a angle connu de la question : v = s*q + sqrt(1 - s**2)*n,
+        avec n unitaire et orthogonal a q, donc cos(q, v) = s exactement.
         """
         dim = EmbeddingService.EMBEDDING_DIM
+        rng = np.random.default_rng(5)
+        query = rng.normal(size=dim)
+        query /= np.linalg.norm(query)
 
-        def _half(vec):
-            return vec.astype(np.float16).astype(np.float64)
-
-        # Recherche deterministe d'un couple que fp16 et fp32 classent
-        # DIFFEREMMENT. Deux vecteurs pris au hasard s'accordent presque
-        # toujours : sans cette recherche, le test se contenterait de sauter et
-        # ne prouverait jamais rien.
-        vec_a = vec_b = base = None
-        for seed in range(200):
-            rng = np.random.default_rng(seed)
-            candidate = rng.normal(size=dim)
-            candidate /= np.linalg.norm(candidate)
-
-            def _perturb(scale: float) -> np.ndarray:
-                noise = rng.normal(size=dim)
-                noise -= noise.dot(candidate) * candidate   # orthogonal
-                noise /= np.linalg.norm(noise)
-                vec = candidate + scale * noise
-                return vec / np.linalg.norm(vec)
-
-            a, b = _perturb(0.0200), _perturb(0.020002)
-            exact = (np.dot(candidate, a), np.dot(candidate, b))
-            half = (np.dot(_half(candidate), _half(a)),
-                    np.dot(_half(candidate), _half(b)))
-            if (exact[0] > exact[1]) != (half[0] > half[1]):
-                base, vec_a, vec_b = candidate, a, b
-                break
-
-        if base is None:
-            pytest.skip("aucun couple divergent fp16/fp32 trouve en 200 tirages")
-
-        law = Law(
-            id=300, reference="LOI-TIES", title="Loi ex aequo",
-            content="Contenu.", type="loi", language="fr", status="published",
-        )
-        db_session.add(law)
-        await db_session.flush()
         db_session.add_all([
-            Article(id=3001, law_id=300, number="1", content="Article A.",
-                    order=1, embedding=vec_a.tolist()),
-            Article(id=3002, law_id=300, number="2", content="Article B.",
-                    order=2, embedding=vec_b.tolist()),
+            Law(id=300, reference="LOI-ANGLES-FR", title="Loi francaise",
+                content="Contenu.", type="loi", language="fr", status="published"),
+            Law(id=301, reference="LOI-ANGLES-EN", title="English law",
+                content="Content.", type="loi", language="en", status="published"),
         ])
+        await db_session.flush()
+
+        for article_id, (similarite, langue) in self.SIMILARITES.items():
+            noise = rng.normal(size=dim)
+            noise -= noise.dot(query) * query
+            noise /= np.linalg.norm(noise)
+            vec = similarite * query + np.sqrt(1.0 - similarite**2) * noise
+            db_session.add(Article(
+                id=article_id, law_id=300 if langue == "fr" else 301,
+                number=str(article_id), content=f"Article {article_id}.",
+                order=article_id, embedding=vec.tolist(),
+            ))
         await db_session.commit()
-        return {"query": base, "a": vec_a, "b": vec_b}
+        return query
+
+    async def _search(self, db_session, query, mock, filters):
+        mock.generate_embedding_async.return_value = query.astype(np.float32)
+        service = SearchService(db_session, use_cache=False)
+        service.embedding_service = mock
+        return await service.semantic_chunks("question", filters, 10, 0)
 
     @pytest.mark.asyncio
-    async def test_exact_rerank_wins_over_halfvec_order(
-        self, db_session, near_ties, mock_embedding_service_chunks
+    async def test_order_is_strict_under_filter(
+        self, db_session, angles, mock_embedding_service_chunks
     ):
-        query = near_ties["query"]
-        mock_embedding_service_chunks.generate_embedding_async.return_value = (
-            query.astype(np.float32)
+        chunks = await self._search(
+            db_session, angles, mock_embedding_service_chunks, SearchFilters(language="fr")
         )
-        service = SearchService(db_session, use_cache=False)
-        service.embedding_service = mock_embedding_service_chunks
 
-        # La fixture garantit que fp16 et fp32 divergent sur ce couple.
-        similarity = [
-            float(np.dot(query, near_ties["a"])),
-            float(np.dot(query, near_ties["b"])),
-        ]
-        exact_order = [3001, 3002] if similarity[0] >= similarity[1] else [3002, 3001]
-
-        chunks = await service.semantic_chunks("question", None, 10, 0)
-
-        assert [c.article_id for c in chunks[:2]] == exact_order
+        attendu = sorted(
+            (i for i, (_, langue) in self.SIMILARITES.items() if langue == "fr"),
+            key=lambda i: -self.SIMILARITES[i][0],
+        )
+        assert [c.article_id for c in chunks] == attendu
 
     @pytest.mark.asyncio
-    async def test_relevance_score_comes_from_the_exact_distance(
-        self, db_session, near_ties, mock_embedding_service_chunks
+    async def test_without_filter_the_closest_comes_first(
+        self, db_session, angles, mock_embedding_service_chunks
+    ):
+        chunks = await self._search(db_session, angles, mock_embedding_service_chunks, None)
+
+        assert [c.article_id for c in chunks][:2] == [3005, 3002]
+
+    @pytest.mark.asyncio
+    async def test_relevance_score_is_the_exact_cosine(
+        self, db_session, angles, mock_embedding_service_chunks
     ):
         """
-        Le score rendu doit valoir 1 - distance EXACTE, pas 1 - distance fp16.
-
-        Sinon un appelant qui re-trie sur le score reordonne silencieusement le
-        resultat par rapport a l'ordre rendu.
+        relevance_score = 1 - distance, et distance = 1 - cosinus : le score
+        EST la similarite cosinus. Un appelant qui re-trie sur le score doit
+        retrouver l'ordre rendu.
         """
-        query = near_ties["query"]
-        mock_embedding_service_chunks.generate_embedding_async.return_value = (
-            query.astype(np.float32)
-        )
-        service = SearchService(db_session, use_cache=False)
-        service.embedding_service = mock_embedding_service_chunks
+        chunks = await self._search(db_session, angles, mock_embedding_service_chunks, None)
 
-        chunks = await service.semantic_chunks("question", None, 10, 0)
-
-        by_id = {c.article_id: c for c in chunks}
-        for article_id, key in ((3001, "a"), (3002, "b")):
-            # relevance_score = 1 - distance, et distance = 1 - similarite
-            # cosinus : le score EST la similarite cosinus exacte.
-            expected = float(np.dot(query, near_ties[key]))
-            assert by_id[article_id].relevance_score == pytest.approx(expected, abs=1e-5)
+        for chunk in chunks:
+            attendu = self.SIMILARITES[chunk.article_id][0]
+            assert chunk.relevance_score == pytest.approx(attendu, abs=1e-5)
 
     @pytest.mark.asyncio
     async def test_candidate_budget_is_bounded(self, db_session):

@@ -7,7 +7,9 @@ corpus a chaque dimension : gemini-embedding-001 est entraine en Matryoshka, et
 output_dimensionality est cense n'etre qu'une troncature. Si l'hypothese est
 fausse, le balayage coute trois passes completes sur le corpus au lieu d'une.
 
-40 appels d'API : 20 textes, a 3072 puis a la dimension cible.
+40 appels d'API : 20 textes, a 3072 puis a la dimension cible. Le script
+interroge TOUJOURS Gemini, quel que soit EMBEDDING_PROVIDER : la propriete
+verifiee est celle de gemini-embedding-001.
 
 Usage:
     python -m scripts.eval.validate_slicing --dim 768 --samples 20
@@ -23,7 +25,7 @@ import numpy as np
 
 sys.path.insert(0, ".")
 
-from app.services.embedding_service import EmbeddingService
+from app.services.embedding_service import EmbeddingService, GeminiProvider
 
 logger = logging.getLogger("validate_slicing")
 
@@ -57,13 +59,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--samples", type=int, default=20)
     parser.add_argument("--threshold", type=float, default=0.999)
     args = parser.parse_args(argv)
+    if args.dim >= GeminiProvider.native_dim:
+        parser.error(f"--dim doit etre inferieur a {GeminiProvider.native_dim}")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
                         datefmt="%H:%M:%S")
 
     texts = TEXTS[: args.samples]
-    native = EmbeddingService(use_cache=False)
-    reduced = EmbeddingService(use_cache=False)
+    # Gemini explicitement, et la reference a SA dimension native. Laissee a
+    # EMBEDDING_DIM (768 depuis la bascule), elle comparerait 768 a 768 et
+    # conclurait toujours « decoupage valide », sans rien avoir verifie.
+    native = EmbeddingService(use_cache=False, provider=GeminiProvider())
+    native.EMBEDDING_DIM = GeminiProvider.native_dim
+    reduced = EmbeddingService(use_cache=False, provider=GeminiProvider())
     reduced.EMBEDDING_DIM = args.dim
 
     async def _run() -> int:

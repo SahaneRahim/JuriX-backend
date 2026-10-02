@@ -588,13 +588,18 @@ def _generate_article_embeddings(law_id: int) -> int:
                     content = content[:max_len]
                 texts.append(content)
 
-            logger.info(f"🚀 Generating {len(texts)} embeddings via Gemini API...")
+            provider = embedding_service.provider
+            logger.info(f"🚀 Generating {len(texts)} embeddings via {provider.label}...")
             embeddings = embedding_service.generate_batch_embeddings(texts=texts, normalize=True)
 
             success_count = 0
             for article, embedding in zip(articles, embeddings):
                 try:
                     article.embedding = embedding.tolist()
+                    # La provenance part AVEC le vecteur, dans la meme
+                    # ecriture : un vecteur dont on ignore le modele ne peut
+                    # pas etre compare sans risque.
+                    article.embedding_model = provider.fingerprint
                     success_count += 1
                 except Exception as e:
                     logger.error(f"❌ Failed to save embedding for article {article.number}: {e}")

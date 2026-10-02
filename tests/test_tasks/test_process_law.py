@@ -162,6 +162,11 @@ async def law_row(db_session):
     return law
 
 
+# Empreinte du fournisseur double : distincte de toute empreinte reelle, pour
+# qu'une ecriture qui irait la chercher ailleurs que dans le service se voie.
+EMPREINTE_DOUBLURE = "doublure|test@0"
+
+
 # Articles de longueur REALISTE : le raffinage ecarte du vectoriel tout chunk
 # de moins de 120 caracteres, et c'est justifie — sur le corpus reel, 62 % des
 # chunks sous ce seuil sont des lignes de liste nominative ("100. DOURLAI
@@ -230,9 +235,14 @@ class TestEmbeddingGeneration:
         dim = EmbeddingService.EMBEDDING_DIM
         calls = {"texts": None}
 
+        class _Provider:
+            label = "doublure"
+            fingerprint = EMPREINTE_DOUBLURE
+
         class _Stub:
             MAX_TEXT_LENGTH = EmbeddingService.MAX_TEXT_LENGTH
             EMBEDDING_DIM = dim
+            provider = _Provider()
 
             def __init__(self, *a, **k):
                 pass
@@ -271,6 +281,23 @@ class TestEmbeddingGeneration:
         assert all(a.embedding is not None for a in embeddable)
         assert all(a.embedding is None for a in skipped)
         assert len(embeddable[0].embedding) == EmbeddingService.EMBEDDING_DIM
+
+    @pytest.mark.asyncio
+    async def test_each_vector_carries_its_provenance(self, db_session, law_row):
+        """
+        L'empreinte du fournisseur part avec chaque vecteur. Sans elle, un
+        corpus a moitie regenere melange deux espaces sans que rien ne le
+        montre, et regenerate_embeddings ne sait pas quoi refaire.
+        """
+        pl._split_and_save_articles(law_row.id, SAMPLE_TEXT)
+
+        pl._generate_article_embeddings(law_row.id)
+
+        rows = (await db_session.execute(
+            select(Article).where(Article.law_id == law_row.id)
+        )).scalars().all()
+        assert {a.embedding_model for a in rows if a.embed} == {EMPREINTE_DOUBLURE}
+        assert {a.embedding_model for a in rows if not a.embed} <= {None}
 
     @pytest.mark.asyncio
     async def test_overlong_article_does_not_zero_the_whole_law(

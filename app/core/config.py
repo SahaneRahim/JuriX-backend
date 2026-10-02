@@ -10,6 +10,11 @@ from pydantic_settings import BaseSettings
 # initial en ModelPrivateAttr, qui n'est pas iterable.
 _PARAMS_QUI_FUIENT = ("sslmode", "channel_binding")
 
+# Dimension de la colonne articles.embedding, `vector(768)`. La migration la
+# fige en dur, comme toute migration ; Article.embedding la repete, et un test
+# verifie que modele, configuration et service s'accordent.
+_DIMENSION_DU_SCHEMA = 768
+
 
 class Settings(BaseSettings):
     """Settings de l'application."""
@@ -37,19 +42,21 @@ class Settings(BaseSettings):
     #   gemini-2.5-flash-lite
     GEMINI_MODEL: str = "gemini-3-flash-preview"
     GEMINI_EMBEDDING_MODEL: str = "models/gemini-embedding-001"
-    # Dimension demandee a l'API (output_dimensionality) : la sortie native du
-    # modele, sans troncature. Le plafond de 2000 dimensions de pgvector ne
-    # s'applique qu'au type `vector` ; l'index est pose sur une expression
-    # `halfvec(3072)`, qui monte a 4000 (migration f5a6b7c8d9e0). On garde donc
-    # la pleine precision en stockage et un index utilisable.
-    # Doit rester egal a la dimension declaree sur Article.embedding.
-    EMBEDDING_DIM: int = 3072
+    # Dimension des embeddings : 768, et aucune autre (validateur plus bas).
+    # C'est la sortie native d'EmbeddingGemma, et une dimension que
+    # gemini-embedding-001 produit sur demande (output_dimensionality,
+    # troncature Matryoshka que le service renormalise). Un seul schema pour
+    # les deux fournisseurs : passer de l'un a l'autre ne migre rien.
+    # Sous le plafond de 2000 du type `vector`, l'index HNSW se pose sur la
+    # colonne elle-meme (migration c4d5e6f7a8b9).
+    EMBEDDING_DIM: int = _DIMENSION_DU_SCHEMA
 
     # ---- Fournisseur d'embeddings (app/services/embedding_service.py) ----
     # "gemini" : API payante. "gemma" : EmbeddingGemma execute EN LOCAL par
     # onnxruntime, gratuit, sans reseau. Changer de fournisseur change l'espace
     # vectoriel : TOUT le corpus doit etre re-encode
-    # (scripts/regenerate_embeddings.py --all --force).
+    # (scripts/regenerate_embeddings.py --all, qui reconnait les vecteurs d'un
+    # autre fournisseur a leur colonne articles.embedding_model).
     #
     # PIEGE : `class Config` porte `extra = "ignore"`. Une cle mal
     # orthographiee dans .env est ignoree EN SILENCE et le defaut s'applique.
@@ -304,6 +311,28 @@ class Settings(BaseSettings):
                 "unexpected keyword argument ». Retirez ce parametre de l'URL et "
                 "posez la variable d'environnement PGSSLMODE=require, lue aussi "
                 "bien par asyncpg que par psycopg2."
+            )
+        return v
+
+    @field_validator("EMBEDDING_DIM")
+    @classmethod
+    def _exiger_la_dimension_du_schema(cls, v: int) -> int:
+        """
+        Refuse toute dimension autre que celle de la colonne.
+
+        Le piege vise est concret : un .env d'avant la bascule porte
+        EMBEDDING_DIM=3072, et il l'emporte sur le defaut. Sans ce refus, le
+        service demanderait des vecteurs 3072 que la colonne vector(768)
+        rejette — a la premiere ecriture pour l'ingestion, a la premiere
+        question pour la recherche, que l'hybride avale en retombant sans
+        bruit sur le plein texte. Mieux vaut ne pas demarrer.
+        """
+        if v != _DIMENSION_DU_SCHEMA:
+            raise ValueError(
+                f"EMBEDDING_DIM={v}, or la colonne articles.embedding est en "
+                f"vector({_DIMENSION_DU_SCHEMA}) et les deux fournisseurs y sont "
+                "regles. Retirez EMBEDDING_DIM du .env : un .env d'avant la "
+                "bascule porte encore 3072."
             )
         return v
 

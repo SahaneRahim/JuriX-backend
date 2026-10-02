@@ -1,15 +1,22 @@
 """
 Regenere les embeddings des articles.
 
-A lancer apres la migration f5a6b7c8d9e0 : elle remet la colonne
-`articles.embedding` a NULL en la repassant en vector(3072), donc tous les
-vecteurs existants doivent etre recalcules. Tant que le backfill n'est
-pas termine, la recherche semantique ne renvoie rien et l'hybride degrade en
-recherche plein texte.
+A lancer apres la migration c4d5e6f7a8b9 : elle remet la colonne
+`articles.embedding` a NULL en la passant en vector(768), donc tous les
+vecteurs existants doivent etre recalcules. Et apres tout changement de
+fournisseur — EMBEDDING_PROVIDER, modele, revision, gabarits : les vecteurs de
+l'ancien ne se comparent pas a ceux du nouveau. Tant que le backfill n'est pas
+termine, la recherche semantique ne renvoie rien, ou compare deux espaces, et
+l'hybride degrade en recherche plein texte.
 
-Reprise : par defaut le script ne traite que les articles dont l'embedding est
-NULL et progresse par curseur sur l'id. Une interruption ne coute donc qu'un
-lot, et une re-execution reprend ou elle s'est arretee.
+Selection : par defaut le script traite les articles dont le vecteur manque OU
+vient d'un autre fournisseur que celui configure. La colonne
+`articles.embedding_model` porte l'empreinte de celui qui l'a produit ; un
+vecteur sans empreinte est d'origine inconnue, donc refait. --force recalcule
+tout.
+
+Reprise : le script progresse par curseur sur l'id. Une interruption ne coute
+donc qu'un lot, et une re-execution reprend ou elle s'est arretee.
 
 Usage:
     python scripts/regenerate_embeddings.py --all
@@ -61,19 +68,37 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Recalcule aussi les articles qui ont deja un embedding",
     )
-    parser.add_argument("--sleep", type=float, default=0.5, help="Pause entre les lots")
+    parser.add_argument(
+        "--sleep",
+        type=float,
+        default=None,
+        help="Pause entre les lots, en secondes. Defaut : celle du fournisseur "
+        "(0,5 s pour l'API Gemini, aucune en local)",
+    )
     parser.add_argument("--max-quota-waits", type=int, default=20)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
 
-def _fetch_batch(session, law_ids, force: bool, cursor: int, size: int) -> List[dict]:
+# Ce qui reste a faire : pas de vecteur, ou un vecteur d'un autre fournisseur.
+# IS DISTINCT FROM et non `<>` : une empreinte NULL — vecteur d'origine
+# inconnue — doit etre refaite, or `NULL <> 'x'` vaut NULL, donc faux dans un
+# WHERE. Le vecteur serait passe pour bon.
+def _a_refaire(prefixe: str = "") -> str:
+    return (
+        f"({prefixe}embedding IS NULL "
+        f"OR {prefixe}embedding_model IS DISTINCT FROM :empreinte)"
+    )
+
+
+def _fetch_batch(
+    session, law_ids, force: bool, empreinte: str, cursor: int, size: int
+) -> List[dict]:
     """
     Lot suivant, par curseur sur l'id.
 
-    Curseur et non OFFSET : les lignes traitees sortent du filtre
-    `embedding IS NULL` au fur et a mesure, ce qui decale un OFFSET et fait
-    sauter des articles.
+    Curseur et non OFFSET : les lignes traitees sortent du filtre au fur et a
+    mesure, ce qui decale un OFFSET et fait sauter des articles.
     """
     # `a.embed IS TRUE` : le pipeline d'ingestion ne vectorise que les chunks
     # que le raffineur a juges vectorisables (process_law._generate_article_embeddings).
@@ -83,7 +108,8 @@ def _fetch_batch(session, law_ids, force: bool, cursor: int, size: int) -> List[
     params = {"cursor": cursor, "size": size}
 
     if not force:
-        clauses.append("a.embedding IS NULL")
+        clauses.append(_a_refaire("a."))
+        params["empreinte"] = empreinte
     if law_ids:
         clauses.append("a.law_id = ANY(:law_ids)")
         params["law_ids"] = list(law_ids)
@@ -107,13 +133,14 @@ def _fetch_batch(session, law_ids, force: bool, cursor: int, size: int) -> List[
     ]
 
 
-def _count_remaining(session, law_ids, force: bool) -> int:
+def _count_remaining(session, law_ids, force: bool, empreinte: str) -> int:
     # Meme filtre que _fetch_batch, sinon la progression affichee ment : elle
     # comptait des chunks que le lot suivant n'irait jamais chercher.
     clauses = ["embed IS TRUE"]
     params = {}
     if not force:
-        clauses.append("embedding IS NULL")
+        clauses.append(_a_refaire())
+        params["empreinte"] = empreinte
     if law_ids:
         clauses.append("law_id = ANY(:law_ids)")
         params["law_ids"] = list(law_ids)
@@ -121,21 +148,27 @@ def _count_remaining(session, law_ids, force: bool) -> int:
     return int(session.execute(sql, params).scalar() or 0)
 
 
-def _write_batch(session, ids: List[int], embeddings) -> None:
+def _write_batch(session, ids: List[int], embeddings, empreinte: str) -> None:
     """
-    Ecrit les vecteurs.
+    Ecrit les vecteurs, et leur provenance dans la meme instruction.
 
     CAST(:embedding AS vector) sur une CHAINE "[x,y,...]" : une liste Python
     passee a travers text() est adaptee en ARRAY par le pilote, et un ARRAY ne
     se caste pas proprement en vector.
     """
-    sql = text("UPDATE articles SET embedding = CAST(:embedding AS vector) WHERE id = :id")
+    sql = text(
+        "UPDATE articles SET embedding = CAST(:embedding AS vector), "
+        "embedding_model = :empreinte WHERE id = :id"
+    )
     for article_id, embedding in zip(ids, embeddings):
-        # %.6g et non %.7f : a 3072 composantes, le format fixe produit
-        # ~31 Ko de texte de requete par UPDATE, pour une precision au-dela de
-        # ce que fp32 represente.
+        # %.6g et non %.7f : six chiffres significatifs quelle que soit la
+        # grandeur, quand le format fixe tronque les petites composantes
+        # (1.2e-7 s'ecrit 0.0000001). La longueur est la meme : ~8 Ko de texte
+        # par UPDATE a 768 composantes, mesure.
         literal = "[" + ",".join(f"{v:.6g}" for v in embedding.tolist()) + "]"
-        session.execute(sql, {"embedding": literal, "id": article_id})
+        session.execute(
+            sql, {"embedding": literal, "empreinte": empreinte, "id": article_id}
+        )
 
 
 def _embed_with_quota_retry(service, texts, batch_size, max_waits):
@@ -164,14 +197,14 @@ def reindex(session) -> None:
     exige l'autocommit, d'ou la connexion dediee.
 
     maintenance_work_mem n'est pas decoratif ici : le graphe HNSW de 20 000
-    vecteurs halfvec(3072) pese environ 130 Mo, contre 64 Mo de defaut serveur.
-    En dessous, pgvector bascule sur une construction disque bien plus lente.
-    A relever au-dela de ~40 000 articles.
+    vecteurs vector(768) pese 78 Mo (mesure), deja plus que les 64 Mo de
+    defaut serveur. En dessous, pgvector bascule sur une construction disque
+    bien plus lente. 512 Mo couvrent ~130 000 articles.
     """
     logger.info("Reconstruction de l'index HNSW (peut etre long)...")
     with sync_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.execute(text("SET maintenance_work_mem = '512MB'"))
-        conn.execute(text("REINDEX INDEX CONCURRENTLY idx_articles_embedding_hnsw_halfvec"))
+        conn.execute(text("REINDEX INDEX CONCURRENTLY idx_articles_embedding_hnsw_vector"))
     logger.info("Index reconstruit")
 
 
@@ -196,19 +229,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     cursor = 0
 
     with SyncSessionLocal() as session:
-        remaining = _count_remaining(session, law_ids, args.force)
+        # Construit AVANT le compte, dry-run compris : ce qui reste a faire
+        # depend de l'empreinte du fournisseur configure. La construction ne
+        # coute rien — aucun appel reseau, le modele local n'est charge qu'au
+        # premier encodage — mais exige une configuration valide :
+        # GEMINI_API_KEY pour gemini, les fichiers du modele pour gemma.
+        service = EmbeddingService(use_cache=True)
+        provider = service.provider
+        empreinte = provider.fingerprint
+        pause = args.sleep if args.sleep is not None else provider.inter_batch_delay_s
+
+        remaining = _count_remaining(session, law_ids, args.force, empreinte)
         logger.info(
-            "%s article(s) a traiter (dimension %s)", remaining, EmbeddingService.EMBEDDING_DIM
+            "%s article(s) a traiter par %s (dimension %s)",
+            remaining, provider.label, EmbeddingService.EMBEDDING_DIM,
         )
         if args.dry_run:
-            logger.info("--dry-run : aucun appel a l'API, aucune ecriture")
+            logger.info("--dry-run : aucun encodage, aucune ecriture")
             return 0
         if remaining == 0:
             return 0
-
-        # Construit APRES le dry-run : le constructeur exige GEMINI_API_KEY, et
-        # un compte a blanc n'a aucune raison d'en demander une.
-        service = EmbeddingService(use_cache=True)
 
         while True:
             if args.limit is not None and processed >= args.limit:
@@ -218,7 +258,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if args.limit is not None:
                 size = min(size, args.limit - processed)
 
-            batch = _fetch_batch(session, law_ids, args.force, cursor, size)
+            batch = _fetch_batch(session, law_ids, args.force, empreinte, cursor, size)
             if not batch:
                 break
             cursor = batch[-1]["id"]
@@ -238,7 +278,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 embeddings = _embed_with_quota_retry(
                     service, texts, args.batch_size, args.max_quota_waits
                 )
-                _write_batch(session, [r["id"] for r in batch], embeddings)
+                _write_batch(session, [r["id"] for r in batch], embeddings, empreinte)
                 # Commit par lot : une interruption brutale ne perd qu'un lot.
                 session.commit()
                 processed += len(batch)
@@ -248,7 +288,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 # echouer tous les lots suivants, un par un, pour rien. On
                 # s'arrete en disant exactement ou on en est.
                 session.rollback()
-                remaining = _count_remaining(session, law_ids, args.force)
+                remaining = _count_remaining(session, law_ids, args.force, empreinte)
                 logger.error(
                     "Quota journalier epuise apres %s article(s) traite(s). "
                     "Il en reste %s. Le quota se reinitialise a minuit, heure du "
@@ -263,8 +303,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 failed_ids.extend(ids)
                 logger.error("Lot %s ignore : %s", ids, exc)
 
-            if args.sleep:
-                time.sleep(args.sleep)
+            if pause:
+                time.sleep(pause)
 
     logger.info("Termine : %s article(s) traite(s)", processed)
     if failed_ids:

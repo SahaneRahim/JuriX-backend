@@ -451,11 +451,14 @@ class SearchService:
             logger.error(f"❌ Text search failed: {e}")
             raise TextSearchError(f"Échec recherche textuelle: {e}") from e
 
-    # Sur-echantillonnage avant le reclassement exact. L'etage ANN travaille en
-    # fp16 (halfvec) : l'erreur induite sur un score cosinus est de l'ordre de
-    # 1e-3, assez pour permuter des quasi-ex-aequo, pas pour deplacer un chunk
-    # pertinent de cent places. Un facteur 8 avec un plancher a 100 couvre
-    # largement. Valeurs a calibrer avec scripts/eval/run_eval.py.
+    # Sur-echantillonnage avant le tri final, pour deux raisons :
+    # - le rappel d'un parcours HNSW croit avec hnsw.ef_search, que
+    #   _apply_hnsw_settings aligne sur ce nombre de candidats ;
+    # - sous filtre, `relaxed_order` rend des lignes legerement desordonnees :
+    #   un article du vrai top 15 peut sortir au-dela du rang 15. Le tri strict
+    #   sur 100 candidats le remet a sa place.
+    # Un facteur 8 avec un plancher a 100 couvre largement. Valeurs a calibrer
+    # avec scripts/eval/run_eval.py.
     ANN_CANDIDATE_MULTIPLIER = 8
     ANN_MIN_CANDIDATES = 100
     ANN_MAX_CANDIDATES = 500
@@ -477,41 +480,46 @@ class SearchService:
         """
         Enonce de la recherche semantique, en DEUX etages.
 
-        Etage 1, dans la sous-requete : parcours de l'index HNSW, qui est pose
-        sur l'expression `embedding::halfvec(3072)` — le type `vector` n'est
-        indexable que jusqu'a 2000 dimensions, `halfvec` jusqu'a 4000. On en
-        tire `candidates` lignes.
+        Etage 1, dans la sous-requete : parcours de l'index HNSW pose sur la
+        colonne (`embedding vector_cosine_ops`), qui fournit `candidates`
+        lignes munies de leur distance cosinus.
 
-        Etage 2, a l'exterieur : reclassement de ces candidats a la distance
-        fp32 EXACTE. Le fp16 ne sert qu'a selectionner, jamais a classer.
+        Etage 2, a l'exterieur : tri STRICT de ces candidats, puis limit et
+        offset.
+
+        L'index calcule pourtant des distances exactes : pourquoi un second
+        etage ? Parce que sous filtre, _apply_hnsw_settings active
+        `hnsw.iterative_scan = 'relaxed_order'`. Le parcours reprend tant que
+        le filtre elague, mais rend alors des lignes LEGEREMENT DESORDONNEES
+        (mesure : 2 sur 100). L'etage 2 remet l'ordre.
 
         Quatre details portent tout le dispositif, et chacun a une variante
         fausse qui a l'air correcte :
 
-        - La distance exacte est projetee DANS la sous-requete. Calculee a
+        - Le tri externe porte sur `distance + 0`, jamais sur `distance` nue.
+          La sous-requete est deja ordonnee sur la meme expression : le
+          planificateur le sait, et SUPPRIME le tri externe. Mesure par
+          EXPLAIN : sans le `+ 0`, plus aucun noeud Sort, l'etage 2 n'existe
+          plus et le desordre passe tel quel. C'est l'idiome que documente
+          pgvector pour cette situation.
+        - Le tri interne porte sur l'operateur `<=>`, seul rattachable a
+          l'index. `func.cosine_distance(...)` compile en appel de fonction,
+          que le planificateur ne rattache a aucun index.
+        - La distance est projetee DANS la sous-requete. Calculee a
           l'exterieur, la sous-requete devrait remonter articles.embedding,
-          soit 12 Ko par candidat traversant le plan.
-        - ORDER BY porte sur l'EXPRESSION, jamais sur l'alias : le
-          planificateur apparie l'index sur l'arbre d'expression.
-        - Le typmod doit etre present des deux cotes. `embedding::halfvec` sans
-          `(3072)` est un noeud d'expression different et n'apparie aucun index.
+          soit 3 Ko par candidat traversant le plan.
         - L'offset ne s'applique qu'a l'exterieur : le poser a l'interieur
-          jetterait les meilleurs candidats avant le reclassement.
+          jetterait les meilleurs candidats avant le tri.
 
         Extrait dans une methode pour qu'un test puisse le compiler sans base.
         """
-        from pgvector.sqlalchemy import HALFVEC, Vector
-        from sqlalchemy import cast, literal
+        from pgvector.sqlalchemy import Vector
+        from sqlalchemy import literal, literal_column
 
         dim = EmbeddingService.EMBEDDING_DIM
         candidates = self._ann_candidates(limit)
 
-        ann_distance = cast(Article.embedding, HALFVEC(dim)).cosine_distance(
-            literal(query_vector, HALFVEC(dim))
-        )
-        exact_distance = Article.embedding.cosine_distance(
-            literal(query_vector, Vector(dim))
-        )
+        distance = Article.embedding.cosine_distance(literal(query_vector, Vector(dim)))
 
         inner = (
             select(
@@ -530,7 +538,7 @@ class SearchService:
                 Law.category_id,
                 Law.publication_date,
                 Category.name.label("category_name"),
-                exact_distance.label("distance"),
+                distance.label("distance"),
             )
             .select_from(Article)
             .join(Law, Law.id == Article.law_id)
@@ -538,9 +546,15 @@ class SearchService:
             .where(Article.embedding.isnot(None))
         )
         inner = self._apply_filters_pgvector(inner, filters)
-        inner = inner.order_by(ann_distance).limit(candidates).subquery("ann")
+        inner = inner.order_by(distance).limit(candidates).subquery("ann")
 
-        return select(inner).order_by(inner.c.distance).limit(limit).offset(offset)
+        # `+ 0` : sans lui, le planificateur supprime ce tri (voir plus haut).
+        return (
+            select(inner)
+            .order_by(inner.c.distance + literal_column("0"))
+            .limit(limit)
+            .offset(offset)
+        )
 
     async def _apply_hnsw_settings(self, candidates: int, filtered: bool) -> None:
         """
@@ -590,8 +604,8 @@ class SearchService:
         - Une ligne par ARTICLE. Le `func.max(...) GROUP BY Law.*` d'avant
           calculait bien la distance article par article, puis jetait l'article
           gagnant : le resultat ne portait ni son identite ni son texte.
-        - L'index est parcouru via `embedding::halfvec(3072)` puis les
-          candidats sont reclasses a la distance fp32 exacte. La forme
+        - L'index HNSW est parcouru par l'operateur `<=>`, puis les candidats
+          sont tries strictement (voir _build_semantic_statement). La forme
           `func.cosine_distance(...)` d'origine compilait en un APPEL DE
           FONCTION que le planificateur ne peut rattacher a aucun index.
         - Le score est borne. `1 - distance` peut etre negatif avec de vrais

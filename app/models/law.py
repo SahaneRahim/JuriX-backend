@@ -191,7 +191,8 @@ class Article(Base):
         number: Numéro de l'article (ex: "1er", "2", "3bis")
         title: Titre optionnel de l'article
         content: Contenu textuel de l'article
-        embedding: Vecteur d'embedding (3072 dimensions) pour recherche sémantique
+        embedding: Vecteur d'embedding (768 dimensions) pour recherche sémantique
+        embedding_model: Empreinte du fournisseur qui a produit le vecteur
         order: Ordre dans la loi (pour tri)
         created_at: Date de création
         law: Relation vers la loi parent
@@ -225,13 +226,18 @@ class Article(Base):
     content = Column(Text, nullable=False)
 
     # pgvector embedding for semantic search.
-    # 3072 dimensions, la sortie native de gemini-embedding-001, stockee en
-    # fp32. Le plafond de 2000 dimensions de pgvector ne concerne que
-    # l'indexation du type `vector` : l'index HNSW est pose sur l'expression
-    # `embedding::halfvec(3072)`, indexable jusqu'a 4000 (migration
-    # f5a6b7c8d9e0). La dimension est aussi declaree dans
-    # settings.EMBEDDING_DIM, les deux doivent rester d'accord.
-    embedding = Column(Vector(3072), nullable=True)
+    # 768 dimensions : la sortie native d'EmbeddingGemma, et une dimension que
+    # gemini-embedding-001 produit aussi sur demande. Stockee en fp32, sous le
+    # plafond de 2000 dimensions du type `vector` : l'index HNSW est pose sur
+    # la colonne elle-meme (migration c4d5e6f7a8b9). La dimension est aussi
+    # declaree dans settings.EMBEDDING_DIM ; un test verifie l'accord.
+    embedding = Column(Vector(768), nullable=True)
+    # Empreinte du fournisseur qui a produit `embedding` : modele, revision,
+    # gabarits. Deux modeles produisent des espaces sans rapport, et un cosinus
+    # entre leurs vecteurs ne veut rien dire — sans que rien ne le signale.
+    # NULL avec un vecteur = origine inconnue, donc a refaire au meme titre
+    # qu'un vecteur absent (scripts/regenerate_embeddings.py).
+    embedding_model = Column(Text, nullable=True)
 
     # Classification produite par app/utils/chunk_refiner.py.
     # kind : article | legal_basis | preamble | boilerplate | roster | table |

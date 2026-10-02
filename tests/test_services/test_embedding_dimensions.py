@@ -70,7 +70,7 @@ class TestDimension:
         assert config.output_dimensionality == EmbeddingService.EMBEDDING_DIM
         # Valeur absolue et non derivee : le but est de remarquer un changement
         # accidentel de dimension, pas de le suivre.
-        assert EmbeddingService.EMBEDDING_DIM == 3072
+        assert EmbeddingService.EMBEDDING_DIM == 768
 
     def test_embedding_has_configured_dimension(self, service):
         embedding = service.generate_embedding("Article premier")
@@ -78,7 +78,7 @@ class TestDimension:
         assert embedding.shape == (EmbeddingService.EMBEDDING_DIM,)
 
     def test_batch_rejects_wrong_dimension(self, service, recorder):
-        recorder["dim"] = 768  # l'API renvoie autre chose que ce qui est demande
+        recorder["dim"] = 512  # l'API renvoie autre chose que ce qui est demande
 
         with pytest.raises(EmbeddingServiceError, match="Dimension"):
             service.generate_batch_embeddings(["a", "b"])
@@ -131,12 +131,12 @@ class TestCacheKey:
         try:
             # Une dimension differente de celle configuree, sinon les deux cles
             # sont identiques et le test ne verifie rien.
-            service.EMBEDDING_DIM = 768
-            key_768 = service._cache_key("texte", EmbeddingService.TASK_DOCUMENT)
+            service.EMBEDDING_DIM = 512
+            key_512 = service._cache_key("texte", EmbeddingService.TASK_DOCUMENT)
         finally:
             service.EMBEDDING_DIM = original
 
-        assert key_native != key_768
+        assert key_native != key_512
 
     def test_key_isolates_task_type(self, service):
         as_document = service._cache_key("texte", EmbeddingService.TASK_DOCUMENT)
@@ -160,7 +160,7 @@ class TestCacheRead:
     @pytest.mark.asyncio
     async def test_cache_read_rejects_wrong_dimension(self, recorder, db_session):
         """
-        Une entree ecrite sous une autre dimension (ici 1536, la configuration
+        Une entree ecrite sous une autre dimension (ici 3072, la configuration
         precedente) doit etre ignoree, pas servie : elle serait rejetee par la
         colonne, ou pire, comparee de travers.
         """
@@ -174,7 +174,7 @@ class TestCacheRead:
                 "INSERT INTO embedding_cache (text_hash, embedding_json, expires_at) "
                 "VALUES (:key, :data, now() + interval '1 day')"
             ),
-            {"key": key, "data": json.dumps([0.1] * 1536)},
+            {"key": key, "data": json.dumps([0.1] * 3072)},
         )
         await db_session.commit()
 

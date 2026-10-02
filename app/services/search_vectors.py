@@ -100,7 +100,7 @@ $$ LANGUAGE plpgsql
 # `SET search_vector = ...` et non `SET content = content`. La seconde forme
 # reecrivait chaque ligne d'articles pour le seul effet de bord de declencher le
 # trigger : sur un code de 5000 articles, cela ferait 5000 tuples morts et
-# autant de mises a jour de l'index HNSW 3072 dimensions, pour un simple
+# autant de mises a jour de l'index HNSW des embeddings, pour un simple
 # changement de titre.
 # RETURN NULL : la valeur de retour d'un trigger AFTER FOR EACH ROW est ignoree.
 LAWS_TITLE_CASCADE_FUNCTION = f"""

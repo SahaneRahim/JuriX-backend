@@ -1,20 +1,25 @@
 """
 Tests du schema vectoriel.
 
-La colonne faisait 3072 dimensions, au-dessus du plafond de 2000 de pgvector
-pour HNSW et IVFFlat : aucun index n'etait possible et chaque recherche
-semantique balayait la table. Ces tests verifient la dimension, l'existence de
-l'index, et surtout que la requete produite par l'ORM est de la forme que le
-planificateur sait y rattacher.
+La colonne est en vector(768), indexee par HNSW directement, sans le detour par
+une expression halfvec qu'imposaient les 3072 dimensions d'avant (migration
+c4d5e6f7a8b9). Ces tests verifient la dimension, l'index — un seul, le bon —,
+et surtout le PLAN de l'enonce que produit l'ORM : qu'il passe par l'index, et
+que le planificateur n'y supprime pas le tri final.
 """
 
 import numpy as np
 import pytest
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects.postgresql import asyncpg as pg_asyncpg
 
-from app.models.law import Article
+from app.models.law import Article, Law
+from app.schemas.search import SearchFilters
 from app.services.embedding_service import EmbeddingService
+from app.services.search_service import SearchService
+
+INDEX = "idx_articles_embedding_hnsw_vector"
 
 
 @pytest.mark.asyncio
@@ -27,47 +32,48 @@ async def test_embedding_column_has_configured_dimension(db_session):
     declared = result.scalar()
 
     assert declared == f"vector({EmbeddingService.EMBEDDING_DIM})"
-    # Et surtout PAS halfvec : le stockage reste en fp32, seule l'indexation
-    # passe en fp16. C'est tout l'interet du montage.
-    assert not declared.startswith("halfvec")
 
 
 @pytest.mark.asyncio
-async def test_hnsw_index_exists(db_session):
-    result = await db_session.execute(text("""
-        SELECT indexdef FROM pg_indexes
-        WHERE tablename = 'articles'
-          AND indexname = 'idx_articles_embedding_hnsw_halfvec'
-    """))
+async def test_exactly_one_index_on_the_embedding_column(db_session):
+    """
+    Un seul index sur la colonne, et le bon.
 
-    indexdef = result.scalar()
-    assert indexdef is not None, "l'index HNSW halfvec est absent"
-    assert "hnsw" in indexdef.lower()
-    assert "halfvec_cosine_ops" in indexdef.lower()
-    # Le TYPMOD, pas seulement le type : `embedding::halfvec` sans dimension
-    # est un noeud d'expression different, qui n'apparierait jamais la requete.
-    assert f"halfvec({EmbeddingService.EMBEDDING_DIM})" in indexdef.lower()
+    Un ancien index halfvec oublie par la migration survit a la conversion de
+    la colonne : il ne sert plus aucune requete mais coute a chaque ecriture,
+    et un test qui chercherait seulement « un index HNSW » passerait contre
+    lui. D'ou l'egalite stricte sur la liste.
+    """
+    # Les index dont la CLE porte sur la colonne : en colonne (indkey) ou dans
+    # une expression (indexprs). Pas ceux qui ne la citent qu'en predicat,
+    # comme idx_articles_embed_pending (`WHERE embedding IS NULL`), qui sert a
+    # trouver les articles en attente et n'a rien d'un index vectoriel.
+    # \m et \M : bornes de mot, pour ne pas prendre `embedding_model`.
+    rows = (await db_session.execute(text(r"""
+        SELECT c.relname AS indexname, pg_get_indexdef(i.indexrelid) AS indexdef
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attname = 'embedding'
+        WHERE i.indrelid = 'articles'::regclass
+          AND (a.attnum = ANY(i.indkey)
+               OR pg_get_expr(i.indexprs, i.indrelid) ~ '\membedding\M')
+    """))).all()
+
+    assert [r.indexname for r in rows] == [INDEX], rows
+    indexdef = rows[0].indexdef.lower()
+    assert "using hnsw (embedding vector_cosine_ops)" in indexdef
+    assert "halfvec" not in indexdef
 
 
-@pytest.mark.asyncio
-async def test_old_vector_index_is_gone(db_session):
-    """L'ancien index sur `vector` ne doit pas survivre a la migration."""
-    result = await db_session.execute(text("""
-        SELECT indexname FROM pg_indexes
-        WHERE tablename = 'articles' AND indexname = 'idx_articles_embedding_hnsw'
-    """))
-
-    assert result.scalar() is None
+def _statement(filters=None, limit=8):
+    service = SearchService.__new__(SearchService)
+    return service._build_semantic_statement(
+        [0.001] * EmbeddingService.EMBEDDING_DIM, filters, limit, 0
+    )
 
 
 def _compiled_semantic_sql() -> str:
-    from app.services.search_service import SearchService
-
-    service = SearchService.__new__(SearchService)
-    stmt = service._build_semantic_statement(
-        [0.0] * EmbeddingService.EMBEDDING_DIM, None, 8, 0
-    )
-    return str(stmt.compile(dialect=postgresql.dialect())).replace("\n", " ")
+    return str(_statement().compile(dialect=postgresql.dialect())).replace("\n", " ")
 
 
 def test_orm_emits_the_distance_operator():
@@ -86,72 +92,148 @@ def test_orm_emits_the_distance_operator():
 
 def test_semantic_query_is_two_stage():
     """
-    L'etage ANN passe par le cast halfvec, le classement final par la distance
-    exacte.
+    L'etage 1 trie sur l'operateur indexable, l'etage 2 sur `distance + 0`.
 
-    C'est ce qui casse si quelqu'un "simplifie" la requete en un seul etage :
-    on perdrait soit l'index (tri sur la distance fp32, non indexee), soit la
-    precision du classement (tri sur le fp16).
+    Le `+ 0` est ce que casserait une simplification d'apparence anodine : sur
+    `ann.distance` nue, le planificateur sait la sous-requete deja ordonnee et
+    supprime le tri externe — verifie sur plan reel plus bas.
     """
     sql = _compiled_semantic_sql()
-    dim = EmbeddingService.EMBEDDING_DIM
-
     inner, _, outer = sql.partition(") AS ann")
 
-    # Etage 1 : le cast avec son typmod, dans le ORDER BY interne
-    assert f"CAST(articles.embedding AS HALFVEC({dim}))" in inner
-    assert "ORDER BY CAST(articles.embedding AS HALFVEC" in inner
+    assert "ORDER BY articles.embedding <=>" in inner
+    assert "ORDER BY ann.distance + 0" in outer
+    # Plus aucun cast : l'index est pose sur la colonne elle-meme.
+    assert "HALFVEC" not in sql.upper()
+    # L'offset ne s'applique qu'apres le tri strict.
+    assert "OFFSET" not in inner
+    assert "OFFSET" in outer
 
-    # Etage 2 : classement externe sur la colonne de distance exacte, sans cast
-    assert "ORDER BY ann.distance" in outer
-    assert "HALFVEC" not in outer
+
+# ==================== LE PLAN REEL ====================
 
 
-@pytest.mark.asyncio
-async def test_hnsw_index_is_usable_for_the_query_shape(db_session):
-    """
-    Le plan doit nommer l'index.
-
-    enable_seqscan=off est necessaire : sur quelques centaines de lignes le
-    planificateur prefere legitimement un balayage sequentiel. Ce qui est teste
-    ici, c'est que la FORME de la requete est indexable — precisement ce que la
-    forme fonction interdisait.
-    """
-    from app.models.law import Law
-
-    law = Law(
-        reference="LOI-INDEX-TEST",
-        title="Loi de test index",
-        content="Contenu de test.",
-        type="loi",
-        language="fr",
-        status="published",
-    )
-    db_session.add(law)
+@pytest.fixture
+async def corpus_vectorise(db_session):
+    """200 articles vectorises, repartis sur deux langues, statistiques a jour."""
+    db_session.add_all([
+        Law(id=900, reference="LOI-INDEX-FR", title="Loi de test index",
+            content="Contenu.", type="loi", language="fr", status="published"),
+        Law(id=901, reference="LOI-INDEX-EN", title="Index test law",
+            content="Content.", type="loi", language="en", status="published"),
+    ])
     await db_session.flush()
 
     rng = np.random.default_rng(3)
     for i in range(200):
         vec = rng.normal(size=EmbeddingService.EMBEDDING_DIM)
-        vec = vec / np.linalg.norm(vec)
         db_session.add(Article(
-            law_id=law.id,
+            law_id=900 + i % 2,
             number=str(i + 1),
             content=f"Article de test numero {i + 1}.",
             order=i + 1,
-            embedding=vec.tolist(),
+            embedding=(vec / np.linalg.norm(vec)).tolist(),
         ))
     await db_session.commit()
 
     await db_session.execute(text("ANALYZE articles"))
+    await db_session.execute(text("ANALYZE laws"))
+
+
+async def _prepare_session(db_session, filters, limit):
+    """
+    Les reglages de session de la vraie recherche, plus deux penalites.
+
+    Sur 200 lignes, le planificateur prefere legitimement lire les articles
+    par un autre chemin — balayage, ou index sur law_id — puis TRIER par
+    distance : c'est moins cher que l'index HNSW a cette echelle. A 20 000
+    articles et sans penalite, il choisit l'index (mesure). Ce qui est
+    verifie ici n'est pas ce choix de cout, mais que la FORME de l'enonce
+    permet l'index. D'ou enable_seqscan et enable_sort a off : le seul chemin
+    sans penalite est alors l'index qui rend les lignes deja ordonnees — il
+    n'existe que si le tri interne lui est rattachable.
+
+    Le tri EXTERNE, lui, n'a aucune alternative ordonnee : `distance + 0` ne
+    correspond a aucun index. Penalise ou non, il doit rester dans le plan, et
+    le planificateur, qui l'eliminerait plus volontiers encore sous cette
+    penalite, ne le peut pas.
+    """
+    service = SearchService(db_session, use_cache=False)
+    await service._apply_hnsw_settings(service._ann_candidates(limit), filters is not None)
     await db_session.execute(text("SET LOCAL enable_seqscan = off"))
+    await db_session.execute(text("SET LOCAL enable_sort = off"))
 
-    dim = EmbeddingService.EMBEDDING_DIM
-    probe = "[" + ",".join("0.001" for _ in range(dim)) + "]"
-    result = await db_session.execute(text(
-        "EXPLAIN SELECT id FROM articles WHERE embedding IS NOT NULL "
-        f"ORDER BY (embedding::halfvec({dim})) <=> '{probe}'::halfvec({dim}) LIMIT 5"
+
+def _assert_indexed_and_sorted(plan: str) -> None:
+    assert f"Index Scan using {INDEX}" in plan, plan
+    assert "Seq Scan on articles" not in plan, plan
+    # Le second etage existe encore : un noeud Sort sur `distance + 0`. Sans le
+    # `+ 0`, ce noeud disparait et le plan va directement de l'index au Limit.
+    sort_keys = [line for line in plan.splitlines() if "Sort Key:" in line]
+    assert any("ann.distance +" in line for line in sort_keys), plan
+
+
+FILTRES = [
+    pytest.param(None, id="sans-filtre"),
+    pytest.param(SearchFilters(language="fr"), id="filtre-relaxed-order"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filters", FILTRES)
+async def test_plan_uses_the_index_and_keeps_the_final_sort(
+    db_session, corpus_vectorise, filters
+):
+    """EXPLAIN de l'enonce que l'ORM produit, et non d'une requete recopiee."""
+    limit = 8
+    await _prepare_session(db_session, filters, limit)
+
+    sql = str(_statement(filters, limit).compile(
+        dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
     ))
-    plan = "\n".join(row[0] for row in result.fetchall())
+    conn = await db_session.connection()
+    plan = "\n".join(row[0] for row in (await conn.exec_driver_sql("EXPLAIN " + sql)))
 
-    assert "idx_articles_embedding_hnsw_halfvec" in plan, plan
+    _assert_indexed_and_sorted(plan)
+
+
+def _litteral(valeur) -> str:
+    if isinstance(valeur, list):
+        return "'[" + ",".join(str(v) for v in valeur) + "]'"
+    if isinstance(valeur, str):
+        return "'" + valeur.replace("'", "''") + "'"
+    return str(int(valeur))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filters", FILTRES)
+async def test_generic_plan_too(db_session, corpus_vectorise, filters):
+    """
+    Le meme controle sur le plan GENERIQUE, force plutot qu'attendu.
+
+    asyncpg prepare ses requetes. Apres cinq executions, PostgreSQL compare le
+    plan generique — etabli sans connaitre ni le vecteur ni la limite — au
+    cout moyen des plans personnalises, et l'adopte s'il n'est pas plus cher.
+    Mesure sur 20 000 articles : il est estime six a sept fois plus cher, les
+    plans personnalises restent. Ce test verifie donc que l'enonce resterait
+    indexable avec `$1` a la place du vecteur, pas que le planificateur
+    choisirait l'index.
+    """
+    limit = 8
+    await _prepare_session(db_session, filters, limit)
+
+    compiled = _statement(filters, limit).compile(dialect=pg_asyncpg.dialect())
+    arguments = ", ".join(_litteral(compiled.params[nom]) for nom in compiled.positiontup)
+
+    conn = await db_session.connection()
+    brute = (await conn.get_raw_connection()).driver_connection
+    await brute.execute(f"PREPARE semantique AS {compiled.string}")
+    try:
+        await brute.execute("SET LOCAL plan_cache_mode = force_generic_plan")
+        rows = await brute.fetch(f"EXPLAIN EXECUTE semantique({arguments})")
+    finally:
+        await brute.execute("DEALLOCATE semantique")
+    plan = "\n".join(row[0] for row in rows)
+
+    assert "$1" in plan, "le plan n'est pas generique"
+    _assert_indexed_and_sorted(plan)

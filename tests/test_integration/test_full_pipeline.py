@@ -166,7 +166,7 @@ async def test_full_pipeline_integration(
     embeddings = embedding_service.generate_batch_embeddings([
         article["content"] for article in articles[:5]
     ])
-    dim = EmbeddingService.EMBEDDING_DIM  # 3072 avec Gemini, plus 768
+    dim = EmbeddingService.EMBEDDING_DIM
     assert len(embeddings) == min(5, len(articles))
     assert all(emb.shape == (dim,) for emb in embeddings)
     print(f"   ✅ Generated {len(embeddings)} embeddings ({dim}-dim)")
