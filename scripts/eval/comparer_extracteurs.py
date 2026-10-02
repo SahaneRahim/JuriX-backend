@@ -104,9 +104,9 @@ def couche_texte(chemin: Path, premiere: int, derniere: int) -> Dict[int, str]:
 
 async def extraire_gemini(chemin: Path, premiere: int, derniere: int) -> Dict[int, str]:
     """Le chemin de PRODUCTION, sans doublure : c'est la reference."""
-    from app.services.pdf_extraction_service import get_pdf_extractor
+    from app.services.pdf_extraction_service import GeminiPdfExtractor
 
-    pages = await get_pdf_extractor().extract_pages(chemin)
+    pages = await GeminiPdfExtractor().extract_pages(chemin)
     return {n: pages[n - 1] for n in range(premiere, derniere + 1) if n <= len(pages)}
 
 

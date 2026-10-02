@@ -62,7 +62,7 @@ google-genai = "^1.0.0"
 
 # Utils
 python-dotenv = "^1.0.0"
-httpx = "^0.25.2"
+httpx = ">=0.25.2,<1.0"  # aligne sur requirements.txt ; Docling exige >=0.28
 
 [tool.poetry.group.dev.dependencies]
 # Aligne sur requirements-dev.txt, le manifeste reellement installe. Les deux
@@ -76,7 +76,7 @@ pytest-cov = "^5.0"
 pytest-mock = "^3.14"
 pytest-timeout = "^2.3"
 respx = "^0.21"
-httpx = "^0.25.2"
+httpx = ">=0.25.2,<1.0"  # aligne sur requirements.txt ; Docling exige >=0.28
 # aiosqlite retire : conftest.py tourne exclusivement sur PostgreSQL (pgvector,
 # tsvector et les fonctions PostgreSQL n'existent pas sous SQLite).
 

@@ -162,6 +162,10 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "unit: test unitaire, sans base")
     config.addinivalue_line(
         "markers",
+        "docling: execute le vrai Docling (modeles dans le cache Hugging Face requis)",
+    )
+    config.addinivalue_line(
+        "markers",
         "gemma: execute le vrai modele EmbeddingGemma local (onnxruntime et fichiers requis)",
     )
 

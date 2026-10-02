@@ -1,0 +1,30 @@
+# Dependances de l'EXTRACTION DES PDF par Docling : la passe 1 de l'ingestion
+# (scripts/extraire_corpus.py), et l'extraction dans le pipeline quand
+# PDF_EXTRACTION_ENGINE=docling (le defaut).
+#
+# Separees de requirements.txt : torch et Docling pesent plusieurs Go, et une
+# API qui sert un corpus deja extrait n'en a pas besoin — sans elles,
+# l'extraction d'un nouvel envoi echoue avec un message clair, le reste marche.
+#
+# Versions EXACTES : elles entrent dans l'empreinte du cache d'extraction
+# (app/services/docling_extraction.py). En changer rend le cache existant
+# invisible, et tout le corpus serait a refaire — une vingtaine d'heures.
+#
+#   pip install -r requirements-ingestion.txt
+#
+# torch se choisit selon la carte graphique, AVANT ce fichier. Sur la Quadro
+# M1000M de developpement (Maxwell, sm_50), torch 2.14.0+cu126 est la derniere
+# version a la prendre en charge :
+#   pip install --index-url https://download.pytorch.org/whl/cu126 \
+#       torch==2.14.0 torchvision==0.29.0
+# Sans GPU : la roue CPU, depuis https://download.pytorch.org/whl/cpu
+-r requirements.txt
+docling==2.130.0
+docling-slim==2.130.0
+docling-core==2.99.0
+docling-ibm-models==4.0.3
+docling-parse==7.22.0
+rapidocr==3.9.2
+transformers==5.17.0
+pypdfium2==5.13.0
+psutil>=5.9

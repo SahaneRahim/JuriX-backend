@@ -45,9 +45,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app.core.database import SyncSessionLocal
 from app.models.law import Law
 from app.services.pdf_extraction_service import (
+    GeminiPdfExtractor,
     PdfExtractionError,
     PdfExtractionQuotaError,
-    get_pdf_extractor,
 )
 from app.utils.file_utils import resolve_upload_path
 
@@ -145,7 +145,10 @@ async def _traiter(documents, extracteur, appliquer: bool, max_calls: Optional[i
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    extracteur = get_pdf_extractor()
+    # Gemini EXPLICITEMENT : ce script re-extrait par l'API, quel que soit le
+    # moteur par defaut (PDF_EXTRACTION_ENGINE). Il s'appuie sur ce qui lui est
+    # propre — comptage des appels, pages refusees.
+    extracteur = GeminiPdfExtractor()
 
     if not extracteur.is_available():
         logger.error("❌ GEMINI_API_KEY absente : rien a faire.")

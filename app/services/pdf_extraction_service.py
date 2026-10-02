@@ -1,5 +1,14 @@
 """
-Extraction de PDF en markdown par Gemini multimodal.
+Extraction de PDF en markdown : contrat commun, et le moteur Gemini.
+
+DEUX MOTEURS, choisis par `settings.PDF_EXTRACTION_ENGINE` (get_pdf_extractor) :
+- "docling" (defaut) : en local, OCR pleine page, gratuit
+  (app/services/docling_extraction.py) ;
+- "gemini" : l'API multimodale, payante, decrite ci-dessous.
+Tous deux exposent `is_available()`, `raison_indisponible()` et
+`extraire(path) -> ResultatExtraction`, que le pipeline appelle.
+
+Le moteur Gemini :
 
 Remplace LlamaParse. La raison n'est pas le prix mais la PAGINATION.
 
@@ -33,6 +42,7 @@ import io
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -48,7 +58,7 @@ from app.services.gemini_service import (
     _visible_text,
     retry_after_seconds,
 )
-from app.utils.markdown_cleanup import strip_stamp_blocks
+from app.utils.markdown_cleanup import nettoyer_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +79,27 @@ def _decrire(err: Exception) -> str:
 def _est_un_depassement(err: Exception) -> bool:
     """Vrai pour un depassement de delai reseau, quelle que soit la couche."""
     return "Timeout" in type(err).__name__ or isinstance(err, TimeoutError)
+
+
+@dataclass
+class ResultatExtraction:
+    """
+    Ce qu'un moteur rend au pipeline pour un PDF.
+
+    `pages_en_echec` nomme les pages que le moteur n'a pas pu lire. Le document
+    reste publie sans elles — perdre une page vaut mieux que perdre les autres —
+    mais la liste part dans `laws.processing_error`, ou elle se voit.
+    """
+
+    texte: str
+    nb_pages: int
+    pages_en_echec: List[int] = field(default_factory=list)
+    # Pages lues mais sans texte utile apres nettoyage : rendu rate, ou cachet
+    # seul. Signalees pour qu'une page perdue ne passe pas inapercue.
+    pages_illisibles: List[int] = field(default_factory=list)
+    # Derniere erreur de chaque lot abandonne : la vraie cause d'une page
+    # manquante (processus tue, delai), et non « 0 caracteres ».
+    erreurs: List[str] = field(default_factory=list)
 
 
 class PdfExtractionError(Exception):
@@ -188,8 +219,42 @@ class GeminiPdfExtractor:
 
     # ==================== SURFACE PUBLIQUE ====================
 
+    nom = "Gemini"
+
     def is_available(self) -> bool:
         return bool(self.api_key)
+
+    def raison_indisponible(self) -> str:
+        return (
+            "GEMINI_API_KEY absente : extraction impossible. "
+            "Aucun repli degrade n'est utilise."
+        )
+
+    def extraire(self, file_path: Path, cache_seulement: bool = False) -> ResultatExtraction:
+        """
+        Version synchrone, celle qu'appelle le pipeline.
+
+        Une boucle asyncio NEUVE par appel, fermee ensuite ; d'ou l'instance
+        neuve que rend get_pdf_extractor() pour ce moteur (voir la).
+        """
+        if cache_seulement:
+            raise PdfExtractionError(
+                "Le mode « cache seulement » est propre a Docling : la passe "
+                "d'indexation suppose PDF_EXTRACTION_ENGINE=docling."
+            )
+        loop = asyncio.new_event_loop()
+        try:
+            pages = loop.run_until_complete(self.extract_pages(Path(file_path)))
+        finally:
+            loop.close()
+        if not pages:
+            raise PdfExtractionError(f"Aucune page extraite de {Path(file_path).name}")
+        texte = "\n\n".join(
+            f"<<PAGE:{i}>>\n{md}" for i, md in enumerate(pages, start=1) if md.strip()
+        )
+        return ResultatExtraction(
+            texte=texte, nb_pages=len(pages), pages_en_echec=list(self.pages_refusees)
+        )
 
     async def extract_text(self, file_path: Path) -> str:
         """
@@ -253,7 +318,7 @@ class GeminiPdfExtractor:
                     )
                 )
 
-        pages = [strip_stamp_blocks(p) for p in pages]
+        pages = [nettoyer_markdown(p) for p in pages]
         self._write_cache(cle, pages)
         return pages
 
@@ -588,7 +653,25 @@ class GeminiPdfExtractor:
             logger.warning(f"⚠️ Ecriture du cache d'extraction echouee ({e})")
 
 
-@lru_cache()
-def get_pdf_extractor() -> GeminiPdfExtractor:
-    """Instance partagee. Le client Gemini et le cache disque sont reutilises."""
-    return GeminiPdfExtractor()
+def get_pdf_extractor():
+    """
+    L'extracteur de la configuration (settings.PDF_EXTRACTION_ENGINE).
+
+    Docling : une instance par processus, ses modeles ne se chargent qu'une
+    fois. Gemini : une instance NEUVE a chaque appel. L'instance partagee
+    cassait un document sur deux : le pipeline cree une boucle asyncio par
+    document puis la ferme, et le client httpx du SDK gardait des connexions
+    liees a la boucle fermee — « Event loop is closed » au document suivant.
+    """
+    from app.core.config import settings
+
+    if settings.PDF_EXTRACTION_ENGINE == "gemini":
+        return GeminiPdfExtractor()
+    return _extracteur_docling()
+
+
+@lru_cache(maxsize=1)
+def _extracteur_docling():
+    from app.services.docling_extraction import DoclingPdfExtractor
+
+    return DoclingPdfExtractor()

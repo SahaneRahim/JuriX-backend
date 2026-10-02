@@ -181,6 +181,47 @@ class Settings(BaseSettings):
     # caractere ephemere est sans consequence : le cache se reconstruit.
     DOCUMENTS_CACHE_DIR: str = "/tmp/jurix-docs"
     DOCUMENTS_FETCH_TIMEOUT_S: int = 30
+    # ---- Extraction des PDF ----
+    # "docling", le defaut : en local, gratuit, OCR pleine page sur TOUTES les
+    # pages (reglages EXTRACTION_* ci-dessous). "gemini" : l'API payante,
+    # reglee par les PDF_EXTRACTION_*. Changer de moteur ne relit pas les
+    # extractions de l'autre : chacun a son cache. Les scripts d'ingestion du
+    # corpus utilisent Docling quel que soit ce reglage.
+    PDF_EXTRACTION_ENGINE: Literal["docling", "gemini"] = "docling"
+    # ---- Extraction locale par Docling (app/services/docling_extraction.py) ----
+    # Prefixe EXTRACTION_ et non DOCLING_ : Docling lit lui-meme les variables
+    # d'environnement DOCLING_* (AcceleratorOptions). Une valeur exportee pour
+    # JuriX — DOCLING_NUM_THREADS=0, « coeurs physiques » ici — changeait aussi
+    # Docling : verifie, son lecteur de PDF tournait alors sans fin.
+    #
+    # Moteur OCR. "rapidocr_torch" (defaut) : PP-OCRv6 sur torch, donc sur le
+    # GPU. MESURE sur 97 pages du corpus contre Gemini et LlamaParse : il lit
+    # les numeros d'article sans erreur la ou Tesseract en fausse (« ARTICLE
+    # 16 » lu « 13 », « 42 » lu « 41 ») — inacceptable pour des citations —,
+    # a 3,8 s par page (environ 15 h pour le corpus). "rapidocr" : le meme sur
+    # onnxruntime, CPU seul, 5,5 s par page. "tesseract" : binaire
+    # TESSERACT_PATH, langue fra, plus juste sur les mots mais faux sur les
+    # chiffres.
+    EXTRACTION_OCR_ENGINE: Literal["rapidocr_torch", "rapidocr", "tesseract"] = "rapidocr_torch"
+    # "auto" prend le GPU des que torch le voit.
+    EXTRACTION_DEVICE: str = "auto"
+    # Pages converties et mises en cache ensemble. Petit : une interruption ne
+    # coute que le lot en cours, et la memoire reste bornee sur les documents
+    # de plusieurs centaines de pages. Changer cette valeur ne perd pas le
+    # cache : les lots deja faits se relisent quelle que soit leur taille.
+    EXTRACTION_PAGES_PAR_LOT: int = 8
+    # Fils de calcul. 0 = coeurs physiques.
+    EXTRACTION_FILS: int = 0
+    # Delai maximal d'un lot. Au-dela, les pages restantes sont en echec et le
+    # lot sera rejoue ; le superviseur tue un processus bloque au-dela de ce
+    # delai et d'une marge.
+    EXTRACTION_LOT_TIMEOUT_S: float = 900.0
+    # Aucun appel reseau pour les poids : ils sont dans le cache Hugging Face.
+    # Sans cela, chaque initialisation interroge le Hub et retelecharge en
+    # silence si une revision change en amont — l'extraction ne serait plus
+    # reproductible, et une coupure reseau la ferait echouer.
+    EXTRACTION_HORS_LIGNE: bool = True
+
     # Pages envoyees par appel a Gemini. La limite du modele est de 65 536
     # jetons EN SORTIE ; a ~2400 caracteres par page, 20 pages produisent
     # ~13 000 jetons, avec de la marge pour la reflexion interne. Le palier
