@@ -52,6 +52,7 @@ from app.services.postgres_search_service import (
 )
 from app.services.reranker import rerank_chunks
 from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
+from app.utils.chunk_refiner import est_pseudo_numero
 
 logger = logging.getLogger(__name__)
 
@@ -863,11 +864,12 @@ class SearchService:
                     relevance_score=c.relevance_score,
                 )
                 for c in entry["chunks"][:3]
-                # PREAMBULE et LEGAL_BASIS sont des pseudo-numeros donnes par le
-                # decoupeur au texte hors articles : les exposer comme des
-                # articles ferait afficher "Article LEGAL_BASIS" au front.
+                # PREAMBULE, LEGAL_BASIS, SECTION_n... sont des pseudo-numeros
+                # donnes par le decoupeur au texte hors articles : les exposer
+                # comme des articles ferait afficher "Article LEGAL_BASIS" au
+                # front.
                 if c.article_id is not None and c.number
-                and c.number.upper() not in ("PREAMBULE", "LEGAL_BASIS")
+                and not est_pseudo_numero(c.number)
             ]
 
             results.append(SearchResult(

@@ -52,6 +52,7 @@ from app.services.prompts import (
 from app.services.reranker import rerank_with_llm
 from app.services.search_service import SearchService
 from app.services.text_features import STOPWORDS
+from app.utils.chunk_refiner import est_pseudo_numero
 
 logger = logging.getLogger(__name__)
 
@@ -64,15 +65,9 @@ _ORDINAL_WORDS = {
 }
 
 
-# Pseudo-numeros produits par text_chunker pour le texte hors articles
-# (preambule, visas). Ce ne sont pas des numeros d'article et ils ne doivent
-# jamais apparaitre comme tels dans une citation.
-_PSEUDO_ARTICLE_NUMBERS = {"PREAMBULE", "LEGAL_BASIS"}
-
-
 def _citable_article_number(number: Optional[str]) -> Optional[str]:
     """Numero d'article citable, ou None pour un pseudo-numero."""
-    if not number or number.upper() in _PSEUDO_ARTICLE_NUMBERS:
+    if not number or est_pseudo_numero(number):
         return None
     return number
 

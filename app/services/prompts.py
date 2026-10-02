@@ -8,6 +8,8 @@ Provides utilities for building context strings and formatting conversation hist
 import logging
 from typing import List
 
+from app.utils.chunk_refiner import est_pseudo_numero
+
 logger = logging.getLogger(__name__)
 
 
@@ -173,6 +175,8 @@ Instructions:
 _SPECIAL_CHUNK_LABELS = {
     "PREAMBULE": "Préambule",
     "LEGAL_BASIS": "Visas et base légale",
+    "SIGNATURE": "Signature",
+    "ANNEXE": "Annexe",
 }
 
 CONTEXT_MAX_CHARS = 24_000
@@ -218,7 +222,9 @@ def format_chunk_block(chunk, index: int) -> str:
         # pour ne perdre aucun caractere du document. Les annoncer comme
         # "Article LEGAL_BASIS" inviterait le modele a citer un article qui
         # n'existe pas.
-        label = _SPECIAL_CHUNK_LABELS.get(chunk.number.upper())
+        label = _SPECIAL_CHUNK_LABELS.get(chunk.number.upper().split(".")[0])
+        if label is None and est_pseudo_numero(chunk.number):
+            label = "Texte hors article"
         article_line = label if label else f"Article {chunk.number}"
         if chunk.article_title and not label:
             article_line += f" — {chunk.article_title}"
