@@ -39,6 +39,29 @@ class LanguageDetectionError(Exception):
     pass
 
 
+def _fasttext_top1(model, text: str) -> Tuple[str, float]:
+    """
+    Langue la plus probable selon fastText, sans passer par FastText.predict.
+
+    FastText.predict (fasttext-wheel 0.9.2, FastText.py:232) appelle
+    `np.array(probs, copy=False)`. Sous NumPy 2, `copy=False` veut dire « ne
+    jamais copier », et un tuple Python ne devient un tableau que par copie :
+    ValueError « Unable to avoid copy while creating an array as requested ».
+    fastText echouait donc a CHAQUE detection, il ne restait que langdetect,
+    et `consensus` ne passait plus jamais a vrai.
+
+    La liaison C++ `model.f.predict` rend une simple liste Python, sans numpy.
+    Le « \n » final reproduit ce que fait predict(). Le chemin « liste »
+    (predict([texte])) ne leve pas, mais rend des probabilites FAUSSES sous
+    NumPy 2 (0,999 pour chacune des k langues) : il est proscrit.
+    """
+    predictions = model.f.predict(text.replace("\n", " ") + "\n", 1, 0.0, "strict")
+    if not predictions:
+        raise LanguageDetectionError("fastText n'a rendu aucune prediction")
+    probabilite, label = predictions[0]
+    return label.replace("__label__", ""), float(probabilite)
+
+
 class LanguageDetector:
     """
     Service de détection automatique de langue avec double vérification.
@@ -281,15 +304,7 @@ class LanguageDetector:
             Exception: Si détection échoue
         """
         try:
-            # Remplacer les sauts de ligne par espaces
-            text_cleaned = text.replace("\n", " ")
-
-            # Prédiction (k=1 pour top langue seulement)
-            predictions = self.fasttext_model.predict(text_cleaned, k=1)
-
-            # Format retour: (('__label__fr',), array([0.98]))
-            label = predictions[0][0].replace("__label__", "")
-            confidence = float(predictions[1][0])
+            label, confidence = _fasttext_top1(self.fasttext_model, text)
 
             # Normaliser: garder seulement 'fr' ou 'en'
             if label not in ["fr", "en"]:
@@ -384,7 +399,7 @@ class LanguageDetector:
 
         # Vérifier fastText
         try:
-            self.fasttext_model.predict("Test", k=1)
+            _fasttext_top1(self.fasttext_model, "Test")
             status["models"]["fasttext"] = "✅ OK"
         except Exception as e:
             status["models"]["fasttext"] = f"❌ Error: {e}"

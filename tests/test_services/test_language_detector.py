@@ -360,3 +360,26 @@ class TestLanguageDetectorIntegration:
         assert isinstance(result["consensus"], bool)
         assert isinstance(result["processing_time_ms"], int)
         assert isinstance(result["text_length"], int)
+
+
+def test_fasttext_ne_passe_pas_par_predict_casse_sous_numpy2(monkeypatch):
+    """
+    FastText.predict leve sous NumPy 2 (np.array(probs, copy=False)) : la
+    detection ne doit pas en dependre. On le remplace par une version qui leve,
+    comme le ferait le paquet installe avec numpy 2.
+    """
+    from app.services.language_detector import LanguageDetector
+
+    detecteur = LanguageDetector()
+
+    def _casse(*args, **kwargs):
+        raise ValueError("Unable to avoid copy while creating an array as requested.")
+
+    monkeypatch.setattr(detecteur.fasttext_model, "predict", _casse)
+    resultat = detecteur.detect(
+        "La présente loi fixe les règles applicables aux contrats de travail "
+        "conclus sur le territoire de la République du Cameroun."
+    )
+
+    assert resultat["language"] == "fr"
+    assert resultat["method_votes"].get("fasttext") == "fr"

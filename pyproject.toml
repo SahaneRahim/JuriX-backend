@@ -39,7 +39,9 @@ pytesseract = "^0.3.10"
 pdf2image = "^1.16.3"
 
 # NLP & ML - Détection Langue v2.1
-numpy = ">=1.26.0,<2.0.0"  # Pin to 1.x for fasttext compatibility
+# numpy 2, exige par opencv-python (Docling). fastText est contourne :
+# voir language_detector._fasttext_top1. Aligne sur requirements.txt.
+numpy = ">=2.0,<3.0"
 langdetect = "^1.0.9"
 # fasttext-wheel et non fasttext : le paquet source n'a pas de roue et echoue
 # a la compilation sur les Python recents. Aligne sur requirements.txt.
