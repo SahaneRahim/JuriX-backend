@@ -516,12 +516,21 @@ class FileUploadService:
                 file_hash=file_hash,
             )
 
-    async def cleanup_old_files(self, max_age_hours: Optional[int] = None) -> Dict[str, Any]:
+    async def cleanup_old_files(
+        self, max_age_hours: Optional[int] = None, proteges: Optional[set] = None
+    ) -> Dict[str, Any]:
         """
         Nettoie les fichiers expirés.
 
+        Un fichier dont le nom (sans extension) figure dans `proteges` n'est
+        JAMAIS supprime, quel que soit son age. Sans cette exception, le
+        nettoyage effacait tout fichier de plus de 24 h — y compris le PDF de
+        chaque loi publiee, que `laws.file_id` designe et que l'application
+        sert a l'utilisateur. Un nettoyage n'a a retirer que les orphelins.
+
         Args:
             max_age_hours: Âge maximum en heures (défaut: self.cleanup_hours)
+            proteges: file_id des fichiers encore references
 
         Returns:
             Statistiques de nettoyage
@@ -541,8 +550,11 @@ class FileUploadService:
         logger.info(f"🧹 Nettoyage des fichiers > {max_age}h...")
 
         try:
+            proteges = proteges or set()
             for file_path in self.storage_path.glob("*"):
                 if not file_path.is_file():
+                    continue
+                if file_path.stem in proteges:
                     continue
 
                 # Vérifier l'âge du fichier

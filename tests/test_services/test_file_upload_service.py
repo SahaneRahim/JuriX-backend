@@ -322,6 +322,27 @@ class TestStorageManagement:
         assert recent_file.exists()
 
     @pytest.mark.asyncio
+    async def test_cleanup_epargne_les_fichiers_references(self, upload_service, temp_storage):
+        """
+        Le PDF d'une loi publiee a plus de 24 h : le nettoyage l'effacait,
+        cassant l'affichage du document et toute re-extraction.
+        """
+        import os
+
+        reference = temp_storage / "a1b2c3.pdf"
+        orphelin = temp_storage / "d4e5f6.pdf"
+        for f in (reference, orphelin):
+            f.write_bytes(b"%PDF-1.4\n")
+            vieux = (datetime.now() - timedelta(hours=48)).timestamp()
+            os.utime(f, (vieux, vieux))
+
+        stats = await upload_service.cleanup_old_files(max_age_hours=24, proteges={"a1b2c3"})
+
+        assert reference.exists()
+        assert not orphelin.exists()
+        assert stats["deleted_count"] == 1
+
+    @pytest.mark.asyncio
     async def test_unique_filename_generation(self, upload_service, sample_pdf):
         """Test qu'il n'y a pas de collisions de noms."""
         # Upload le même fichier 2 fois

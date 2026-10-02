@@ -16,8 +16,12 @@ from pathlib import Path
 from typing import Dict
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_admin_user
+from app.core.database import get_db
+from app.models.law import Law
 from app.models.user import User
 from app.schemas.file_upload import FileUploadResult, UploadServiceHealth
 from app.services.file_upload_service import FileUploadError, FileUploadService
@@ -245,9 +249,14 @@ async def delete_upload(
 async def cleanup_old_files(
     max_age_hours: int = 24,
     current_admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
 ) -> Dict:
     """
     Cleanup old uploaded files.
+
+    Seuls les fichiers ORPHELINS partent : ceux qu'aucune loi ne reference.
+    Le PDF d'une loi publiee a plus de 24 h ; le supprimer cassait son
+    affichage et toute re-extraction.
 
     Args:
         max_age_hours: Maximum age in hours (default: 24)
@@ -257,8 +266,12 @@ async def cleanup_old_files(
     """
     assert isinstance(max_age_hours, int) and max_age_hours > 0, "max_age_hours must be a positive integer"
 
+    references = (await db.execute(
+        select(Law.file_id).where(Law.file_id.isnot(None))
+    )).scalars().all()
+
     service = get_upload_service()
-    stats = await service.cleanup_old_files(max_age_hours)
+    stats = await service.cleanup_old_files(max_age_hours, proteges=set(references))
 
     logger.info(f"🧹 Cleanup completed: {stats['deleted_count']} files deleted")
     return stats
