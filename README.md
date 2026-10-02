@@ -362,6 +362,69 @@ migrations partent donc toutes seules à chaque démarrage. C'est voulu —
 migrations, jamais dans `Base.metadata`, si bien qu'un schéma créé par
 `create_all` serait incomplet.
 
+### Bascule des embeddings sur une base peuplée
+
+**À ne jamais déclencher sans avoir d'abord vérifié s'il existe une base de
+production, et ce qu'elle contient.**
+
+La migration `c4d5e6f7a8b9` passe `articles.embedding` de `vector(3072)` à
+`vector(768)` et met **tous** les vecteurs à NULL : un vecteur Gemini 3072 n'a
+pas d'équivalent dans l'espace d'EmbeddingGemma. Le conteneur lançant
+`alembic upgrade head` à chaque démarrage, **déployer ce code suffit à
+déclencher la purge**. Jusqu'à la régénération, la recherche sémantique ne rend
+rien et l'hybride répond en plein texte seul.
+
+1. **Lire l'état de la base visée**, sans rien modifier :
+
+   ```sql
+   SELECT version_num FROM alembic_version;
+   SELECT count(*) AS articles, count(embedding) AS vecteurs FROM articles;
+   ```
+
+   Aucun article : déployer suffit. Déjà en `c4d5e6f7a8b9` : la purge a eu
+   lieu, reprendre à l'étape 5 si des vecteurs manquent.
+
+2. **Sauvegarder.** `alembic downgrade` rétablit le schéma 3072, pas les
+   vecteurs. Seul un dump permet de revenir en arrière sans repayer l'API :
+
+   ```bash
+   pg_dump --format=custom --file=jurix-avant-768.dump "postgresql://…"
+   ```
+
+3. **Mettre le modèle à disposition de l'API.** L'image Docker ne l'embarque
+   pas encore. Sans lui, l'API démarre, mais en `degraded` et sans recherche
+   sémantique. À défaut, `EMBEDDING_PROVIDER=gemini` (payant) fonctionne avec
+   le même schéma 768.
+
+4. **Déployer.** Le démarrage applique la migration.
+
+5. **Régénérer, hors du processus de l'API.** Le script charge sa propre copie
+   du modèle (~1,5 Go) et occupe tous les cœurs physiques moins un. Sur un
+   petit hébergement, le lancer depuis une machine qui a le modèle, contre la
+   base de production. Il est reprenable : une interruption ne coûte qu'un
+   lot.
+
+   ```bash
+   export DATABASE_URL="postgresql+asyncpg://…"   # la base de production
+   export PGSSLMODE=require
+   python scripts/regenerate_embeddings.py --all --dry-run   # combien
+   python scripts/regenerate_embeddings.py --all
+   python scripts/regenerate_embeddings.py --reindex
+   ```
+
+   Ordre de grandeur mesuré sur le poste de développement : ~700 jetons par
+   seconde, soit 1 h 30 à 3 h pour le corpus.
+
+6. **Vérifier** `GET /api/v1/search/health` : `status` à `healthy`,
+   `vectors.missing` et `vectors.foreign` à 0.
+
+Le même déroulé vaut pour tout changement de fournisseur à dimension égale
+(gemma vers gemini, ou un meilleur modèle plus tard), à une différence près :
+sans migration, les anciens vecteurs restent en place pendant la régénération.
+Leurs similarités avec une question encodée par l'autre modèle n'ont pas de
+sens ; la santé les compte dans `vectors.foreign` et reste `degraded` tant
+qu'il en reste.
+
 ### L'URL de la base : deux pièges opposés
 
 **Ne mettez jamais `?sslmode=` ni `?channel_binding=` dans `DATABASE_URL`.** Le
@@ -392,6 +455,9 @@ application derrière un pooler en mode transaction, ferait échouer libpq
   (lecture dans `./data/uploads`) est conservé.
 - **`--workers 1`** : plusieurs états sont en mémoire du processus (connexions
   WebSocket du suivi de lot, étranglement des envois de courriel par IP).
+- **Mémoire** : le modèle d'embeddings occupe ~1,5 Go dans le processus de
+  l'API. Une offre à 512 Mo ne suffit pas ; à défaut, `EMBEDDING_PROVIDER=gemini`
+  (payant). L'image Docker n'embarque pas encore le modèle.
 - **`SECRET_KEY`** : `openssl rand -hex 32`. Avec `ENVIRONMENT` différent de
   `development`, le conteneur **refuse de démarrer** sur la valeur du dépôt.
 - **`ALLOWED_ORIGINS`** : origine exacte, sans slash final. `allow_credentials`
