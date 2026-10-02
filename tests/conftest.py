@@ -17,16 +17,19 @@ PostgreSQL, une fois par session.
 
 ## Mise en place
 
-    docker run -d --name jurix-pg-test -p 5433:5432 \
-      -e POSTGRES_USER=jurix -e POSTGRES_PASSWORD=jurix -e POSTGRES_DB=jurix_test \
-      pgvector/pgvector:pg16
+La base de test vit sur le MEME serveur que la base de developpement (le
+conteneur `jurix-pg`, port 5433). Il suffit d'y creer la base une fois :
+
+    docker exec jurix-pg psql -U jurix -d jurix_dev -c "CREATE DATABASE jurix_test"
 
 Puis, si l'URL diffère du défaut :
 
     export TEST_DATABASE_URL=postgresql+asyncpg://jurix:jurix@localhost:5433/jurix_test
 
 Sans base joignable, les tests qui en dépendent sont **ignorés avec un message
-explicite** — jamais silencieusement verts.
+explicite** — jamais silencieusement verts. Le message distingue un serveur
+injoignable d'une base absente : les confondre a laisse environ 93 tests
+ignores sous « PostgreSQL injoignable » alors que le serveur repondait.
 
 ## Isolation
 
@@ -76,14 +79,20 @@ from app.main import app
 
 # ==================== CONFIGURATION ====================
 
-_PG_HINT = (
-    f"PostgreSQL injoignable sur {TEST_DATABASE_URL}.\n"
-    "  docker run -d --name jurix-pg-test -p 5433:5432 \\\n"
-    "    -e POSTGRES_USER=jurix -e POSTGRES_PASSWORD=jurix "
-    "-e POSTGRES_DB=jurix_test \\\n"
-    "    pgvector/pgvector:pg16\n"
-    "  (ou definissez TEST_DATABASE_URL)"
-)
+# Deux causes, deux remedes : les confondre a coute environ 93 tests ignores
+# sous « PostgreSQL injoignable » alors que le serveur repondait tres bien et
+# qu'il ne manquait que la base.
+_PG_HINTS = {
+    "serveur": (
+        f"Serveur PostgreSQL injoignable pour {TEST_DATABASE_URL}.\n"
+        "  Le conteneur de developpement est-il demarre ?  docker start jurix-pg\n"
+        "  (ou definissez TEST_DATABASE_URL)"
+    ),
+    "base": (
+        f"Le serveur repond, mais la base de test n'existe pas ({TEST_DATABASE_URL}).\n"
+        '  docker exec jurix-pg psql -U jurix -d jurix_dev -c "CREATE DATABASE jurix_test"'
+    ),
+}
 
 # Fixtures qui exigent une base : sert au marquage automatique en integration.
 _DB_FIXTURES = {
@@ -105,14 +114,22 @@ _DB_FIXTURES = {
     "as_admin",
 }
 
-_pg_available: bool | None = None
+# None tant que la sonde n'a pas tourne ; ensuite "" si la base est
+# disponible, ou la cle de _PG_HINTS qui decrit ce qui manque.
+_pg_probleme: str | None = None
 
 
-def _check_pg() -> bool:
-    """Teste une connexion TCP + handshake PostgreSQL, une seule fois."""
-    global _pg_available
-    if _pg_available is not None:
-        return _pg_available
+def _check_pg() -> str:
+    """
+    Sonde la base de test une seule fois.
+
+    Rend "" si elle est utilisable, sinon "base" ou "serveur". La distinction
+    passe par le TYPE d'exception : asyncpg leve InvalidCatalogNameError quand
+    le serveur repond mais que la base n'existe pas.
+    """
+    global _pg_probleme
+    if _pg_probleme is not None:
+        return _pg_probleme
     try:
         import asyncio
 
@@ -125,10 +142,14 @@ def _check_pg() -> bool:
             await conn.close()
 
         asyncio.run(_probe())
-        _pg_available = True
-    except Exception:
-        _pg_available = False
-    return _pg_available
+        _pg_probleme = ""
+    except Exception as exc:
+        import asyncpg
+
+        _pg_probleme = (
+            "base" if isinstance(exc, asyncpg.InvalidCatalogNameError) else "serveur"
+        )
+    return _pg_probleme
 
 
 # ==================== HOOKS PYTEST ====================
@@ -139,14 +160,23 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "integration: nécessite une base PostgreSQL")
     config.addinivalue_line("markers", "slow: test lent")
     config.addinivalue_line("markers", "unit: test unitaire, sans base")
+    config.addinivalue_line(
+        "markers",
+        "gemma: execute le vrai modele EmbeddingGemma local (onnxruntime et fichiers requis)",
+    )
 
-    # Clé factice si aucune n'est configurée : GeminiService et EmbeddingService
-    # refusent de se construire sans clé, ce qui faisait echouer au *setup* des
-    # tests qui ne touchent jamais l'API. Construire un client Gemini ne declenche
-    # aucun appel reseau — les tests qui appellent reellement l'API la simulent.
+    # Cle factice IMPOSEE, et pas seulement quand aucune n'est configuree.
+    #
+    # L'ancienne regle ne posait la cle factice que si la variable etait vide.
+    # Or une vraie cle vit dans .env : tout test qui atteignait le vrai service
+    # d'embeddings — ComparisonService construit un SearchService reel —
+    # appelait donc l'API Gemini PAYANTE, et pouvait meme passer. Une suite de
+    # tests ne doit jamais rien couter.
+    #
+    # JURIX_E2E=1 garde la vraie cle, pour un essai de bout en bout delibere.
     from app.core.config import settings
 
-    if not settings.GEMINI_API_KEY:
+    if os.environ.get("JURIX_E2E") != "1":
         settings.GEMINI_API_KEY = "test-key-not-a-real-credential"
 
 
@@ -159,18 +189,17 @@ def pytest_collection_modifyitems(config, items):
     dépendance à la base est déjà exprimée par les fixtures demandées, la
     dupliquer dans 21 fichiers ne ferait que créer une source de divergence.
     """
-    skip_pg = pytest.mark.skip(reason=_PG_HINT)
-    available = None
+    probleme = None
 
     for item in items:
         needs_db = bool(_DB_FIXTURES & set(getattr(item, "fixturenames", ())))
         if not needs_db:
             continue
         item.add_marker(pytest.mark.integration)
-        if available is None:
-            available = _check_pg()
-        if not available:
-            item.add_marker(skip_pg)
+        if probleme is None:
+            probleme = _check_pg()
+        if probleme:
+            item.add_marker(pytest.mark.skip(reason=_PG_HINTS[probleme]))
 
 
 # ==================== BASE DE DONNEES ====================
@@ -206,6 +235,72 @@ def _bind_sync_engine_to_test_db():
         engine.dispose()
         database.sync_engine = previous
         database.SyncSessionLocal.configure(bind=previous)
+
+
+# ==================== DOUBLURE DU SERVICE D'EMBEDDINGS ====================
+
+
+class _EmbeddingsDeterministes:
+    """
+    Remplace le service d'embeddings reel derriere SearchService.
+
+    POURQUOI. Un SearchService construit dans un test prend le singleton du
+    module, donc le VRAI service : hier un client Gemini (avec la vraie cle du
+    .env, donc des appels payants), demain le modele local (1,5 Go en memoire).
+    La recherche hybride avalant les echecs semantiques, ces tests restaient
+    verts dans tous les cas sans rien prouver.
+
+    Les vecteurs sont deterministes — derives d'une empreinte stable du texte,
+    jamais de hash(), qui change d'une execution a l'autre — et unitaires, comme
+    ceux du vrai service. Un test qui veut un comportement precis remplace
+    lui-meme le singleton : sa fixture s'execute apres celle-ci.
+    """
+
+    TASK_DOCUMENT = "RETRIEVAL_DOCUMENT"
+    TASK_QUERY = "RETRIEVAL_QUERY"
+
+    def __init__(self, dim: int):
+        self.EMBEDDING_DIM = dim
+
+    def generate_embedding(self, text, normalize=True, task_type=TASK_DOCUMENT):
+        import hashlib
+
+        import numpy as np
+
+        graine = int.from_bytes(
+            hashlib.sha256(f"{task_type}\x00{text}".encode()).digest()[:8], "big"
+        )
+        v = np.random.default_rng(graine).standard_normal(self.EMBEDDING_DIM)
+        return (v / np.linalg.norm(v)).astype(np.float32)
+
+    async def generate_embedding_async(self, text, task_type=TASK_QUERY):
+        return self.generate_embedding(text, True, task_type)
+
+
+@pytest.fixture(autouse=True)
+def _doubler_le_service_d_embeddings(request):
+    """
+    Installe la doublure avant chaque test, et restaure l'etat ensuite.
+
+    Les tests marques `gemma` sont exemptes : ils existent precisement pour
+    executer le vrai modele.
+    """
+    if request.node.get_closest_marker("gemma"):
+        yield
+        return
+
+    from app.services import search_service
+    from app.services.embedding_service import EmbeddingService
+
+    avant = (search_service._embedding_service_instance, search_service._singletons_initialized)
+    search_service._embedding_service_instance = _EmbeddingsDeterministes(
+        EmbeddingService.EMBEDDING_DIM
+    )
+    search_service._singletons_initialized = True
+    try:
+        yield
+    finally:
+        search_service._embedding_service_instance, search_service._singletons_initialized = avant
 
 
 @pytest.fixture(scope="session")
