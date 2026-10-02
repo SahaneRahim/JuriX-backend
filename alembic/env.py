@@ -10,9 +10,17 @@ from alembic import context
 config = context.config
 
 # Interpret the config file for Python logging.
-# This line sets up loggers basically.
+#
+# disable_existing_loggers=False, et ce n'est pas cosmetique. Par defaut,
+# fileConfig DESACTIVE tout logger deja cree. Or la suite de tests lance
+# `alembic upgrade head` DANS son propre processus (tests/conftest.py), apres
+# avoir importe app.* : tous les loggers de l'application devenaient muets
+# pour le reste de la session. Un test qui verifie un journal echouait alors
+# seulement dans la suite complete, jamais isole — et tout avertissement
+# emis pendant les tests disparaissait. Le conteneur, lui, n'est pas touche :
+# il lance alembic dans un processus distinct avant uvicorn.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
