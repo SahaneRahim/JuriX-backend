@@ -607,15 +607,28 @@ def _apply_roster_rule(
     # Variante tableau : HTML (LlamaParse) ou markdown a barres (Docling)
     tables = [(t, _table_rows(t)) for t in _TABLE_BLOCK.findall(content)]
     tables += [(m.group(0), _md_table_rows(m.group(0))) for m in _MD_TABLE_BLOCK.finditer(content)]
-    for table, rows in tables:
-        if not _looks_nominative(rows, content):
-            continue
-        lignes = _parse_roster_rows(rows, number, start=len(entries))
-        entries.extend(lignes)
-        # Un decompte PAR tableau : le total global repete deux fois trompait.
-        resume = resume.replace(
-            table.rstrip("\n"), f"[{len(lignes)} personnes — liste nominative]"
-        )
+
+    # Le texte de nomination se cherche HORS des tableaux : dans une loi de
+    # reglement, « PROMOTION DE LA FEMME », intitule de programme, se faisait
+    # passer pour lui, et un tableau budgetaire devenait une liste de 35
+    # « personnes ».
+    hors_tableaux = _MD_TABLE_BLOCK.sub(" ", _TABLE_BLOCK.sub(" ", content))
+    nominatives = [_looks_nominative(rows, hors_tableaux) for _, rows in tables]
+
+    # Une liste nominative s'etale sur un tableau par page, et la detection en
+    # manque quelques-uns (matricule « J-057 035 », rang absent). Restes dans
+    # le texte vectorise, ils en faisaient 155 000 caracteres. Des que les
+    # tableaux reconnus portent la majorite des lignes, l'article est une
+    # liste : TOUS ses tableaux en font partie.
+    lignes_nominatives = sum(len(rows) for (_, rows), nom in zip(tables, nominatives) if nom)
+    if lignes_nominatives and lignes_nominatives >= 0.5 * sum(len(rows) for _, rows in tables):
+        for table, rows in tables:
+            lignes = _parse_roster_rows(rows, number, start=len(entries))
+            entries.extend(lignes)
+            # Un decompte PAR tableau : le total global repete deux fois trompait.
+            resume = resume.replace(
+                table.rstrip("\n"), f"[{len(lignes)} personnes — liste nominative]"
+            )
 
     # Variante texte brut
     if not entries:
@@ -632,7 +645,13 @@ def _apply_roster_rule(
     # qui n'existait pas. Seul le texte VECTORISE prend la forme resumee : 904
     # inspecteurs ne doivent pas faire 904 vecteurs, ni saturer la recherche.
     chunk = dict(chunk)
-    chunk["embed_body"] = resume.strip()
+    resume = resume.strip()
+    if len(resume) > TARGET_MAX_CHARS:
+        # Garde-fou : le vecteur d'une liste ne lit que son chapeau. Au-dela,
+        # l'embedding tronquerait de toute facon.
+        coupe = resume.rfind("\n", 0, TARGET_MAX_CHARS)
+        resume = resume[:coupe if coupe > TARGET_MAX_CHARS // 2 else TARGET_MAX_CHARS].rstrip()
+    chunk["embed_body"] = resume
     chunk["kind"] = "roster"
     chunk["roster_count"] = len(entries)
     return chunk, entries
@@ -692,6 +711,104 @@ def _split_roster(
     return out
 
 
+def _ligne_d_en_tete(ligne: str) -> bool:
+    """
+    La premiere ligne d'un tableau est-elle un en-tete, a repeter ?
+
+    Docling met en « en-tete » la premiere ligne de DONNEES quand le tableau
+    n'en a pas. Un montant ou un rang la trahit : la repeter dans chaque
+    morceau dupliquerait une ligne budgetaire.
+    """
+    return not _MONTANT.search(ligne) and not re.match(r"\s*\|?\s*\d{1,4}\s*[.)|-]", ligne)
+
+
+def _split_tableaux(
+    chunk: Dict[str, Any], target_max_chars: int = TARGET_MAX_CHARS
+) -> List[Dict[str, Any]]:
+    """
+    R5 — Decoupe un article qui porte un grand tableau, entre ses lignes.
+
+    Les tableaux n'etaient jamais coupes : ceux des lois de finances faisaient
+    des chunks de 79 000 caracteres, dont l'embedding ne lisait que les 10 000
+    premiers — 110 chunks du corpus, dont la fin n'etait jamais cherchable par
+    le sens. Ils se coupent desormais entre deux lignes, jamais au milieu
+    d'une : « 31 | 180 | EDUCATION PRESCOLAIRE | 31 915 303 » reste entier.
+    Chaque morceau repete l'en-tete du tableau, pour que ses colonnes aient un
+    nom, et le debut de l'article, pour dire de quel tableau il s'agit.
+
+    Le texte autour des tableaux se coupe aux paragraphes. Rien n'est perdu
+    ni duplique, hors en-tetes repetes.
+    """
+    content = chunk["content"]
+    blocs: List[Tuple[str, str]] = []
+    debut = 0
+    for m in _MD_TABLE_BLOCK.finditer(content):
+        if content[debut:m.start()].strip():
+            blocs.append(("texte", content[debut:m.start()]))
+        blocs.append(("tableau", m.group(0)))
+        debut = m.end()
+    if content[debut:].strip():
+        blocs.append(("texte", content[debut:]))
+
+    chapeau = blocs[0][1].strip() if blocs[0][0] == "texte" else ""
+    if len(chapeau) > 600:
+        chapeau = ""
+    prefixe = chapeau[:200].strip()
+    place = max(target_max_chars - len(prefixe) - 1, 500)
+
+    unites: List[Tuple[str, bool]] = []
+    for i, (nature, texte) in enumerate(blocs):
+        if nature == "texte":
+            if i == 0 and chapeau:
+                continue
+            unites += [(p.strip(), False) for p in re.split(r"\n\s*\n", texte) if p.strip()]
+            continue
+        lignes = [ln for ln in texte.splitlines() if ln.strip()]
+        sep = next((k for k, ln in enumerate(lignes) if _MD_SEPARATOR_ROW.match(ln)), None)
+        entete = lignes[:sep + 1] if sep is not None and sep <= 2 and all(
+            _ligne_d_en_tete(ln) for ln in lignes[:sep]
+        ) else []
+        corps = [ln for ln in lignes[len(entete):] if not _MD_SEPARATOR_ROW.match(ln)]
+        budget = max(place - sum(len(ln) + 1 for ln in entete), 300)
+        groupe: List[str] = []
+        taille = 0
+        for ligne in corps:
+            if groupe and taille + len(ligne) + 1 > budget:
+                unites.append(("\n".join(entete + groupe), True))
+                groupe, taille = [], 0
+            groupe.append(ligne)
+            taille += len(ligne) + 1
+        if groupe:
+            unites.append(("\n".join(entete + groupe), True))
+
+    morceaux: List[Tuple[str, bool]] = []
+    for texte, tableau in unites:
+        if morceaux and len(morceaux[-1][0]) + len(texte) + 2 <= place:
+            morceaux[-1] = (morceaux[-1][0] + "\n\n" + texte, morceaux[-1][1] or tableau)
+        else:
+            morceaux.append((texte, tableau))
+    if len(morceaux) < 2:
+        chunk = dict(chunk)
+        if chunk.get("kind") in (None, "article"):
+            chunk["kind"] = "table"
+        chunk["oversized"] = len(content) > target_max_chars
+        return [chunk]
+
+    out: List[Dict[str, Any]] = []
+    for i, (texte, tableau) in enumerate(morceaux):
+        piece = dict(chunk)
+        tete = chapeau if i == 0 else prefixe
+        piece["content"] = (tete + "\n" + texte).strip() if tete else texte
+        piece["number"] = f"{chunk['number']}.{i + 1}"
+        piece["parent_id"] = str(chunk["number"])
+        if tableau and chunk.get("kind") in (None, "article"):
+            piece["kind"] = "table"
+        piece["char_count"] = len(piece["content"])
+        piece["word_count"] = len(piece["content"].split())
+        out.append(piece)
+    return out
+
+
 def _split_long_article(
     chunk: Dict[str, Any], target_max_chars: int = TARGET_MAX_CHARS
 ) -> List[Dict[str, Any]]:
@@ -710,19 +827,21 @@ def _split_long_article(
     if chunk.get("kind") == "roster":
         return _split_roster(chunk, target_max_chars)
 
-    # R5 : un tableau ne se coupe pas. Si le chunk en contient un, on le laisse
-    # entier meme au-dela de la cible : une ligne isolee ("31 | 180 |
-    # EDUCATION PRESCOLAIRE | 31 915 303") ne repond a aucune question.
+    # R5 : un tableau markdown se coupe ENTRE ses lignes, son en-tete repete
+    # (voir _split_tableaux). Un tableau HTML, forme de l'ancien extracteur,
+    # reste entier.
     #
     # La nature « table » n'etait jamais posee : refine() fixe "article" par
     # defaut AVANT cet appel, et `get("kind") or "table"` gardait donc
     # "article". Un roster garde sa nature.
-    if _contains_table(content):
+    if _TABLE_BLOCK.search(content):
         chunk = dict(chunk)
         if chunk.get("kind") in (None, "article"):
             chunk["kind"] = "table"
         chunk["oversized"] = True
         return [chunk]
+    if _MD_TABLE_BLOCK.search(content):
+        return _split_tableaux(chunk, target_max_chars)
 
     parts = [p.strip() for p in _ALINEA.split(content) if p and p.strip()]
     if len(parts) < 2:
@@ -967,8 +1086,11 @@ def refine(
                 chunk["kind"] = "fragment"
                 chunk["embed"] = False
             else:
+                # Suite d'une page : du contenu reel, coupe comme un article
                 chunk["kind"] = "continuation"
                 chunk["embed"] = True
+                working.extend(_split_long_article(chunk, target_max_chars))
+                continue
             working.append(chunk)
             continue
 

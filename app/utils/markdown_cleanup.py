@@ -38,14 +38,27 @@ import re
 # confond des lettres (« APFAIRS », « CARD IBDEX », « REGLENENTAIRE »,
 # « BERVICE ») : avec les anciens motifs, a espaces obligatoires et sans
 # confusion admise, le cachet restait dans un tiers des pages.
+#
+# Seconde releve, sur les 13 923 pages du corpus : « CORIE CERTIFIEE »,
+# « GOPIE », « COPIF », « GERTIFIED », « CERTTFIED », « SERVICE OU FICHIER »,
+# « SERVICE DU ACHIER ». Le cachet etant toujours en capitales, chaque
+# expression garde sa charpente (COPIE ... CERT... CON..., ... TRUE CO...) :
+# aucun texte juridique en capitales n'y repond.
 _STAMP_SPECIFIC_MOTIF = (
-    r"C[O0]P[IL1T]E\s*C[ET]R[TI1][I1]F[I1][A-ZÉ]{0,3}\s*C[O0]N[FP][A-Z]{1,2}[MN][EF]"
-    r"|CER[TI1][I1]F[I1][A-Z]{1,2}\s*[TY]R?UE\s*[CGS][O0][PR]Y"
-    r"|\w{0,3}[VT]ICE\s*D[UO]\s*\w?I[CG][HM]IE[RN]"
+    r"[CG][O0][PR][IL1TF]{0,2}[EF]?\s*C[ET]R[TI1]{1,2}[FT]?[I1]?[A-ZÉ]{0,3}\s*C[O0]N[FP][A-Z]{1,2}[MN][EF]"
+    r"|[CGE]{0,2}[EF]?R[A-Z1]{3,7}\s*[TY]R?[UV]E\s*[CGS][O0][A-Z]{1,3}\b"
+    r"|\w{0,3}[VT]ICE\s*[DO][UO]\s*\w{0,2}[CG][HM]IE[RN]"
     r"(?:\s*L[A-ZÉ]{3,6}ATIF)?(?:\s*ET\s*R[EÉ][A-ZÉ]{2,10}AIRE)?"
     r"|(?:L[A-Z]{2,6}ATIVE\s*A[A-Z]{2}\s*)?[STB][TY]A[TY]UT[O0C]R[YT]\s*A[FP]{2}AI[RBP]S"
     r"|CAR[DOGS]\s*[A-Z]{1,2}[DB]EX\s*[SB]ER[VT]I[CS]E"
 )
+
+# Le cachet et l'en-tete bilingue portent la mention anglaise : un bloc du
+# vocabulaire qui la contient n'est pas une autorite francaise isolee.
+#
+# En CAPITALES seulement : dans une phrase d'un texte anglais, « the Presidency
+# of the Republic » est du contenu.
+_STAMP_ANGLAIS = re.compile(r"PR\w{2}IDENCY\s*O[EF]\s*THE\s*RE[PBRD]U\w{2,4}")
 
 # Vocabulaire du cachet : ses expressions propres, plus des expressions qui
 # sont AUSSI des autorites legitimes (« Présidence de la République »,
@@ -55,8 +68,8 @@ _STAMP_SPECIFIC_MOTIF = (
 _STAMP_VOCAB = re.compile(
     rf"(?-i:{_STAMP_SPECIFIC_MOTIF})"
     r"|pr[ée][sog]idence\s*de\s*la\s*r[ée]pu\w{4,6}"
-    r"|pr\w{2}idency\s*o[ef]\s*the\s*repu\w{3,4}"
-    r"|\w{1,2}cr[ée]tariat[\s-]*\w{1,2}n[ée]ra[il]",
+    r"|pr\w{2}idency\s*o[ef]\s*the\s*re[pbrd]u\w{2,4}"
+    r"|\w{1,2}cr[ée]tar\w{0,3}[\s-]*\w{1,2}n[ée]ra[il1t]",
     re.IGNORECASE,
 )
 
@@ -71,10 +84,17 @@ _WATERMARK = re.compile(
 # ligne. Une ligne COURTE, en capitales, qui n'est qu'un mot propre au cachet
 # ou qui commence par l'une de ses expressions n'est que du cachet.
 _FRAGMENT_DE_CACHET = re.compile(
-    r"^[\W_]*(?:CER[TI1][I1]F[I1]E[ED]|[STB][TY]A[TY]UT[O0C]R[YT]|\w?I[CG][HM]IER)[\W_]*$"
+    r"^[\W_]*(?:CER[TI1][I1]F[I1]\w{0,3}|[STB][TY]A[TY]UT[O0C]R[YT]|\w?I[CG][HM]IER"
+    r"|TRUE\s*CO[PR]Y|[LI]\w{3,8}TIF\s*ET\s*R\w{4,10}AIRE)[\W_]*$"
     r"|^[\W_]*(?:C[O0]P[IL1T]E\W*C[ET]RT|CER[TI1][I1]F[I1][A-Z]{1,2}\W*(?:[TY]|C[O0]N)"
     r"|L[A-Z]{2,6}ATIVE\s*A[A-Z]D\s*[STB]|CAR[DS]\s*IN[DB]EX|\w{0,3}[VT]ICE\s*D[UO]\s*\w?I[CG])"
     r"[A-Z\W_]{0,40}$"
+)
+
+# « PRESIDENCY OF THE REPUBLIC », seul sur sa ligne et en capitales : en-tete
+# ou cachet, jamais une phrase. Releve 850 fois dans les articles indexes.
+_MENTION_ANGLAISE_SEULE = re.compile(
+    r"^[\W_]*PR\w{2}IDENCY\s*O[EF]\s*THE\s*RE[PBRD]U\w{0,4}[\W_]*$"
 )
 
 # Ligne de separation d'un tableau markdown : « |----|---| »
@@ -125,7 +145,9 @@ def _oter_le_cachet(ligne: str) -> str:
         else:
             groupes.append([m])
     for groupe in reversed(groupes):
-        if any(_STAMP_SPECIFIC.search(m.group(0)) for m in groupe):
+        if any(_STAMP_SPECIFIC.search(m.group(0)) for m in groupe) or (
+            len(groupe) >= 2 and any(_STAMP_ANGLAIS.search(m.group(0)) for m in groupe)
+        ):
             ligne = ligne[:groupe[0].start()] + " " + ligne[groupe[-1].end():]
     return re.sub(r"[ \t]{2,}", " ", ligne).strip()
 
@@ -217,7 +239,11 @@ def _ligne_de_filigrane(ligne: str) -> bool:
     donc jamais decoupe.
     """
     if "|" not in ligne:
-        return bool(_WATERMARK.match(ligne) or _FRAGMENT_DE_CACHET.match(ligne.strip()))
+        return bool(
+            _WATERMARK.match(ligne)
+            or _FRAGMENT_DE_CACHET.match(ligne.strip())
+            or _MENTION_ANGLAISE_SEULE.match(ligne)
+        )
     cellules = [c.strip() for c in ligne.strip().strip("|").split("|")]
     pleines = [c for c in cellules if c]
     return bool(pleines) and all(_WATERMARK.match(c) for c in pleines)
@@ -264,7 +290,13 @@ def strip_stamp_blocks(text: str) -> str:
         Markdown nettoye
     """
     lines = text.splitlines()
-    a_traiter = [bool(_STAMP_SPECIFIC.search(ln)) for ln in lines]
+    a_traiter = [
+        bool(_STAMP_SPECIFIC.search(ln))
+        # Mention anglaise ET francaise sur la meme ligne : le cachet ou
+        # l'en-tete bilingue, mis a plat par l'OCR
+        or bool(_STAMP_ANGLAIS.search(ln) and len(_STAMP_VOCAB.findall(ln)) >= 2)
+        for ln in lines
+    ]
 
     i = 0
     while i < len(lines):
@@ -279,7 +311,9 @@ def strip_stamp_blocks(text: str) -> str:
             stripped = lines[j].strip(" >*|-\t")
             if _STAMP_VOCAB.search(lines[j]):
                 hits += 1
-                propre = propre or bool(_STAMP_SPECIFIC.search(lines[j]))
+                propre = propre or bool(
+                    _STAMP_SPECIFIC.search(lines[j]) or _STAMP_ANGLAIS.search(lines[j])
+                )
                 j += 1
             elif not stripped:
                 j += 1

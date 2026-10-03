@@ -286,14 +286,43 @@ class TestTableauxMarkdown:
         assert "NOM PRENOM05" not in r.chunks[0]["embed_text"]
         assert r.chunks[0]["kind"] == "roster"
 
-    def test_tableau_markdown_jamais_coupe(self, contexte):
+    def test_grand_tableau_coupe_entre_ses_lignes(self, contexte):
+        """
+        Entier, un tableau de loi de finances faisait un chunk de 79 000
+        caracteres dont l'embedding ne lisait que les 10 000 premiers.
+        """
         table = "| ligne | montant |\n| --- | --- |\n" + "".join(
             f"| ligne {i} | {i * 1000} |\n" for i in range(200)
         )
         r = refine([chunk("86", "Les charges sont évaluées ainsi :\n" + table)], contexte)
-        assert len(r.chunks) == 1
-        assert r.chunks[0]["oversized"] is True
-        assert r.chunks[0]["kind"] == "table"
+
+        assert len(r.chunks) > 1
+        assert all(c["kind"] == "table" and c["embed"] for c in r.chunks)
+        assert all(len(c["content"]) <= 3000 for c in r.chunks)
+        assert [c["number"] for c in r.chunks] == [f"86.{i}" for i in range(1, len(r.chunks) + 1)]
+        # Chaque morceau dit de quel tableau il s'agit et nomme ses colonnes
+        assert all(c["content"].startswith("Les charges sont évaluées ainsi :") for c in r.chunks)
+        assert all("| ligne | montant |" in c["content"] for c in r.chunks)
+        # Aucune ligne perdue, aucune dupliquee, aucune coupee
+        lignes = [ln for c in r.chunks for ln in c["content"].splitlines() if ln.startswith("| ligne ") and ln[8].isdigit()]
+        assert lignes == [f"| ligne {i} | {i * 1000} |" for i in range(200)]
+
+    def test_premiere_ligne_de_donnees_non_repetee(self, contexte):
+        """Sans vrai en-tete, Docling met la premiere ligne de donnees en tete."""
+        table = "| 31 | EDUCATION PRESCOLAIRE | 31 915 303 |\n|---|---|---|\n" + "".join(
+            f"| {32 + i} | PROGRAMME {i} | 1 000 {i:03d} |\n" for i in range(200)
+        )
+        r = refine([chunk("12", "Les crédits sont répartis comme suit :\n" + table)], contexte)
+
+        assert len(r.chunks) > 1
+        assert sum(c["content"].count("EDUCATION PRESCOLAIRE") for c in r.chunks) == 1
+
+    def test_texte_apres_le_tableau_conserve(self, contexte):
+        table = "| poste | montant |\n| --- | --- |\n" + "".join(f"| poste {i} | {i} |\n" for i in range(300))
+        contenu = "Répartition :\n" + table + "\nLe reliquat est reporté sur l'exercice suivant."
+        r = refine([chunk("7", contenu)], contexte)
+
+        assert "Le reliquat est reporté" in r.chunks[-1]["content"]
 
     def test_tableau_html_trop_long_prend_la_nature_table(self, contexte):
         table = "<table>" + "".join(
@@ -734,3 +763,30 @@ class TestArticlePremierIllisible:
 def test_ce_qui_suit_decrete_sans_dispositif_reste_dans_les_visas(contexte, reste):
     r = refine([chunk("LEGAL_BASIS", "- Vu la Constitution ;\n\nDECRETE :\n\n" + reste)], contexte)
     assert [c["number"] for c in r.chunks] == ["LEGAL_BASIS"]
+
+
+class TestListesEtTableauxBudgetaires:
+    def test_intitule_de_programme_n_est_pas_un_texte_de_nomination(self, contexte):
+        """« PROMOTION DE LA FEMME » dans une cellule ne fait pas une liste."""
+        table = "| Programme | Responsable |\n|---|---|\n" + "".join(
+            f"| PROMOTION DE LA FEMME {i} | DIRECTION GENERALE {i} |\n" for i in range(8)
+        )
+        r = refine([chunk("4", "Les programmes se déclinent comme suit :\n" + table)], contexte)
+        assert not r.roster
+        assert r.chunks[0]["kind"] != "roster"
+
+    def test_tous_les_tableaux_d_une_liste_sortent_du_vecteur(self, contexte):
+        """Un tableau par page ; la detection en manque un : il part quand meme."""
+        page1 = "| 1. | NOM PRENOM01 | 701 895-X |\n|---|---|---|\n" + "".join(
+            f"| {i}. | NOM PRENOM{i:02d} | 70{i} 89{i}-X |\n" for i in range(2, 9)
+        )
+        illisible = "| | AKONO AKONO MARTIN | J-057 035 |\n|---|---|---|\n| | ABAH OMGBA | J-057 036 |\n"
+        contenu = (
+            "Les Gardiens de la Paix dont les noms suivent sont inscrits au tableau d'avancement :\n"
+            + page1 + "\n" + illisible
+        )
+        r = refine([chunk("1", contenu)], contexte)
+        assert r.chunks[0]["kind"] == "roster"
+        assert "AKONO" in r.chunks[0]["content"], "le contenu garde toute la liste"
+        assert "AKONO" not in r.chunks[0]["embed_text"]
+        assert "PRENOM05" not in r.chunks[0]["embed_text"]

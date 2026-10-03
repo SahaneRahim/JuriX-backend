@@ -271,3 +271,41 @@ def test_ligne_sans_marqueur_intacte(ligne):
 ])
 def test_cachet_ecorche_retire(cachet):
     assert strip_stamp_blocks("Article 2.- Texte de l'article.\n\n" + cachet) == "Article 2.- Texte de l'article."
+
+
+class TestCachetSecondeReleve:
+    """Variantes relevees sur les 13 923 pages du corpus indexe."""
+
+    @pytest.mark.parametrize("cachet", [
+        "CORIECERTIFIEECONFORME",
+        "GOPIE CERTIFIEE CONFORME",
+        "COPIFCERTIFIEECONFORME",
+        "COPILCERTIFIEE CONFORME",
+        "GERTIFIED TRUE COPY",
+        "CERTTFIED TRUE COPY",
+        "EERTIFIED TRUE COPY",
+        "TRUECOPY",
+        "SERVICE OU FICHIER LEGISLATIF ET REGLEMENTAIRE",
+        "SERVICE DU ACHIER LEGISLATIF ET REGLEMENTAIRE",
+        "'LEGISLATIF ET REGLEMENTAIRE",
+        "PRESIDENCY OF THE REPUBLIC",
+        "PRESIDENCYOFTHEREPUBLIC",
+        "PRESIDENCE DE LAREPUBLIQUE PRESIDENCY OF THE REPUBLIC SECRETARIAT GENERAL",
+    ])
+    def test_variante_retiree(self, cachet):
+        assert strip_stamp_blocks("Article 2.- Texte de l'article.\n\n" + cachet) == (
+            "Article 2.- Texte de l'article."
+        )
+
+    def test_bloc_bilingue_retire_au_milieu_d_une_liste(self):
+        md = (
+            "- Monsieur ABENA Paul ;\n\n"
+            "PRESIDENCE DELA REPUBLIQUE\n\nPRESIDENCY OF THE REPUBLIC\n\nSECRETARLAT GENERAL\n\n"
+            "- Monsieur ESSOMBA Jean."
+        )
+        assert strip_stamp_blocks(md) == "- Monsieur ABENA Paul ;\n\n\n- Monsieur ESSOMBA Jean."
+
+    def test_mention_anglaise_dans_une_phrase_conservee(self):
+        """Un futur texte anglais parle de la Presidence dans ses phrases."""
+        md = "The Secretary General of the Presidency of the Republic shall implement this decree."
+        assert strip_stamp_blocks(md) == md
