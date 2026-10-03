@@ -147,3 +147,39 @@ class TestDeBoutEnBout:
 
         assert _Service.encodes == []
         assert regen._count_remaining(base, None, False, EMPREINTE) == 3
+
+
+def _index_embedding(session):
+    return session.execute(text(
+        "SELECT indexrelid::regclass::text, indisvalid FROM pg_index "
+        "WHERE indrelid = 'articles'::regclass "
+        "AND indexrelid::regclass::text LIKE 'idx_articles_embedding_hnsw%'"
+    )).all()
+
+
+class TestReconstructionDeLIndex:
+
+    def test_index_reconstruit_et_valide(self, base):
+        regen.reindex(base)
+
+        assert _index_embedding(base) == [("idx_articles_embedding_hnsw_vector", True)]
+
+    def test_echec_ne_laisse_pas_de_copie_invalide(self, base, monkeypatch):
+        """
+        Un REINDEX CONCURRENTLY interrompu laisse une copie _ccnew invalide,
+        maintenue a chaque ecriture. On la simule, puis on fait echouer.
+        """
+        with regen.sync_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "CREATE INDEX idx_articles_embedding_hnsw_vector_ccnew ON articles (id)"
+            ))
+        monkeypatch.setattr(
+            regen, "text",
+            lambda sql: text(sql.replace("REINDEX INDEX CONCURRENTLY", "REINDEX INDEX CONCURRENTLY inexistant_")
+                             if sql.startswith("REINDEX") else sql),
+        )
+
+        with pytest.raises(Exception):
+            regen.reindex(base)
+
+        assert _index_embedding(base) == [("idx_articles_embedding_hnsw_vector", True)]

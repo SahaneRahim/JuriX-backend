@@ -200,11 +200,28 @@ def reindex(session) -> None:
     vecteurs vector(768) pese 78 Mo (mesure), deja plus que les 64 Mo de
     defaut serveur. En dessous, pgvector bascule sur une construction disque
     bien plus lente. 512 Mo couvrent ~130 000 articles.
+
+    Construction SANS processus paralleles. En parallele, pgvector place le
+    graphe en memoire partagee dynamique, donc dans /dev/shm, qu'un conteneur
+    Docker limite a 64 Mo par defaut. Constate sur le corpus (20 394
+    vecteurs) : « could not resize shared memory segment ... No space left on
+    device ». En serie, le graphe reste dans la memoire du processus.
+
+    Un REINDEX CONCURRENTLY interrompu laisse une copie INVALIDE de l'index
+    (suffixe _ccnew), que chaque ecriture continue pourtant de maintenir : elle
+    est supprimee avant de propager l'erreur.
     """
     logger.info("Reconstruction de l'index HNSW (peut etre long)...")
     with sync_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.execute(text("SET maintenance_work_mem = '512MB'"))
-        conn.execute(text("REINDEX INDEX CONCURRENTLY idx_articles_embedding_hnsw_vector"))
+        conn.execute(text("SET max_parallel_maintenance_workers = 0"))
+        try:
+            conn.execute(text("REINDEX INDEX CONCURRENTLY idx_articles_embedding_hnsw_vector"))
+        except Exception:
+            conn.execute(text(
+                "DROP INDEX CONCURRENTLY IF EXISTS idx_articles_embedding_hnsw_vector_ccnew"
+            ))
+            raise
     logger.info("Index reconstruit")
 
 
