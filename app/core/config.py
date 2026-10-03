@@ -142,6 +142,12 @@ class Settings(BaseSettings):
     # "juridique" a chaque appel, donc un routeur qui ne route jamais, sans
     # qu'aucun test ne le voie — ils doublent tous le modele.
     INTENT_MAX_TOKENS: int = 1024
+    # « local » : rapprochement du message avec des exemples etiquetes, par
+    # EmbeddingGemma (app/services/intent_local.py) — aucun appel a Gemini,
+    # quelques dizaines de millisecondes. « gemini » : l'ancien classement
+    # par le modele, 3,6 s et une requete du quota par question. Mesure du
+    # local sur tests/fixtures/intent_eval.json : voir le test marque `gemma`.
+    INTENT_CLASSIFIER: Literal["local", "gemini"] = "local"
 
     # ---- Reflexion du modele (Gemini 3) ----
     # La reflexion interne fait l'essentiel du temps d'attente. MESURE sur

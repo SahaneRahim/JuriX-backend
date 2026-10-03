@@ -317,11 +317,17 @@ def _epingler_le_fournisseur_d_embeddings(request):
     from app.core.config import settings
 
     avant = settings.EMBEDDING_PROVIDER
+    avant_classement = settings.INTENT_CLASSIFIER
     settings.EMBEDDING_PROVIDER = "gemini"
+    # Le classement local d'intention passerait par la doublure d'embeddings
+    # et rendrait des verdicts arbitraires : les tests du routage doublent le
+    # modele (Gemini) ; ceux du classement local le reglent eux-memes.
+    settings.INTENT_CLASSIFIER = "gemini"
     try:
         yield
     finally:
         settings.EMBEDDING_PROVIDER = avant
+        settings.INTENT_CLASSIFIER = avant_classement
 
 
 @pytest.fixture(autouse=True)

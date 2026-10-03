@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
 from app.core.config import settings
+from app.services.intent_local import ClasseurLocal, question_precedente
 from app.services.prompts import (
     CLASSIFICATION_SYSTEM,
     construire_prompt_de_classification,
@@ -135,6 +136,82 @@ def _parse_intent(raw: Any) -> Optional[Tuple[str, float]]:
     return intention, max(0.0, min(1.0, confiance))
 
 
+# ==================== CLASSEMENT LOCAL ====================
+
+_classeur_local: Optional[ClasseurLocal] = None
+
+
+def _similarite_corpus(vecteur) -> Optional[float]:
+    """
+    Similarite du message avec l'article vectorise le plus proche (index HNSW).
+    None si la base ne repond pas : le garde-fou s'efface, il ne bloque rien.
+    """
+    from sqlalchemy import text
+
+    from app.core.database import SyncSessionLocal
+
+    litteral = "[" + ",".join(f"{float(x):.6f}" for x in vecteur) + "]"
+    try:
+        with SyncSessionLocal() as session:
+            return session.execute(text(
+                "SELECT 1 - (embedding <=> CAST(:v AS vector)) FROM articles "
+                "WHERE embedding IS NOT NULL "
+                "ORDER BY embedding <=> CAST(:v AS vector) LIMIT 1"
+            ), {"v": litteral}).scalar()
+    except Exception as exc:
+        logger.warning("🧭 Garde-fou du corpus indisponible : %s", exc)
+        return None
+
+
+def classeur_local() -> Optional[ClasseurLocal]:
+    """Le classeur local du processus, sur le service d'embeddings partage."""
+    global _classeur_local
+    if _classeur_local is None:
+        from app.services import search_service
+
+        search_service._init_global_singletons()
+        service = search_service._embedding_service_instance
+        if service is None:
+            return None
+        _classeur_local = ClasseurLocal(service, similarite_corpus=_similarite_corpus)
+    return _classeur_local
+
+
+def prechauffer_classement_local() -> None:
+    """
+    Vectorise la banque d'exemples au demarrage : quelques secondes de calcul
+    qui, sinon, retomberaient sur la premiere question posee. Synchrone, a
+    lancer hors de la boucle d'evenements. Ne leve jamais.
+    """
+    if not settings.INTENT_ROUTING_ENABLED or settings.INTENT_CLASSIFIER != "local":
+        return
+    try:
+        classeur = classeur_local()
+        if classeur is not None:
+            classeur.banque()
+    except Exception as exc:
+        logger.warning("🧭 Banque d'intentions non prechauffee : %s", exc)
+
+
+async def _classer_localement(question: str, history: Optional[List[Any]]) -> IntentResult:
+    """Classement local ; sur toute panne, « juridique » — jamais d'exception."""
+    try:
+        classeur = classeur_local()
+        if classeur is None:
+            return IntentResult(INTENT_JURIDIQUE, 0.0, "defaut-local-indisponible")
+        intention, confiance, regle = await asyncio.wait_for(
+            asyncio.to_thread(classeur.classer, question, question_precedente(history)),
+            timeout=settings.INTENT_TIMEOUT_S,
+        )
+        return IntentResult(intention, confiance, regle)
+    except asyncio.TimeoutError:
+        logger.warning("🧭 Classement local expire : repli sur juridique")
+        return IntentResult(INTENT_JURIDIQUE, 0.0, "defaut-local-timeout")
+    except Exception as exc:
+        logger.warning("🧭 Classement local en echec (%s) : repli sur juridique", exc)
+        return IntentResult(INTENT_JURIDIQUE, 0.0, "defaut-local-erreur")
+
+
 async def classify_intent(
     question: str,
     *,
@@ -187,6 +264,12 @@ async def classify_intent(
     # le rend sur. Voir _SALUTATIONS_EXACTES.
     if _est_une_salutation_pure(question):
         return IntentResult("smalltalk", 1.0, "court-circuit-salutation")
+
+    # Par defaut, sans Gemini : voir intent_local.py. Une panne retombe sur
+    # « juridique », jamais sur le modele — le choix du local est precisement
+    # de ne plus depenser le quota pour classer.
+    if settings.INTENT_CLASSIFIER == "local":
+        return await _classer_localement(question, history)
 
     prompt = construire_prompt_de_classification(
         question, format_conversation_history(history or [])

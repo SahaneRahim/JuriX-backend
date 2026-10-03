@@ -26,6 +26,7 @@ from app.api.routes import (
 )
 from app.core.config import settings
 from app.core.database import close_db
+from app.services.intent_classifier import prechauffer_classement_local
 from app.services.search_service import precharger_les_embeddings
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,9 @@ async def lifespan(app: FastAPI):
     # sans embeddings — mais il est journalise et la sante passe en degraded.
     # Hors de la boucle : le chargement prend quelques secondes de calcul.
     await asyncio.to_thread(precharger_les_embeddings)
+    # Banque d'exemples du classement d'intention, vectorisee une fois pour
+    # toutes, plutot qu'a la premiere question posee.
+    await asyncio.to_thread(prechauffer_classement_local)
 
     # Purge des caches expires, en tache de fond.
     #
