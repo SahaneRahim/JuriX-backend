@@ -227,7 +227,7 @@ class TestCoreFunctionality:
 
         assert response.answer.endswith(MENTION_REPONSE_TRONQUEE)
         assert rag_service.llm.generate.call_args.kwargs["max_tokens"] == 8192
-        assert rag_service.llm.generate.call_args.kwargs["reflexion"] == "low"
+        assert rag_service.llm.generate.call_args.kwargs["reflexion"] is None
 
     @pytest.mark.asyncio
     async def test_ask_with_no_search_results(
@@ -955,7 +955,7 @@ class TestFluxAligneSurAsk:
 
         kwargs = rag_service.llm.generate_stream.call_args.kwargs
         assert kwargs["max_tokens"] == 8192
-        assert kwargs["reflexion"] == "low"
+        assert kwargs["reflexion"] is None
 
     @pytest.mark.asyncio
     async def test_source_de_repli_comme_ask(

@@ -283,5 +283,5 @@ class TestNiveauDeReflexion:
     def test_defauts_mesures(self):
         from app.core.config import settings
 
-        assert settings.GEMINI_REFLEXION_REPONSE == "low"
+        assert settings.GEMINI_REFLEXION_REPONSE is None, "la reponse garde la reflexion du modele"
         assert settings.GEMINI_REFLEXION_CLASSIFICATION == "minimal"

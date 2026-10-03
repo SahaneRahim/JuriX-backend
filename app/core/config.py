@@ -148,13 +148,16 @@ class Settings(BaseSettings):
     # gemini-3-flash-preview, une question au chat, 37 s au total :
     # classification 8,5 s (232 jetons de reflexion pour une sortie de 18),
     # recherche 0,26 s, reponse 28 s (3 104 jetons de reflexion pour 247 de
-    # reponse). En « low » pour la reponse et « minimal » pour la
-    # classification : 12 s, dont 5,5 s de reponse. Rediger a partir
-    # d'articles deja fournis ne demande pas de raisonnement profond.
+    # reponse). En « minimal », la classification descend a 3,6 s.
+    #
+    # La REPONSE garde la reflexion du modele, par choix de l'utilisateur.
+    # Compare sur deux questions, meme contexte : « low » repondait en 3 a 5 s
+    # au lieu de 11 a 12, avec les memes articles cites, mais un peu moins
+    # precis par endroits. « low » reste disponible par .env.
     # Valeurs : minimal, low, medium, high ; vide = choix du modele.
     # N'agit que sur les modeles Gemini 3 (les 2.5 reglent un budget, pas un
     # niveau).
-    GEMINI_REFLEXION_REPONSE: Optional[Literal["minimal", "low", "medium", "high"]] = "low"
+    GEMINI_REFLEXION_REPONSE: Optional[Literal["minimal", "low", "medium", "high"]] = None
     GEMINI_REFLEXION_CLASSIFICATION: Optional[Literal["minimal", "low", "medium", "high"]] = "minimal"
 
     # ---- Fusion hybride ----
