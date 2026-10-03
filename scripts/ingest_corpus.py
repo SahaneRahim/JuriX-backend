@@ -350,6 +350,7 @@ def indexer(
     force: bool = False,
     traiter=process_law_sync,
     attentes_s: Sequence[float] = (5, 15, 30, 60, 120, 300),
+    corpus: Optional[List[Document]] = None,
 ) -> Dict[str, int]:
     """
     Indexe chaque document dont l'extraction est terminee.
@@ -364,7 +365,10 @@ def indexer(
     """
     bilan = {"publies": 0, "deja_publies": 0, "en_attente": 0, "doublons": 0, "echecs": 0}
     debut = time.time()
-    canoniques = _canoniques(documents)
+    # Les doublons se reconnaissent sur le CORPUS ENTIER, pas sur la selection :
+    # traite par lots (--doc-id), un document dont le jumeau etait dans un
+    # autre lot passait pour unique, et partait en traitement sans fichier.
+    canoniques = _canoniques(corpus or documents)
 
     for position, document in enumerate(documents, start=1):
         if not extracteur.etat(Path(document.chemin), document.sha256, document.pages).termine:
@@ -442,7 +446,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
     configurer_journal(DOSSIER_SUIVI / "indexation.log")
 
-    documents = selectionner(charger_corpus(args.index, DOSSIER_SUIVI), args.doc_id, args.limite)
+    corpus = charger_corpus(args.index, DOSSIER_SUIVI)
+    documents = selectionner(corpus, args.doc_id, args.limite)
     extracteur = DoclingPdfExtractor()
     prets = [
         d for d in documents
@@ -457,7 +462,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     stockage = get_upload_service().storage_path
     stockage.mkdir(parents=True, exist_ok=True)
     try:
-        bilan = indexer(documents, extracteur, stockage, force=args.force)
+        bilan = indexer(documents, extracteur, stockage, force=args.force, corpus=corpus)
     except PanneDeBase as exc:
         logger.error("%s — relancer la meme commande une fois la base revenue", exc)
         return 3

@@ -550,6 +550,29 @@ class TestIndexationRobuste:
         assert "titres est faux" in lois["PRC-8480"].processing_error
         assert sync_db_session.query(Article).filter(Article.law_id == lois["PRC-8480"].id).count() == 0
 
+    def test_doublon_reconnu_meme_si_son_jumeau_est_dans_un_autre_lot(
+        self, sync_db_session, tmp_path, stockage, extraction_en_cache, embeddings_doubles
+    ):
+        """
+        Traite par lots, un doublon dont le jumeau etait dans un autre lot
+        passait pour unique : il partait en traitement sans fichier, et
+        l'echec arretait toute la reindexation (PRC-10016, jumeau du 10018).
+        """
+        ext = _extracteur(extraction_en_cache)
+        pdf = _pdf(tmp_path / "d.pdf", 2)
+        canonique = _document(pdf, doc_id="8467", pages=2, titre="Décret N°2020/433 du 2 juin 2020 portant nomination")
+        doublon = _document(pdf, doc_id="8480", pages=2, titre="Décret N°2020/443 du 2 juin 2020 portant nomination")
+        ext.extraire(pdf)
+        corpus = [canonique, doublon]
+
+        ingest_corpus.indexer([canonique], ext, stockage, corpus=corpus)
+        bilan = ingest_corpus.indexer([doublon], ext, stockage, force=True, corpus=corpus)
+
+        assert bilan["doublons"] == 1 and bilan["echecs"] == 0
+        loi = sync_db_session.query(Law).filter(Law.reference == "PRC-8480").one()
+        assert loi.status == "refused"
+        assert "PRC-8467" in loi.processing_error
+
     def test_une_loi_archivee_n_est_pas_republiee(
         self, sync_db_session, tmp_path, stockage, extraction_en_cache, embeddings_doubles
     ):
