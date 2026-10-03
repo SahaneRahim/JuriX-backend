@@ -275,6 +275,11 @@ async def ask_stream(request: RAGRequest, rag_service: RAGService = Depends(get_
             },
         )
 
+    except HTTPException:
+        # Le refus d'appartenance (404) ressortait en 500, avale par la clause
+        # generale ci-dessous : l'interface ne pouvait pas repartir sur une
+        # conversation neuve.
+        raise
     except Exception as e:
         logger.error(f"❌ Streaming setup error: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

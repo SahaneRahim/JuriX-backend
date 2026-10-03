@@ -209,6 +209,32 @@ class TestAskAvecSessionDautrui:
         assert apres == avant, "des messages ont ete ajoutes chez la victime"
 
     @pytest.mark.asyncio
+    async def test_flux_refuse_en_404_et_non_500(
+        self, client: AsyncClient, db_session, test_user, test_admin_user
+    ):
+        """
+        Le refus d'appartenance ressortait en 500 sur le flux, avale par la
+        clause generale de la route : l'interface, qui l'emprunte desormais, ne
+        pouvait plus repartir sur une conversation neuve.
+        """
+        conv = await _conversation(
+            db_session, "sid-victime-flux", user_id=test_user.id, question="Question privee"
+        )
+
+        r = await client.post(
+            "/api/v1/rag/ask/stream",
+            headers=entetes(test_admin_user),
+            json={
+                "question": "Quelles sont les conditions ?",
+                "persona": "citoyen",
+                "language": "fr",
+                "session_id": conv.session_id,
+            },
+        )
+
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
     async def test_session_id_trop_long_est_un_422(self, client: AsyncClient):
         """
         La colonne fait `String(100)`. Sans borne au schema, une chaine plus
