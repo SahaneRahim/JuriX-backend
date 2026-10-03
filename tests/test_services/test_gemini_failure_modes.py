@@ -232,3 +232,56 @@ class TestReponseTronquee:
         resultat = await service.generate("question", system="systeme")
 
         assert "tronquee" not in resultat
+
+
+class TestNiveauDeReflexion:
+    """
+    La reflexion faisait l'essentiel de l'attente : 28 s sur 37 pour une
+    question au chat, dont 3 104 jetons de reflexion pour 247 de reponse.
+    """
+
+    @staticmethod
+    def _service(modele):
+        from app.services.gemini_service import GeminiService
+
+        service = GeminiService.__new__(GeminiService)
+        service.model_name = modele
+        service.vus = []
+
+        def _generer(**kw):
+            service.vus.append(kw["config"])
+            return _reponse([{"text": "Réponse."}])
+
+        service.client = SimpleNamespace(models=SimpleNamespace(generate_content=_generer))
+        return service
+
+    @pytest.mark.asyncio
+    async def test_niveau_transmis_a_un_modele_gemini_3(self):
+        service = self._service("gemini-3-flash-preview")
+
+        await service.generate("question", system="systeme", reflexion="low")
+
+        assert service.vus[0].thinking_config.thinking_level.value.lower() == "low"
+
+    @pytest.mark.asyncio
+    async def test_aucun_niveau_pour_un_modele_2_5(self):
+        """Les 2.5 reglent un budget et rejetteraient un niveau."""
+        service = self._service("gemini-2.5-flash")
+
+        await service.generate("question", system="systeme", reflexion="low")
+
+        assert service.vus[0].thinking_config is None
+
+    @pytest.mark.asyncio
+    async def test_sans_niveau_le_modele_choisit(self):
+        service = self._service("gemini-3-flash-preview")
+
+        await service.generate("question", system="systeme")
+
+        assert service.vus[0].thinking_config is None
+
+    def test_defauts_mesures(self):
+        from app.core.config import settings
+
+        assert settings.GEMINI_REFLEXION_REPONSE == "low"
+        assert settings.GEMINI_REFLEXION_CLASSIFICATION == "minimal"

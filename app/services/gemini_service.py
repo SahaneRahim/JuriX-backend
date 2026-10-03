@@ -14,7 +14,7 @@ import functools
 import logging
 import re
 from functools import lru_cache
-from typing import AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 from google import genai
 from google.genai import types
@@ -192,6 +192,15 @@ FORBIDDEN:
         
         logger.info(f"✅ GeminiService initialized: model={self.model_name}")
     
+    def _reflexion(self, niveau: Optional[str]) -> Dict[str, Any]:
+        """
+        Niveau de reflexion du modele, s'il en a un. Les modeles Gemini 2.5
+        reglent un BUDGET de reflexion et rejettent un niveau : rien pour eux.
+        """
+        if not niveau or not str(self.model_name).startswith("gemini-3"):
+            return {}
+        return {"thinking_config": types.ThinkingConfig(thinking_level=niveau)}
+
     async def generate(
         self,
         prompt: str,
@@ -200,6 +209,7 @@ FORBIDDEN:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         response_mime_type: Optional[str] = None,
         response_schema: Optional[Dict] = None,
+        reflexion: Optional[str] = None,
         **kwargs
     ) -> Dict:
         """
@@ -212,6 +222,7 @@ FORBIDDEN:
             max_tokens: Maximum tokens to generate
             response_mime_type: "application/json" pour une sortie structuree
             response_schema: schema JSON impose a la reponse
+            reflexion: niveau de reflexion (Gemini 3) ; None = choix du modele
 
         Ces deux derniers parametres sont EXPLICITES et non laisses a **kwargs :
         tout ce qui tombait dans kwargs etait silencieusement ignore, si bien
@@ -237,6 +248,7 @@ FORBIDDEN:
                 config_kwargs["response_mime_type"] = response_mime_type
             if response_schema:
                 config_kwargs["response_schema"] = response_schema
+            config_kwargs.update(self._reflexion(reflexion))
 
             config = types.GenerateContentConfig(**config_kwargs)
             
@@ -326,6 +338,7 @@ FORBIDDEN:
         system: Optional[str] = None,
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
+        reflexion: Optional[str] = None,
         **kwargs
     ) -> AsyncIterator[str]:
         """
@@ -341,7 +354,8 @@ FORBIDDEN:
             config = types.GenerateContentConfig(
                 temperature=temperature,
                 max_output_tokens=max_tokens,
-                system_instruction=system_instruction
+                system_instruction=system_instruction,
+                **self._reflexion(reflexion),
             )
             
             # client.aio : la surface ASYNCHRONE native de google-genai.

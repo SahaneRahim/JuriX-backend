@@ -204,6 +204,7 @@ async def classify_intent(
                 system=CLASSIFICATION_SYSTEM,
                 temperature=0.0,
                 max_tokens=max_tokens or settings.INTENT_MAX_TOKENS,
+                reflexion=settings.GEMINI_REFLEXION_CLASSIFICATION,
                 response_mime_type="application/json",
                 response_schema=_INTENT_SCHEMA,
             ),

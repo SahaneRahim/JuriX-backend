@@ -1,6 +1,6 @@
 """Configuration application - Toutes les variables d'environnement."""
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
@@ -142,6 +142,20 @@ class Settings(BaseSettings):
     # "juridique" a chaque appel, donc un routeur qui ne route jamais, sans
     # qu'aucun test ne le voie — ils doublent tous le modele.
     INTENT_MAX_TOKENS: int = 1024
+
+    # ---- Reflexion du modele (Gemini 3) ----
+    # La reflexion interne fait l'essentiel du temps d'attente. MESURE sur
+    # gemini-3-flash-preview, une question au chat, 37 s au total :
+    # classification 8,5 s (232 jetons de reflexion pour une sortie de 18),
+    # recherche 0,26 s, reponse 28 s (3 104 jetons de reflexion pour 247 de
+    # reponse). En « low » pour la reponse et « minimal » pour la
+    # classification : 12 s, dont 5,5 s de reponse. Rediger a partir
+    # d'articles deja fournis ne demande pas de raisonnement profond.
+    # Valeurs : minimal, low, medium, high ; vide = choix du modele.
+    # N'agit que sur les modeles Gemini 3 (les 2.5 reglent un budget, pas un
+    # niveau).
+    GEMINI_REFLEXION_REPONSE: Optional[Literal["minimal", "low", "medium", "high"]] = "low"
+    GEMINI_REFLEXION_CLASSIFICATION: Optional[Literal["minimal", "low", "medium", "high"]] = "minimal"
 
     # ---- Fusion hybride ----
     # Valeurs par defaut NON calibrees sur ce corpus : RRF_K = 60 vient du

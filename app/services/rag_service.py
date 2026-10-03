@@ -455,7 +455,7 @@ class RAGService:
         # ou la reponse commencait par « *Self-Correction during drafting:* ».
         llm_response = await self.llm.generate(
             prompt=prompt, system=system_prompt, temperature=0.7,
-            max_tokens=ANSWER_MAX_TOKENS,
+            max_tokens=ANSWER_MAX_TOKENS, reflexion=settings.GEMINI_REFLEXION_REPONSE,
         )
         generation_time_ms = int((time.time() - generation_start) * 1000)
         answer = llm_response["response"]
@@ -524,7 +524,7 @@ class RAGService:
 
         llm_response = await self.llm.generate(
             prompt=prompt, system=system_prompt, temperature=0.7,
-            max_tokens=CONVERSATION_MAX_TOKENS,
+            max_tokens=CONVERSATION_MAX_TOKENS, reflexion=settings.GEMINI_REFLEXION_REPONSE,
         )
         generation_time_ms = int((time.time() - generation_start) * 1000)
         answer = llm_response["response"]
@@ -666,11 +666,14 @@ class RAGService:
                 return
 
             answer_parts = []
+            # Meme budget que ask() : a 1000 jetons, la reflexion du modele
+            # epuisait le budget avant ou pendant la reponse.
             async for chunk in self.llm.generate_stream(
                 prompt=prompt,
                 system=system_prompt,
                 temperature=0.7,
-                max_tokens=1000
+                max_tokens=ANSWER_MAX_TOKENS,
+                reflexion=settings.GEMINI_REFLEXION_REPONSE,
             ):
                 answer_parts.append(chunk)
                 yield RAGStreamChunk(chunk=chunk, done=False).model_dump_json(exclude_none=True)

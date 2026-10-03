@@ -227,6 +227,7 @@ class TestCoreFunctionality:
 
         assert response.answer.endswith(MENTION_REPONSE_TRONQUEE)
         assert rag_service.llm.generate.call_args.kwargs["max_tokens"] == 8192
+        assert rag_service.llm.generate.call_args.kwargs["reflexion"] == "low"
 
     @pytest.mark.asyncio
     async def test_ask_with_no_search_results(
