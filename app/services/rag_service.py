@@ -617,11 +617,25 @@ class RAGService:
                 ).model_dump_json(exclude_none=True)
                 return
 
+            # Meme recuperation que `ask` : le document ouvert (`law_id`) en
+            # tete du contexte, la reponse directe quand l'article demande n'y
+            # est pas, puis la recherche de repli. Ce chemin n'appelait que la
+            # recherche generale : sur la page d'un document, le chat en flux
+            # aurait repondu sans ce document.
             retrieval_start = time.time()
-            search_results = await self._retrieve_chunks(
-                request.question,
-                request.language
+            search_results, early_response = await self._retrieve_and_merge_context(
+                request, conversation
             )
+            if early_response:
+                yield RAGStreamChunk(
+                    chunk=early_response.answer, done=True, sources=[],
+                    confidence=early_response.confidence,
+                    session_id=early_response.session_id,
+                    intent=INTENT_JURIDIQUE,
+                ).model_dump_json(exclude_none=True)
+                return
+            if not search_results:
+                search_results = await self._fallback_search(request.question, history)
             retrieval_time_ms = int((time.time() - retrieval_start) * 1000)
 
             if not search_results:
@@ -666,6 +680,7 @@ class RAGService:
                 return
 
             answer_parts = []
+            raison = {}
             # Meme budget que ask() : a 1000 jetons, la reflexion du modele
             # epuisait le budget avant ou pendant la reponse.
             async for chunk in self.llm.generate_stream(
@@ -674,15 +689,25 @@ class RAGService:
                 temperature=0.7,
                 max_tokens=ANSWER_MAX_TOKENS,
                 reflexion=settings.GEMINI_REFLEXION_REPONSE,
+                fin=lambda r: raison.update(fin=r),
             ):
                 answer_parts.append(chunk)
                 yield RAGStreamChunk(chunk=chunk, done=False).model_dump_json(exclude_none=True)
+
+            # Une reponse coupee par le budget le dit, comme dans `ask`
+            if raison.get("fin") == "MAX_TOKENS":
+                answer_parts.append(MENTION_REPONSE_TRONQUEE)
+                yield RAGStreamChunk(
+                    chunk=MENTION_REPONSE_TRONQUEE, done=False
+                ).model_dump_json(exclude_none=True)
 
             generation_time_ms = int((time.time() - generation_start) * 1000)
 
             # Process complete answer
             full_answer = "".join(answer_parts)
             citations = self._extract_citations(full_answer, search_results)
+            if not citations and self._peut_fabriquer_une_source(full_answer, search_results):
+                citations = self._create_sources_from_results(search_results, request.question)
             confidence = self._calculate_confidence(
                 full_answer, citations, search_results
             )
@@ -703,9 +728,14 @@ class RAGService:
 
         except Exception as e:
             logger.error(f"❌ Streaming error: {e}")
-            yield RAGStreamChunk(chunk="", done=True, error=str(e)).model_dump_json(
-                exclude_none=True
+            code = (
+                "quota" if isinstance(e, GeminiQuotaError)
+                else "overloaded" if isinstance(e, GeminiOverloadedError)
+                else "server"
             )
+            yield RAGStreamChunk(
+                chunk="", done=True, error=str(e), error_code=code
+            ).model_dump_json(exclude_none=True)
 
     async def _retrieve_chunks(
         self,

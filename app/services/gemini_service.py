@@ -14,7 +14,7 @@ import functools
 import logging
 import re
 from functools import lru_cache
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Optional
 
 from google import genai
 from google.genai import types
@@ -339,12 +339,19 @@ FORBIDDEN:
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         reflexion: Optional[str] = None,
+        fin: Optional[Callable[[str], None]] = None,
         **kwargs
     ) -> AsyncIterator[str]:
         """
         Stream a response from Gemini.
-        
+
         Yields text chunks as they are generated.
+
+        Args:
+            fin: appele en fin de flux avec la raison d'arret (« STOP »,
+                « MAX_TOKENS »...). Un flux coupe par le budget ne leve rien :
+                sans ce rappel, rien ne distinguait une phrase interrompue
+                d'une reponse complete.
         """
         try:
             logger.debug(f"🤖 Streaming response (temp={temperature}, max={max_tokens})")
@@ -373,10 +380,18 @@ FORBIDDEN:
             )
 
             produced = 0
+            dernier = None
             async for chunk in response_stream:
+                dernier = chunk
                 if chunk.text:
                     produced += 1
                     yield chunk.text
+
+            raison = _finish_reason(dernier) if dernier is not None else "UNKNOWN"
+            if raison == "MAX_TOKENS":
+                logger.warning(f"⚠️ Flux tronque (max_tokens={max_tokens})")
+            if fin is not None:
+                fin(raison)
 
             if produced == 0:
                 # Arrive quand max_output_tokens est trop serre pour un modele
@@ -391,6 +406,17 @@ FORBIDDEN:
             logger.info(f"✅ Streaming complete ({produced} morceaux)")
             
         except Exception as e:
+            # Meme classement que generate() : un quota epuise n'est pas une
+            # panne, et l'appelant doit pouvoir le dire au lecteur.
+            if _is_quota_exhausted(e):
+                raise GeminiQuotaError(
+                    f"Quota de generation epuise. Reessaie dans {retry_after_seconds(e)} secondes."
+                ) from e
+            if _is_overloaded(e):
+                raise GeminiOverloadedError(
+                    "Le service de generation est momentanement sature. "
+                    "Reessaie dans quelques instants."
+                ) from e
             logger.error(f"❌ Gemini streaming error: {e}")
             raise GeminiServiceError(f"Erreur de streaming: {str(e)}")
     

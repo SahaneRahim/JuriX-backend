@@ -445,3 +445,34 @@ class TestStreaming:
 
         assert len(pieces) == 5
         assert ticks > 3, "la boucle etait bloquee pendant le flux"
+
+
+@pytest.mark.asyncio
+async def test_flux_rapporte_sa_raison_d_arret():
+    """Un flux coupe par le budget ne levait rien et ne se signalait pas."""
+    from types import SimpleNamespace
+
+    from app.services.gemini_service import GeminiService
+
+    service = GeminiService.__new__(GeminiService)
+    service.model_name = "gemini-3-flash-preview"
+    service.SYSTEM_INSTRUCTION = "sys"
+
+    def _morceau(texte, raison=None):
+        candidat = SimpleNamespace(finish_reason=SimpleNamespace(name=raison) if raison else None)
+        return SimpleNamespace(text=texte, candidates=[candidat])
+
+    async def _stream(**kwargs):
+        async def _gen():
+            yield _morceau("Un militaire qui abuse ")
+            yield _morceau("de sa position pour", "MAX_TOKENS")
+        return _gen()
+
+    service.client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(
+        generate_content_stream=_stream)))
+    raisons = []
+
+    pieces = [p async for p in service.generate_stream(prompt="q", fin=raisons.append)]
+
+    assert "".join(pieces) == "Un militaire qui abuse de sa position pour"
+    assert raisons == ["MAX_TOKENS"]

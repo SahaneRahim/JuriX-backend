@@ -897,3 +897,122 @@ class TestCitationsMultilingues:
         )
 
         assert citations == []
+
+
+class TestFluxAligneSurAsk:
+    """
+    Le flux ne faisait pas ce que fait `ask` : document ouvert ignore, aucune
+    source de repli, reponse coupee non signalee, quota confondu avec une
+    panne. L'interface l'emprunte desormais.
+    """
+
+    @staticmethod
+    def _preparer(rag_service, mock_db_session, mock_search_results, morceaux, raison="STOP"):
+        recherche = MagicMock(results=[], chunks=mock_search_results, search_time_ms=1)
+        rag_service.search_service.search.return_value = recherche
+        mock_db_session.execute.return_value = MagicMock(
+            scalar_one_or_none=MagicMock(return_value=None)
+        )
+
+        def _flux(**kwargs):
+            async def _gen():
+                for m in morceaux:
+                    yield m
+                if kwargs.get("fin"):
+                    kwargs["fin"](raison)
+            return _gen()
+
+        rag_service.llm.generate_stream = MagicMock(side_effect=_flux)
+
+    @staticmethod
+    async def _evenements(rag_service, requete):
+        import json
+
+        return [json.loads(e) async for e in rag_service.ask_stream(requete)]
+
+    @pytest.mark.asyncio
+    async def test_reponse_coupee_signalee(
+        self, rag_service, sample_rag_request, mock_search_results, mock_db_session
+    ):
+        from app.services.rag_service import MENTION_REPONSE_TRONQUEE
+
+        self._preparer(rag_service, mock_db_session, mock_search_results,
+                       ["Un militaire qui abuse ", "de sa position pour"], raison="MAX_TOKENS")
+
+        evenements = await self._evenements(rag_service, sample_rag_request)
+
+        texte = "".join(e["chunk"] for e in evenements)
+        assert texte.endswith(MENTION_REPONSE_TRONQUEE)
+        assert evenements[-1]["done"] is True
+
+    @pytest.mark.asyncio
+    async def test_meme_budget_et_reflexion_que_ask(
+        self, rag_service, sample_rag_request, mock_search_results, mock_db_session
+    ):
+        self._preparer(rag_service, mock_db_session, mock_search_results, ["Réponse."])
+
+        await self._evenements(rag_service, sample_rag_request)
+
+        kwargs = rag_service.llm.generate_stream.call_args.kwargs
+        assert kwargs["max_tokens"] == 8192
+        assert kwargs["reflexion"] == "low"
+
+    @pytest.mark.asyncio
+    async def test_source_de_repli_comme_ask(
+        self, rag_service, sample_rag_request, mock_search_results, mock_db_session, monkeypatch
+    ):
+        """Une reponse juste sans citation reconnue garde ses sources."""
+        self._preparer(rag_service, mock_db_session, mock_search_results,
+                       ["Les dirigeants répondent de leurs fautes de gestion."])
+        monkeypatch.setattr(rag_service, "_peut_fabriquer_une_source", lambda *a: True)
+
+        evenements = await self._evenements(rag_service, sample_rag_request)
+
+        assert evenements[-1]["sources"], "la source de repli manquait au flux"
+
+    @pytest.mark.asyncio
+    async def test_document_ouvert_et_article_absent(
+        self, rag_service, sample_rag_request, mock_db_session, monkeypatch
+    ):
+        """Sur la page d'un document, la reponse directe « article absent »."""
+        absent = RAGResponse(
+            answer="Ce document ne contient pas d'article 99.", confidence=1.0, sources=[],
+            session_id="s", retrieval_time_ms=0, generation_time_ms=0, total_time_ms=0,
+            persona="citoyen",
+        )
+
+        async def _recuperation(requete, conversation):
+            return [], absent
+
+        monkeypatch.setattr(rag_service, "_retrieve_and_merge_context", _recuperation)
+        mock_db_session.execute.return_value = MagicMock(
+            scalar_one_or_none=MagicMock(return_value=None)
+        )
+        requete = sample_rag_request.model_copy(update={"law_id": 7, "question": "Que dit l'article 99 ?"})
+
+        evenements = await self._evenements(rag_service, requete)
+
+        assert len(evenements) == 1
+        assert evenements[0]["chunk"] == "Ce document ne contient pas d'article 99."
+        assert evenements[0]["done"] is True
+
+    @pytest.mark.asyncio
+    async def test_quota_epuise_a_son_code(
+        self, rag_service, sample_rag_request, mock_search_results, mock_db_session
+    ):
+        from app.services.gemini_service import GeminiQuotaError
+
+        self._preparer(rag_service, mock_db_session, mock_search_results, [])
+
+        def _quota(**kwargs):
+            async def _gen():
+                raise GeminiQuotaError("Quota de generation epuise. Reessaie dans 60 secondes.")
+                yield  # fait de _gen un generateur asynchrone
+            return _gen()
+
+        rag_service.llm.generate_stream = MagicMock(side_effect=_quota)
+
+        evenements = await self._evenements(rag_service, sample_rag_request)
+
+        assert evenements[-1]["done"] is True
+        assert evenements[-1]["error_code"] == "quota"

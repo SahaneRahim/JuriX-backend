@@ -5,7 +5,7 @@ Defines request/response models for RAG endpoints, citations, and conversation m
 """
 
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -172,6 +172,14 @@ class RAGStreamChunk(BaseModel):
     error: Optional[str] = Field(
         None,
         description="Error message (only in a terminal chunk that failed)"
+    )
+    # Le statut HTTP d'un flux est fige a 200 des le premier octet : la cause
+    # d'une panne ne peut voyager que dans le corps. Sans ce code, l'interface
+    # ne distinguait plus un quota epuise d'une panne serveur, la ou `ask`
+    # repond 429 ou 503.
+    error_code: Optional[Literal["quota", "overloaded", "server"]] = Field(
+        None,
+        description="Nature de la panne : quota, overloaded, server"
     )
 
 
