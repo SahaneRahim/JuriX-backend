@@ -533,3 +533,66 @@ class TestAndOrFallback:
         assert chunks, "le repli en OU doit rendre des articles"
         assert all(c.article_id is not None for c in chunks)
         assert all(c.source in ("fts", "trigram") for c in chunks)
+
+
+class TestTermesRaresDAbord:
+    """
+    ts_rank_cd ne connait pas la rarete d'un terme. En OU, « sanctions
+    harcelement sexuel » placait en tete les sanctions disciplinaires des
+    etudiants (« sanctions » repete, aucun harcelement) devant l'article du
+    Code penal qui punit le harcelement sexuel.
+    """
+
+    @pytest.fixture
+    async def penal(self, db_session, category_ids):
+        db_session.add(Law(
+            id=300, reference="LOI-2016-007", title="Code pénal", content="Code pénal.",
+            type="loi", language="fr", status="published",
+            category_id=category_ids["Droit Civil"], publication_date=date(2016, 7, 12),
+        ))
+        await db_session.flush()
+        etudiants = (
+            "Suivant la gravité de la faute, les sanctions disciplinaires suivantes : "
+            "l'avertissement ; les sanctions a et b sont prononcées par le Chef ; "
+            "les autres sanctions par le Ministre. Ces sanctions sont motivées."
+        )
+        db_session.add_all([
+            *[Article(id=3000 + i, law_id=300, number=str(10 + i), content=etudiants, order=i)
+              for i in range(4)],
+            Article(id=3099, law_id=300, number="302",
+                    content="Harcèlement sexuel. Est puni d'un emprisonnement de six mois à un an "
+                            "celui qui harcèle autrui par des ordres en vue d'obtenir des faveurs sexuelles.",
+                    order=99),
+        ])
+        await db_session.commit()
+        from sqlalchemy import text as sql_text
+
+        await db_session.execute(sql_text(REINDEX_ARTICLES_SQL))
+        await db_session.commit()
+
+    @pytest.mark.asyncio
+    async def test_le_terme_frequent_est_retire_en_premier(self, db_session, penal):
+        from app.services.postgres_search_service import _sous_requetes_par_rarete
+
+        assert await _sous_requetes_par_rarete(db_session, "sanctions harcèlement sexuel") == [
+            "harcèlement sexuel", "harcèlement",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_l_article_qui_porte_les_termes_rares_passe_en_tete(self, db_session, penal):
+        chunks = await search_articles_pg(db_session, "sanctions harcèlement sexuel", None, 15, 0)
+
+        assert chunks[0].number == "302"
+        assert len(chunks) > 1, "le OU complete a la suite"
+
+    @pytest.mark.asyncio
+    async def test_terme_absent_du_corpus_retire_d_emblee(self, db_session, penal):
+        from app.services.postgres_search_service import _sous_requetes_par_rarete
+
+        assert (await _sous_requetes_par_rarete(db_session, "harcèlement zzyqx"))[0] == "harcèlement"
+
+    @pytest.mark.asyncio
+    async def test_saisie_a_operateurs_intacte(self, db_session, penal):
+        from app.services.postgres_search_service import _sous_requetes_par_rarete
+
+        assert await _sous_requetes_par_rarete(db_session, '"harcèlement sexuel"') == []

@@ -203,16 +203,33 @@ async def search_articles_pg(
     results = await _fts_articles_query(db, query, filters, limit, offset)
 
     if not results:
+        # Aucun article ne porte TOUS les mots : on retire d'abord les plus
+        # FREQUENTS. ts_rank_cd ne connait pas la rarete d'un terme ; en OU,
+        # le mot banal l'emportait. Mesure sur le corpus : « sanctions
+        # harcelement sexuel » placait en tete les sanctions disciplinaires
+        # des etudiants (« sanctions » cinq fois, aucun harcelement), devant
+        # l'article 302 du Code penal. Sans « sanctions », les deux mots rares
+        # designent exactement les bons articles.
+        if offset == 0:
+            for sous_requete in await _sous_requetes_par_rarete(db, query):
+                results = await _fts_articles_query(db, sous_requete, filters, limit, 0)
+                if results:
+                    logger.debug(f"FTS ET a 0 resultat, termes rares retenus : {sous_requete}")
+                    break
+
         # websearch_to_tsquery relie les mots par ET : "obligations dirigeants
         # societe" exige les TROIS dans le meme article, ce qu'aucun article ne
         # satisfait souvent — alors que 56 articles parlent de societes. Sans ce
         # second essai en OU, la recherche tombait directement au niveau LOI, et
         # le RAG recevait un document entier sans identite d'article : la
-        # citation sortait donc sans numero d'article.
+        # citation sortait donc sans numero d'article. Le OU COMPLETE desormais
+        # les termes rares, a leur suite : il ne passe plus devant.
         any_terms = _as_any_terms(query)
-        if any_terms != query:
+        if any_terms != query and len(results) < limit:
             logger.debug(f"FTS ET a 0 resultat, essai en OU pour: {query[:40]}")
-            results = await _fts_articles_query(db, any_terms, filters, limit, offset)
+            complement = await _fts_articles_query(db, any_terms, filters, limit, offset)
+            vus = {c.article_id for c in results}
+            results = (results + [c for c in complement if c.article_id not in vus])[:limit]
 
     if not results:
         logger.debug(f"FTS returned 0, trying trigram fallback for: {query[:40]}")
@@ -242,6 +259,51 @@ def _as_any_terms(query: str) -> str:
     if len(terms) < 2:
         return cleaned
     return " OR ".join(terms)
+
+
+async def _sous_requetes_par_rarete(db: AsyncSession, query: str) -> List[str]:
+    """
+    Requetes de repli, des plus exigeantes aux moins exigeantes, en retirant
+    a chaque etape le terme le plus FREQUENT du corpus.
+
+    « sanctions harcelement sexuel » donne « harcelement sexuel », puis
+    « harcelement ». Un terme absent du corpus (faute de frappe) est retire
+    d'emblee. Rien pour une saisie a operateurs ou d'un seul mot : _as_any_terms
+    la laisse telle quelle, et on n'y touche pas davantage.
+
+    Un seul aller-retour : le nombre d'articles de chaque terme, compte sur les
+    seuls articles qui en portent au moins un (index GIN).
+    """
+    any_terms = _as_any_terms(query)
+    if any_terms == query.strip():
+        return []
+    termes = [t for t in query.split() if len(t) > 1]
+    params: Dict[str, Any] = {f"t{i}": t for i, t in enumerate(termes)}
+    params["ou"] = any_terms
+    comptes = ", ".join(
+        f"count(*) FILTER (WHERE a.search_vector @@ plainto_tsquery('french', :t{i})"
+        f" OR a.search_vector @@ plainto_tsquery('english', :t{i})) AS n{i}"
+        for i in range(len(termes))
+    )
+    try:
+        ligne = (await db.execute(text(
+            f"SELECT {comptes} FROM articles a "
+            "WHERE a.search_vector @@ websearch_to_tsquery('french', :ou) "
+            "OR a.search_vector @@ websearch_to_tsquery('english', :ou)"
+        ), params)).one()
+    except Exception as e:
+        logger.warning(f"⚠️ Frequence des termes indisponible : {e}")
+        return []
+
+    presents = sorted(
+        (ligne[i], i) for i in range(len(termes)) if ligne[i] and ligne[i] > 0
+    )
+    depart = len(presents) if len(presents) < len(termes) else len(presents) - 1
+    requetes = []
+    for n in range(depart, 0, -1):
+        retenus = sorted(i for _, i in presents[:n])
+        requetes.append(" ".join(termes[i] for i in retenus))
+    return requetes
 
 
 async def _fts_articles_query(
