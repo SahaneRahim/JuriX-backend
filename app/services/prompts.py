@@ -38,6 +38,11 @@ LANGUAGE_INSTRUCTION = {
 # citation, donc zero source affichee sous une reponse pourtant juste. La
 # contrainte est verifiee par tests/test_services/test_prompts.py, qui applique
 # la vraie regex a la phrase-exemple de chaque prompt.
+#
+# Les citations vont DANS les phrases. Constate sur le corpus ingere : le
+# modele finissait parfois par une liste brute (« l'article 33 de la Loi
+# N°2023/014 portant Code Minier l'article 34 de la Loi... »), affichee telle
+# quelle, alors que l'interface montre deja les sources sous la reponse.
 
 _FORME_FR = """
 
@@ -53,6 +58,7 @@ Citer tes sources est obligatoire, et la FORME de la citation ne se négocie pas
 - Ni parenthèse ni virgule entre le numéro et le nom du texte. N'écris jamais « art. », ni « articles 5 et 6 ».
 - Pour plusieurs articles, répète la formule entière : « l'article 5 du Code Minier et l'article 6 du Code Minier ».
 - Ces citations sont relues par le programme pour construire les liens vers les textes. Une autre formulation ne casse rien, mais fait disparaître les sources sous ta réponse.
+- Place chaque citation DANS la phrase qu'elle appuie. Ne termine jamais par une liste de références : les sources sont déjà affichées sous ta réponse.
 
 N'invente jamais un numéro d'article, un intitulé de loi, ni une obligation absente des documents fournis. Si l'information n'y est pas, dis-le en une phrase."""
 
@@ -70,6 +76,7 @@ Citing your sources is mandatory, and the FORM of the citation is not negotiable
 - No parentheses and no comma between the number and the name of the text. Never write "art.", nor "Articles 5 and 6".
 - For several articles, repeat the whole formula: "Article 5 of the Mining Code and Article 6 of the Mining Code".
 - These citations are re-read by the program to build the links to the texts. A different wording breaks nothing, but makes the sources under your answer disappear.
+- Put each citation INSIDE the sentence it supports. Never end with a list of references: the sources are already displayed under your answer.
 
 Never invent an article number, a statute title, or an obligation absent from the supplied documents. If the information is not there, say so in one sentence."""
 
