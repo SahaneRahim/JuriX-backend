@@ -175,6 +175,7 @@ Instructions:
 _SPECIAL_CHUNK_LABELS = {
     "PREAMBULE": "Préambule",
     "LEGAL_BASIS": "Visas et base légale",
+    "DISPOSITIF": "Dispositif",
     "SIGNATURE": "Signature",
     "ANNEXE": "Annexe",
 }

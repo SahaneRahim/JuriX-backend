@@ -145,7 +145,7 @@ _REAL_ARTICLE_NUMBER = re.compile(
 # recherche, le chat et l'assemblage du contexte : chacun tenait sa propre
 # liste, et aucune ne connaissait SECTION_n ni PARA_n.
 PSEUDO_NUMERO = re.compile(
-    r"^(?:PREAMBULE|LEGAL_BASIS|SIGNATURE|ANNEXE|SECTION_\d+|PARA_\d+)(?:\.\d+)*$",
+    r"^(?:PREAMBULE|LEGAL_BASIS|DISPOSITIF|SIGNATURE|ANNEXE|SECTION_\d+|PARA_\d+)(?:\.\d+)*$",
     re.IGNORECASE,
 )
 
@@ -195,7 +195,24 @@ _BOILERPLATE = re.compile(
 # Un mot en minuscules : sans lui, un chunk n'est fait que de titres en
 # capitales (« CHAPITRE II DES MINES / SECTION I DES PERMIS ») ou de restes
 # du cachet. Il ne repond a aucune question.
-_MOT_EN_MINUSCULES = re.compile(r"[a-zà-ÿ]{3,}")
+_MOT_EN_MINUSCULES = re.compile(r"\b[a-zà-ÿ]{3,}\b")
+
+# Mots, hors des paragraphes de formule, au-dela desquels un chunk qui porte la
+# formule d'execution reste un article. « Le decret n° 2001/041 du 19 fevrier
+# 2001 est abroge. » en compte quatre ; un reste de cachet ou d'OCR illisible
+# (« Ae u u e ur t ue ») aucun ou un.
+_MOTS_HORS_FORMULE = 4
+
+# Fin du preambule : « DECRETE : », « ARRETE : » seuls sur leur ligne, ou la
+# formule de promulgation d'une loi. Ce qui suit est le dispositif.
+#
+# Le mot est admis ampute de son debut (« CRETE : ») : le cachet le recouvre
+# parfois en partie.
+_DISPOSITIF = re.compile(
+    r"^[ \t>*_#-]*(?:\w{0,2}CR[ÈE]TE|\w?RR[ÊE]T[ÉE]|D[ÉE]CIDE|ORDONNE)[ \t]*:?[ \t*_.]*$"
+    r"|promulgue\s+la\s+loi\s+dont\s+la\s+teneur\s+suit\s*:?",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 # Debut du bloc de signature qui suit la formule d'execution. Sur les decrets
@@ -791,6 +808,64 @@ def _detacher_signature(chunk: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def _est_formule_d_execution(contenu: str) -> bool:
+    """
+    R6 — Le chunk n'est-il QUE la formule d'execution ?
+
+    Il porte une expression de la formule, il est court, et hors des
+    paragraphes qui la portent, il ne reste presque aucun mot. Le seul indice
+    de la formule ne suffisait pas : quand l'OCR rate le marqueur de l'article
+    2, la formule se colle a l'article 1. « La journee du lundi 16 aout 2021
+    est declaree feriee » partait alors hors de l'index vectoriel avec elle —
+    et le decret entier n'avait plus aucun vecteur.
+    """
+    if len(contenu) >= 600 or not _BOILERPLATE.search(contenu):
+        return False
+    hors_formule = " ".join(
+        p for p in re.split(r"\n\s*\n", contenu) if p.strip() and not _BOILERPLATE.search(p)
+    )
+    return len(_MOT_EN_MINUSCULES.findall(hors_formule)) < _MOTS_HORS_FORMULE
+
+
+def _separer_dispositif(chunk: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    R3 — Detache des visas le texte qui suit « DECRETE : ».
+
+    Le marqueur « Article 1er » est souvent illisible : le cachet ou le sceau
+    le recouvre dans la marge. text_chunker range alors l'article 1 dans la
+    base legale, avec les visas, hors de l'index vectoriel. Mesure sur le
+    corpus : la moitie des 53 documents qui n'avaient AUCUN vecteur. Ce texte
+    devient un chunk DISPOSITIF, traite comme un article.
+    """
+    contenu = chunk["content"]
+    fins = [m.end() for m in _DISPOSITIF.finditer(contenu)]
+    mots_min = 3
+    if not fins:
+        # Sans « DECRETE : » lisible, apres le dernier visa. Plus exigeant : il
+        # faut une vraie phrase, qui ne soit pas la suite d'un visa coupe.
+        visas = list(_VISA_LINE.finditer(contenu))
+        if not visas:
+            return [chunk]
+        fins, mots_min = [visas[-1].end()], 15
+        if not re.match(r"\s*[A-ZÀ-Þ0-9«\"|]", contenu[fins[-1]:]):
+            return [chunk]
+    tete, reste = contenu[:fins[-1]].strip(), contenu[fins[-1]:].strip()
+    # Docling lit parfois un dernier visa, ou la date en marge, apres
+    # « DECRETE : » : ce n'est pas le dispositif.
+    if len(_MOT_EN_MINUSCULES.findall(reste)) < mots_min or re.match(
+        r"\s*(?:[-*•]\s*)?Vu\b", reste, re.IGNORECASE
+    ):
+        return [chunk]
+    dispositif = dict(chunk)
+    dispositif.update(number="DISPOSITIF", parent_id="LEGAL_BASIS", content=reste)
+    preambule = dict(chunk)
+    preambule["content"] = tete
+    for c in (preambule, dispositif):
+        c["char_count"] = len(c["content"])
+        c["word_count"] = len(c["content"].split())
+    return [preambule, dispositif]
+
+
 def _extract_citations(legal_basis: str) -> List[str]:
     """
     R3 — Parse les visas en graphe de citations.
@@ -852,7 +927,14 @@ def refine(
     result = RefinedChunks()
     working: List[Dict[str, Any]] = []
 
+    entrees: List[Dict[str, Any]] = []
     for raw in chunks:
+        if str(raw.get("number", "")) == "LEGAL_BASIS":
+            entrees.extend(_separer_dispositif(dict(raw)))
+        else:
+            entrees.append(raw)
+
+    for raw in entrees:
         chunk = dict(raw)
         number = str(chunk.get("number", ""))
 
@@ -907,7 +989,7 @@ def refine(
                 result.roster.extend(entries)
 
             # R6 — articles d'execution : conserves, mais hors vectoriel
-            if _BOILERPLATE.search(piece["content"]) and len(piece["content"]) < 600:
+            if _est_formule_d_execution(piece["content"]):
                 piece["kind"] = "boilerplate"
                 piece["embed"] = False
                 working.append(piece)
@@ -935,9 +1017,10 @@ def refine(
     # R6 — chunks trop courts : conserves, mais hors vectoriel. Un vrai article
     # a son propre seuil, bien plus bas : court ne veut pas dire vide de sens.
     for chunk in working:
+        numero = str(chunk.get("number") or "")
         seuil = (
             MIN_CHARS_ARTICLE
-            if _REAL_ARTICLE_NUMBER.match(str(chunk.get("number") or ""))
+            if _REAL_ARTICLE_NUMBER.match(numero) or numero.startswith("DISPOSITIF")
             else MIN_CHARS
         )
         if chunk.get("embed") and len(chunk["content"]) < seuil:

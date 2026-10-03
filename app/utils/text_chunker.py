@@ -47,13 +47,17 @@ _SEPARATEUR_ARTICLE = r'[ \t]*(?:\.?[ \t]*[-–—]|:|\.)'
 # Suffixe de « 1er » tel que l'OCR le rend : « 1er », « 1e », « 1r », « 1ºr », « 1° ».
 _SUFFIXE_ORDINAL = r'(?:er|ère|ème|e|r|º[ \t]*r|°[ \t]*r|°)?'
 
-# Le mot « Article » tel que l'OCR le rend : « ARTIiCLE », « ARTICLÈ »,
-# « ARTlCLE », « ARTICLES 170.- ». Mesure sur le Code minier extrait par
-# Docling : 3 articles sur 200 perdaient leur marqueur, et leur texte se
-# fondait dans l'article precedent. Le pluriel n'est admis que suivi d'un
-# numero ET d'un separateur : « Articles 7 et 8 de la loi » est un renvoi.
+# Le mot « Article » tel que l'OCR le rend. Releve sur les 13 926 pages du
+# corpus extraites par Docling : « ARTIiCLE », « ARTICLÈ », « ARTICIE »,
+# « ARTCLE », « RTICLE », « ARTICCLE », « ARTTICLE », « Articte »,
+# « ARlicLE », « Articlo », « Artice ». Chacun fondait son article dans le
+# precedent — ou, pour un article 1er, dans les visas, hors de l'index
+# vectoriel. Le motif exige R puis T ou L, un C, une voyelle finale, puis le
+# numero en debut de ligne : aucun mot courant n'y repond. Le pluriel n'est
+# admis que suivi d'un numero ET d'un separateur : « Articles 7 et 8 de la
+# loi » est un renvoi.
 _MOT_ARTICLE = (
-    r'Art[iíìl1]{1,2}cl[eèéê]'
+    r'[AÀ]?R[TL]{1,2}[iíìl1]{0,2}c{1,2}[il1]?[eltoèéê][er]?'
     r'(?:s(?=[ \t_]*\d+[^\s\d]{0,3}' + _SEPARATEUR_ARTICLE + r'))?'
 )
 

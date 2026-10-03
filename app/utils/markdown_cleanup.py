@@ -39,12 +39,12 @@ import re
 # « BERVICE ») : avec les anciens motifs, a espaces obligatoires et sans
 # confusion admise, le cachet restait dans un tiers des pages.
 _STAMP_SPECIFIC_MOTIF = (
-    r"C[O0]P[IL1T]E\s*CERT[I1]F[I1][A-ZÉ]{0,3}\s*C[O0]N[FP][A-Z]{1,2}[MN][EF]"
-    r"|CERT[I1]F[I1]ED\s*[TY]R?UE\s*[CGS][O0][PR]Y"
+    r"C[O0]P[IL1T]E\s*C[ET]R[TI1][I1]F[I1][A-ZÉ]{0,3}\s*C[O0]N[FP][A-Z]{1,2}[MN][EF]"
+    r"|CER[TI1][I1]F[I1][A-Z]{1,2}\s*[TY]R?UE\s*[CGS][O0][PR]Y"
     r"|\w{0,3}[VT]ICE\s*D[UO]\s*\w?I[CG][HM]IE[RN]"
     r"(?:\s*L[A-ZÉ]{3,6}ATIF)?(?:\s*ET\s*R[EÉ][A-ZÉ]{2,10}AIRE)?"
     r"|(?:L[A-Z]{2,6}ATIVE\s*A[A-Z]{2}\s*)?[STB][TY]A[TY]UT[O0C]R[YT]\s*A[FP]{2}AI[RBP]S"
-    r"|CAR[DOG]\s*[A-Z]{1,2}[DB]EX\s*[SB]ER[VT]I[CS]E"
+    r"|CAR[DOGS]\s*[A-Z]{1,2}[DB]EX\s*[SB]ER[VT]I[CS]E"
 )
 
 # Vocabulaire du cachet : ses expressions propres, plus des expressions qui
@@ -71,9 +71,9 @@ _WATERMARK = re.compile(
 # ligne. Une ligne COURTE, en capitales, qui n'est qu'un mot propre au cachet
 # ou qui commence par l'une de ses expressions n'est que du cachet.
 _FRAGMENT_DE_CACHET = re.compile(
-    r"^[\W_]*(?:CERT[I1]F[I1]E[ED]|[STB][TY]A[TY]UT[O0C]R[YT]|\w?I[CG][HM]IER)[\W_]*$"
-    r"|^[\W_]*(?:C[O0]P[IL1T]E\W*CERT|CERT[I1]F[I1]E[DE]\W*(?:[TY]|C[O0]N)"
-    r"|L[A-Z]{2,6}ATIVE\s*A[A-Z]D\s*[STB]|CARD\s*IN[DB]EX|\w{0,3}[VT]ICE\s*D[UO]\s*\w?I[CG])"
+    r"^[\W_]*(?:CER[TI1][I1]F[I1]E[ED]|[STB][TY]A[TY]UT[O0C]R[YT]|\w?I[CG][HM]IER)[\W_]*$"
+    r"|^[\W_]*(?:C[O0]P[IL1T]E\W*C[ET]RT|CER[TI1][I1]F[I1][A-Z]{1,2}\W*(?:[TY]|C[O0]N)"
+    r"|L[A-Z]{2,6}ATIVE\s*A[A-Z]D\s*[STB]|CAR[DS]\s*IN[DB]EX|\w{0,3}[VT]ICE\s*D[UO]\s*\w?I[CG])"
     r"[A-Z\W_]{0,40}$"
 )
 
@@ -134,20 +134,32 @@ def _oter_le_cachet(ligne: str) -> str:
 _TITRE_MD = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+", re.MULTILINE)
 
 # Le mot « Article » tel que l'OCR le rend : « ARTIiCLE », « ARTICLÈ »,
-# « ARTICLES 170.- ».
-_MOT_ARTICLE = r"ART[IÍÌL1]{1,2}CL[EÈÉÊ]S?"
+# « ARTICIE », « ARTCLE », « RTICLE », « ARTTICLE », « Artice »,
+# « ARTICLES 170.- ». Meme tolerance que text_chunker._MOT_ARTICLE.
+_MOT_ARTICLE = r"[AÀ]?R[TL]{1,2}[IÍÌL1]{0,2}C{1,2}[IL1]?[ELTOÈÉÊ][ER]?S?"
 # Un vrai marqueur : le mot, un numero (ou PREMIER), puis un separateur
 _SUITE_DE_MARQUEUR = r"[ \t_]*(?:\d+|PREMIER)\S{0,4}?[ \t]*[.:\-–]"
 
-# Marqueur d'article rendu en element de liste ou numerote par Docling :
-# « - ARTICLE 12.- », « 2. ARTICLE 41.- », « . ARTICLE 31.- ». Le prefixe n'est
-# retire que devant un VRAI marqueur, numero puis separateur : un renvoi
-# (« - article 12 de la loi n° ... ») reste un element de liste.
+# Ce que Docling et l'OCR posent devant un marqueur, en debut de ligne :
+# puce ou numero de liste (« - ARTICLE 12.- », « 2. ARTICLE 41.- »,
+# « . ARTICLE 31.- », « 1 Article 1er : »), reste du filigrane www.prc.cm
+# (« ww ARTICLE 1er.- »), lettre ou symbole parasite du cachet
+# (« A ARTiCLE 1er.- », « ■ ARTiCLE 1ºr.- »). Il n'est retire que devant un
+# VRAI marqueur, numero puis separateur : un renvoi (« - article 12 de la
+# loi n° ... ») reste un element de liste.
 _PREFIXE_DE_MARQUEUR = re.compile(
-    r"^[ \t]*(?:[-*•][ \t]+|\d{1,3}[.)][ \t]+|\.[ \t]+)+"
+    r"^[ \t]*(?:(?:[-*•]|\d{1,3}[.)]?|\.|_+|[^\w\s]{1,2}|[A-Za-z]|w{2,3}|prc|cm|www\.prc\.cm)"
+    r"[ \t./]+){1,4}"
     rf"(?={_MOT_ARTICLE}{_SUITE_DE_MARQUEUR})",
     re.IGNORECASE | re.MULTILINE,
 )
+# Mot coupe par l'OCR : « ARTI CLE1er.- »
+_MOT_COUPE = re.compile(
+    r"\b(A[ \t]?R[ \t]?T[ \t]?I[ \t]?C[ \t]?L[ \t]?E)(?=[ \t_]*(?:\d|[lI]e?r\b|PREMIER))",
+    re.IGNORECASE,
+)
+# « Article ler.- » : le chiffre 1 lu comme un l
+_PREMIER_EN_L = re.compile(rf"\b({_MOT_ARTICLE}[ \t_]*)[lI](?=(?:e?r|ère)\b)", re.IGNORECASE)
 # Mot ecorche en tete d'un vrai marqueur, remis d'aplomb
 _MOT_ECORCHE = re.compile(
     rf"^([ \t]*)({_MOT_ARTICLE})(?={_SUITE_DE_MARQUEUR})", re.IGNORECASE | re.MULTILINE
@@ -163,20 +175,30 @@ def _mot_canonique(m: re.Match) -> str:
     return m.group(1) + ("ARTICLE" if mot[:3].isupper() else "Article")
 
 
+def _mot_recolle(m: re.Match) -> str:
+    mot = re.sub(r"[ \t]", "", m.group(1))
+    return mot if mot == m.group(1) else mot + " "
+
+
 def normaliser_marqueurs(text: str) -> str:
     """
     Met a plat les titres markdown et les marqueurs d'article decores.
 
     Mesure sur les sorties Docling du corpus : un marqueur d'article sur cinq
     arrivait en titre (« ## ARTICLE 2.- »), en element de liste
-    (« - ARTICLE 12.- »), numerote (« 2. ARTICLE 41.- ») ou ecorche
-    (« ARTIiCLE 81.- »), et le sommaire de la page de lecture, qui cherche
-    « Article » en debut de ligne, ne les voyait pas : leur texte se collait a
-    l'article precedent.
+    (« - ARTICLE 12.- »), numerote (« 2. ARTICLE 41.- »), precede d'un reste
+    du cachet (« ■ ARTiCLE 1ºr.- ») ou ecorche (« ARTIiCLE 81.- »,
+    « ARTI CLE1er.- », « Article ler.- »). Le sommaire de la page de lecture,
+    qui cherche « Article » en debut de ligne, ne les voyait pas, et le
+    decoupeur collait leur texte a l'article precedent — ou, pour l'article
+    1er, aux visas, hors de l'index vectoriel.
     """
     text = _TITRE_MD.sub("", text)
+    text = _MOT_COUPE.sub(_mot_recolle, text)
+    text = _PREMIER_EN_L.sub(r"\g<1>1", text)
     text = _PREFIXE_DE_MARQUEUR.sub("", text)
     text = _MOT_ECORCHE.sub(_mot_canonique, text)
+    text = re.sub(r"(?m)^([ \t]*ARTICLE)(?=\d)", r"\1 ", text, flags=re.IGNORECASE)
     return _SOULIGNE_DE_MARQUEUR.sub(r"\1 ", text)
 
 

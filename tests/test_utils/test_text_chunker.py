@@ -806,3 +806,15 @@ class TestMarqueursEcorches:
 
     def test_marqueur_en_liste_avec_separateur_reconnu(self):
         assert self.numeros("- ARTICLE 12.- (1) Texte.\n- Article 13 : Suite.") == ["12", "13"]
+
+
+def test_marqueurs_ecorches_du_corpus_reconnus():
+    """Variantes relevees sur les 13 926 pages extraites par Docling."""
+    texte = "\n".join(
+        f"{mot} {n}.- Texte de l'article {n}."
+        for n, mot in enumerate(
+            ["ARTICIE", "ARTCLE", "RTICLE", "ARTICCLE", "Articte", "ARlicLE", "Articlo", "ARTTICLE"], start=1
+        )
+    )
+    chunks = extract_articles(texte, strict=False, min_article_length=1, language="fr")
+    assert [c["number"] for c in chunks] == [str(n) for n in range(1, 9)]

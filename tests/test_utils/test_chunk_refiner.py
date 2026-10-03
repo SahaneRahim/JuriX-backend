@@ -645,3 +645,92 @@ class TestTitresEtPromulgation:
     def test_titre_seul_en_tete_hors_index(self, contexte):
         r = refine([chunk("LEGAL_BASIS", "LOI N° 2025/006 REGISSANT LA BIOSECURITE AU CAMEROUN " * 3)], contexte)
         assert r.chunks[0]["embed"] is False
+
+
+class TestArticlePremierIllisible:
+    """
+    Le marqueur « Article 1er » recouvert par le cachet : 53 documents du
+    corpus n'avaient plus AUCUN vecteur.
+    """
+
+    def test_dispositif_detache_des_visas(self, contexte):
+        visas = (
+            "LE PRESIDENT DE LA REPUBLIQUE,\n\n- Vu la Constitution ;\n"
+            "- Vu le décret n° 2011/408 du 09 décembre 2011 portant organisation du Gouvernement ;\n\n"
+            "DECRETE:\n\n"
+            "ARm o r a oun la journée du lundi 16 août 2021 est déclarée fériée sur toute l'étendue du territoire."
+        )
+        r = refine([chunk("LEGAL_BASIS", visas)], contexte)
+        par_numero = {c["number"]: c for c in r.chunks}
+        assert par_numero["LEGAL_BASIS"]["kind"] == "legal_basis"
+        assert "fériée" not in par_numero["LEGAL_BASIS"]["content"]
+        assert par_numero["DISPOSITIF"]["embed"] is True
+        assert "fériée" in par_numero["DISPOSITIF"]["content"]
+        assert r.citations == ["décret n° 2011/408"]
+
+    def test_promulgation_d_une_loi(self, contexte):
+        debut = (
+            "Loi n°2014/008 du 18 juillet 2014 autorisant le Président de la République à ratifier l'accord.\n\n"
+            "Le parlement a délibéré et adopté, le Président de la République promulgue la loi dont la teneur suit :\n\n"
+            "Areee r e rs e n sur l'encouragement et la protection réciproques des investissements, signé le 24 janvier 2007."
+        )
+        r = refine([chunk("LEGAL_BASIS", debut)], contexte)
+        par_numero = {c["number"]: c for c in r.chunks}
+        assert par_numero["LEGAL_BASIS"]["kind"] == "boilerplate"
+        assert par_numero["DISPOSITIF"]["embed"] is True
+
+    def test_mot_decrete_ampute(self, contexte):
+        visas = "- Vu la Constitution ;\n\nCRETE:\n\n" + "La convention de crédit conclue avec la banque est ratifiée. " * 2
+        r = refine([chunk("LEGAL_BASIS", visas)], contexte)
+        assert [c["number"] for c in r.chunks] == ["LEGAL_BASIS", "DISPOSITIF"]
+
+    def test_sans_decrete_apres_le_dernier_visa(self, contexte):
+        visas = (
+            "- Vu la Constitution ;\n- Vu le décret n° 2019/043 du 05 février 2019 accordant délégation ;\n\n"
+            "A d d d , les anciens Élèves-Inspecteurs de Police, dont la moyenne générale de notes obtenue "
+            "à l'examen de fin de formation est inférieure à douze, sont nommés Inspecteurs de Police stagiaires."
+        )
+        r = refine([chunk("LEGAL_BASIS", visas)], contexte)
+        assert [c["number"] for c in r.chunks] == ["LEGAL_BASIS", "DISPOSITIF"]
+
+    def test_suite_de_visa_coupee_reste_dans_les_visas(self, contexte):
+        visas = "- Vu la Constitution ;\n- Vu le décret n° 2011/408 du 09 décembre 2011\n\nportant organisation du Gouvernement ;"
+        r = refine([chunk("LEGAL_BASIS", visas)], contexte)
+        assert [c["number"] for c in r.chunks] == ["LEGAL_BASIS"]
+
+    def test_visas_suivis_d_un_vrai_article(self, contexte):
+        r = refine([chunk("LEGAL_BASIS", "- Vu la Constitution ;\n\nDECRETE :"), chunk("1", "Texte normatif de l'article premier.")], contexte)
+        assert [c["number"] for c in r.chunks] == ["LEGAL_BASIS", "1"]
+
+    def test_formule_collee_a_l_article_1(self, contexte):
+        """Marqueur de l'article 2 illisible : la formule se colle a l'article 1."""
+        contenu = (
+            "La journée du lundi 16 août 2021 est déclarée fériée sur toute l'étendue du territoire "
+            "de la République du Cameroun.\n\n"
+            "AR e e e dre d'urgence, puis inséré au Journal Officiel en français et en anglais./-"
+        )
+        r = refine([chunk("1", contenu)], contexte)
+        assert r.chunks[0]["kind"] == "article"
+        assert r.chunks[0]["embed"] is True
+
+    def test_formule_seule_reste_hors_index(self, contexte):
+        contenu = (
+            "Le présent décret sera enregistré, publié suivant la procédure d'urgence, puis inséré "
+            "au Journal Officiel en français et en anglais./-\n\nCERTIFITDTRUECOPY"
+        )
+        r = refine([chunk("2", contenu)], contexte)
+        assert r.chunks[0]["kind"] == "boilerplate"
+
+    def test_dispositif_est_un_pseudo_numero(self):
+        from app.utils.chunk_refiner import est_pseudo_numero
+
+        assert est_pseudo_numero("DISPOSITIF") and est_pseudo_numero("DISPOSITIF.2")
+
+
+@pytest.mark.parametrize("reste", [
+    "Vu le décret n° 2011/045 du 08 mars 2011 portant organisation de l'Université de Bamenda,",
+    "0 7 JUIN 2017\n\nPaix -Travail – Patrie",
+])
+def test_ce_qui_suit_decrete_sans_dispositif_reste_dans_les_visas(contexte, reste):
+    r = refine([chunk("LEGAL_BASIS", "- Vu la Constitution ;\n\nDECRETE :\n\n" + reste)], contexte)
+    assert [c["number"] for c in r.chunks] == ["LEGAL_BASIS"]

@@ -231,3 +231,43 @@ def test_mot_article_ecorche_par_l_ocr(brut, attendu):
     from app.utils.markdown_cleanup import nettoyer_markdown
 
     assert nettoyer_markdown(brut) == attendu
+
+
+@pytest.mark.parametrize("brut, attendu", [
+    ("ARTI CLE1er.- Est autorisée", "ARTICLE 1er.- Est autorisée"),
+    ("Article ler.- Sont nommés", "Article 1er.- Sont nommés"),
+    ("ARTTICLE 1ºr.- Sont approuvés", "ARTICLE 1ºr.- Sont approuvés"),
+    ("ARTICIE 18,- L'attribution", "ARTICLE 18,- L'attribution"),
+    ("Artice 1 : En application", "Article 1 : En application"),
+    ("A ARTiCLE 1er.- Le Ministre", "ARTiCLE 1er.- Le Ministre"),
+    ("1 Article 1er : Sont nommés", "Article 1er : Sont nommés"),
+    ("_ / ■ ARTiCLE 1ºr.- Est ratifié", "ARTiCLE 1ºr.- Est ratifié"),
+    ("ww ARTICLE 1ºr.- Le Président", "ARTICLE 1ºr.- Le Président"),
+])
+def test_marqueur_de_l_article_premier_ecorche(brut, attendu):
+    """
+    Le cachet et le sceau recouvrent souvent le marqueur de l'article 1er :
+    illisible, l'article partait dans les visas, hors de l'index vectoriel.
+    """
+    from app.utils.markdown_cleanup import nettoyer_markdown
+
+    assert nettoyer_markdown(brut) == attendu
+
+
+@pytest.mark.parametrize("ligne", [
+    "Vu l'Article 12 : de la loi",
+    "A la demande du ministre, article 3 :",
+    "2. Le Conseil d'administration ;",
+])
+def test_ligne_sans_marqueur_intacte(ligne):
+    from app.utils.markdown_cleanup import nettoyer_markdown
+
+    assert nettoyer_markdown(ligne) == ligne
+
+
+@pytest.mark.parametrize("cachet", [
+    "CERTIFITDTRUECOPY",
+    "CARS INDEX SERVICE COPIECTRTIFIEE CONFORME CERIIFIEGTRUECOPY",
+])
+def test_cachet_ecorche_retire(cachet):
+    assert strip_stamp_blocks("Article 2.- Texte de l'article.\n\n" + cachet) == "Article 2.- Texte de l'article."
