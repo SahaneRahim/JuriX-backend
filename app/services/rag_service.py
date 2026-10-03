@@ -90,7 +90,17 @@ def _normalize_article_number(number: str) -> str:
 
 
 # Budget de generation. Doit couvrir la reflexion du modele ET la reponse.
-ANSWER_MAX_TOKENS = 4096
+# 4096 ne suffisait pas : mesure sur « sanctions du harcelement sexuel »,
+# 2 804 jetons de reflexion pour 695 de reponse, et la meme question, posee
+# depuis l'interface, s'arretait au milieu d'une phrase — sans erreur.
+ANSWER_MAX_TOKENS = 8192
+
+# Ajoute a une reponse que le modele n'a pas pu finir : sans lui, une phrase
+# coupee ressemble a une reponse complete.
+MENTION_REPONSE_TRONQUEE = (
+    "\n\n*(Réponse interrompue : longueur maximale atteinte. "
+    "Posez une question plus précise pour obtenir la suite.)*"
+)
 
 # Budget d'une reponse conversationnelle. Deux phrases sont attendues, et
 # pourtant 2048 : la reflexion du modele est facturee sur ce budget avant la
@@ -449,6 +459,8 @@ class RAGService:
         )
         generation_time_ms = int((time.time() - generation_start) * 1000)
         answer = llm_response["response"]
+        if llm_response.get("tronquee"):
+            answer += MENTION_REPONSE_TRONQUEE
 
         # Extract citations
         citations = self._extract_citations(answer, search_results)

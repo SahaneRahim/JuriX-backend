@@ -208,6 +208,27 @@ class TestCoreFunctionality:
         rag_service.llm.generate.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_reponse_tronquee_le_dit_au_lecteur(
+        self, rag_service, sample_rag_request, mock_search_results, mock_db_session
+    ):
+        """Une phrase coupee ne doit pas passer pour une reponse complete."""
+        from app.services.rag_service import MENTION_REPONSE_TRONQUEE
+
+        recherche = MagicMock(results=[], chunks=mock_search_results, search_time_ms=1)
+        rag_service.search_service.search.return_value = recherche
+        mock_db_session.execute.return_value = MagicMock(
+            scalar_one_or_none=MagicMock(return_value=None)
+        )
+        rag_service.llm.generate.return_value = {
+            "response": "Un militaire qui abuse de sa position pour", "tronquee": True,
+        }
+
+        response = await rag_service.ask(sample_rag_request)
+
+        assert response.answer.endswith(MENTION_REPONSE_TRONQUEE)
+        assert rag_service.llm.generate.call_args.kwargs["max_tokens"] == 8192
+
+    @pytest.mark.asyncio
     async def test_ask_with_no_search_results(
         self,
         rag_service,

@@ -276,6 +276,17 @@ FORBIDDEN:
             texte = _visible_text(response)
             if texte.strip():
                 logger.info(f"✅ Generated {len(texte)} chars")
+                # Budget epuise EN COURS de reponse : le texte s'arrete au
+                # milieu d'une phrase, et rien ne le distinguait d'une reponse
+                # complete. Le drapeau laisse l'appelant le dire au lecteur.
+                if _finish_reason(response) == "MAX_TOKENS":
+                    usage = getattr(response, "usage_metadata", None)
+                    logger.warning(
+                        f"⚠️ Reponse tronquee (max_tokens={max_tokens}, reflexion="
+                        f"{getattr(usage, 'thoughts_token_count', '?')}, reponse="
+                        f"{getattr(usage, 'candidates_token_count', '?')} jetons)"
+                    )
+                    return {"response": texte, "tronquee": True}
                 return {"response": texte}
 
             # Une reponse vide a une raison, et elle est exploitable. La jeter

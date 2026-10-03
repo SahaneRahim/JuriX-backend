@@ -199,3 +199,36 @@ class TestSondeDeSante:
         ))
 
         assert (await service.health_check())["status"] == "healthy"
+
+
+class TestReponseTronquee:
+    """
+    Le budget de jetons s'epuisait EN COURS de reponse : la phrase s'arretait
+    au milieu, et rien ne la distinguait d'une reponse complete.
+    """
+
+    @staticmethod
+    def _service(reponse):
+        from app.services.gemini_service import GeminiService
+
+        service = GeminiService.__new__(GeminiService)
+        service.model_name = "modele-test"
+        service.client = SimpleNamespace(models=SimpleNamespace(generate_content=lambda **kw: reponse))
+        return service
+
+    @pytest.mark.asyncio
+    async def test_une_reponse_coupee_est_signalee(self):
+        service = self._service(_reponse([{"text": "Un militaire qui abuse de sa position pour"}],
+                                         finish="MAX_TOKENS"))
+
+        resultat = await service.generate("question", system="systeme")
+
+        assert resultat == {"response": "Un militaire qui abuse de sa position pour", "tronquee": True}
+
+    @pytest.mark.asyncio
+    async def test_une_reponse_complete_ne_l_est_pas(self):
+        service = self._service(_reponse([{"text": "Réponse complète."}]))
+
+        resultat = await service.generate("question", system="systeme")
+
+        assert "tronquee" not in resultat
