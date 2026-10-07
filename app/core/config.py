@@ -30,16 +30,21 @@ class Settings(BaseSettings):
 
     # Recherche et cache assures par PostgreSQL (tsvector, pg_trgm, query_cache).
 
-    # Gemini API (LLM for RAG)
+    # LLM Provider for Chat (RAG)
+    LLM_PROVIDER: Literal["mistral", "gemini"] = "mistral"
+
+    # Mistral AI (LLM for RAG Chat - rapide, bilingue FR/EN, sans thinking bloquant)
+    MISTRAL_API_KEY: str = ""
+    MISTRAL_MODEL: str = "ministral-14b-latest"
+    MISTRAL_TIMEOUT_S: float = 60.0
+
+    # Groq (LPU pour Routage / Système 1 ultra-rapide < 100 ms)
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "qwen/qwen3.8-27b"
+    GROQ_TIMEOUT_S: float = 10.0
+
+    # Gemini API (optionnel désormais)
     GEMINI_API_KEY: str = ""
-    # "gemini-3-flash" n'existe PAS : l'API repond 404 NOT_FOUND. Le RAG ne
-    # pouvait donc pas produire une seule reponse — chaque appel echouait avant
-    # meme d'atteindre le modele. Verifie contre ListModels sur ce compte :
-    # gemini-2.5-flash repond 404 lui aussi, seuls les modeles ci-dessous
-    # acceptent generateContent.
-    #   gemini-3-flash-preview   (retenu : le plus capable disponible ici)
-    #   gemini-3.1-flash-lite    (repli stable si l'apercu est retire)
-    #   gemini-2.5-flash-lite
     GEMINI_MODEL: str = "gemini-3-flash-preview"
     GEMINI_EMBEDDING_MODEL: str = "models/gemini-embedding-001"
     # Dimension des embeddings : 768, et aucune autre (validateur plus bas).
@@ -142,12 +147,10 @@ class Settings(BaseSettings):
     # "juridique" a chaque appel, donc un routeur qui ne route jamais, sans
     # qu'aucun test ne le voie — ils doublent tous le modele.
     INTENT_MAX_TOKENS: int = 1024
-    # « local » : rapprochement du message avec des exemples etiquetes, par
-    # EmbeddingGemma (app/services/intent_local.py) — aucun appel a Gemini,
-    # quelques dizaines de millisecondes. « gemini » : l'ancien classement
-    # par le modele, 3,6 s et une requete du quota par question. Mesure du
-    # local sur tests/fixtures/intent_eval.json : voir le test marque `gemma`.
-    INTENT_CLASSIFIER: Literal["local", "gemini"] = "local"
+    # « groq » : routage JSON ultra-rapide (< 100 ms) via Groq (LPU).
+    # « local » : rapprochement du message avec des exemples etiquetes (sans appel reseau).
+    # « gemini » : l'ancien classement par Gemini.
+    INTENT_CLASSIFIER: Literal["groq", "local", "gemini"] = "groq"
 
     # ---- Reflexion du modele (Gemini 3) ----
     # La reflexion interne fait l'essentiel du temps d'attente. MESURE sur

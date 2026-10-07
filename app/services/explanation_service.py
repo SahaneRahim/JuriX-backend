@@ -47,6 +47,12 @@ from app.services.gemini_service import (
     GeminiServiceError,
     get_gemini_service,
 )
+from app.services.mistral_service import (
+    MistralOverloadedError,
+    MistralQuotaError,
+    MistralServiceError,
+    get_mistral_service,
+)
 from app.services.prompts import (
     CONTEXT_TEMPLATE,
     EXPLAIN_TASK_TEMPLATES,
@@ -130,7 +136,12 @@ class ExplanationService:
 
     def __init__(self, db: AsyncSession, *, llm: Optional[Any] = None):
         self.db = db
-        self.llm = llm if llm is not None else get_gemini_service()
+        if llm is not None:
+            self.llm = llm
+        elif settings.LLM_PROVIDER == "mistral":
+            self.llm = get_mistral_service()
+        else:
+            self.llm = get_gemini_service()
 
     async def explain(
         self,
@@ -352,11 +363,11 @@ class ExplanationService:
                 temperature=EXPLANATION_TEMPERATURE,
                 max_tokens=EXPLANATION_MAX_TOKENS,
             )
-        except GeminiQuotaError as e:
+        except (GeminiQuotaError, MistralQuotaError) as e:
             raise ExplanationQuotaError(str(e)) from e
-        except GeminiOverloadedError as e:
+        except (GeminiOverloadedError, MistralOverloadedError) as e:
             raise ExplanationOverloadedError(str(e)) from e
-        except GeminiServiceError as e:
+        except (GeminiServiceError, MistralServiceError) as e:
             raise ExplanationError(str(e)) from e
 
         texte = (reponse or {}).get("response", "")

@@ -57,6 +57,12 @@ from app.services.gemini_service import (
     GeminiServiceError,
     get_gemini_service,
 )
+from app.services.mistral_service import (
+    MistralOverloadedError,
+    MistralQuotaError,
+    MistralServiceError,
+    get_mistral_service,
+)
 from app.services.prompts import (
     COMPARE_TASK_TEMPLATES,
     build_context_string,
@@ -179,7 +185,12 @@ class ComparisonService:
     def __init__(self, db: AsyncSession, *, llm: Optional[Any] = None):
         self.db = db
         self.search_service = SearchService(db)
-        self.llm = llm if llm is not None else get_gemini_service()
+        if llm is not None:
+            self.llm = llm
+        elif settings.LLM_PROVIDER == "mistral":
+            self.llm = get_mistral_service()
+        else:
+            self.llm = get_gemini_service()
 
     async def compare(
         self,
@@ -316,11 +327,11 @@ class ComparisonService:
                 response_mime_type="application/json",
                 response_schema=_schema_de_sortie(axes),
             )
-        except GeminiQuotaError as e:
+        except (GeminiQuotaError, MistralQuotaError) as e:
             raise ComparisonQuotaError(str(e)) from e
-        except GeminiOverloadedError as e:
+        except (GeminiOverloadedError, MistralOverloadedError) as e:
             raise ComparisonOverloadedError(str(e)) from e
-        except GeminiServiceError as e:
+        except (GeminiServiceError, MistralServiceError) as e:
             raise ComparisonError(str(e)) from e
 
         texte = (reponse or {}).get("response", "")

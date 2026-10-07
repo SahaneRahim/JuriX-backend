@@ -59,15 +59,15 @@ class TestResolveByName:
             assert name == domain
 
     def test_case_insensitive(self, scrambled_categories):
-        assert resolve_domain_id(scrambled_categories, "droit pénal") == resolve_domain_id(
-            scrambled_categories, "Droit Pénal"
+        assert resolve_domain_id(scrambled_categories, "droit pénal et procédure pénale") == resolve_domain_id(
+            scrambled_categories, "Droit Pénal et Procédure Pénale"
         )
 
     def test_unknown_domain_raises_and_lists_available(self, scrambled_categories):
         with pytest.raises(UnknownDomainError) as excinfo:
             resolve_domain_id(scrambled_categories, "Droit Martien")
         assert "Droit Martien" in str(excinfo.value)
-        assert "Droit Pénal" in str(excinfo.value)
+        assert "Droit Pénal et Procédure Pénale" in str(excinfo.value)
 
     def test_try_resolve_returns_none_instead_of_raising(self, scrambled_categories):
         assert try_resolve_domain_id(scrambled_categories, "Droit Martien") is None
@@ -90,7 +90,7 @@ class TestPipelineWritesTheRightCategory:
         ("Loi N°2023/014 portant Code Minier",
          "Droit de l'Environnement et des Ressources Naturelles"),
         ("Décret N°2018/420 portant nomination du Secrétaire Général", "Fonction Publique"),
-        ("Loi portant Code de Procédure Pénale", "Procédure Pénale"),
+        ("Loi portant Code de Procédure Pénale", "Droit Pénal et Procédure Pénale"),
         ("Décret ratifiant l'accord de prêt avec la BAD", "Finances Publiques et Fiscalité"),
     ]
 
@@ -121,7 +121,7 @@ class TestPipelineWritesTheRightCategory:
         """
         from app.tasks.process_law import _update_law_metadata
 
-        chosen = resolve_domain_id(scrambled_categories, "Droit Civil")
+        chosen = resolve_domain_id(scrambled_categories, "Droit Civil et Procédure Civile")
         proposed = resolve_domain_id(scrambled_categories, "Fonction Publique")
         law = Law(reference="REF-ADMIN", title="Décret portant nomination", type="decret",
                   content="Contenu.", language="fr", status="draft", category_id=chosen)
@@ -177,20 +177,18 @@ class TestMigrationInvariants:
     def test_duplicate_name_is_rejected(self, migrated_categories):
         from sqlalchemy.exc import IntegrityError
 
-        migrated_categories.add(Category(name="droit pénal", display_order=99))
+        migrated_categories.add(Category(name="droit pénal et procédure pénale", display_order=99))
         with pytest.raises(IntegrityError):
             migrated_categories.commit()
         migrated_categories.rollback()
 
-    def test_display_order_puts_droit_penal_before_procedure_penale(self, migrated_categories):
-        """
-        Le front resout par correspondance partielle : le slug `penal`
-        attraperait « Procédure Pénale » si celle-ci etait affichee avant.
-        """
+    def test_display_order_covers_canonical_domains(self, migrated_categories):
         rows = migrated_categories.execute(
             select(Category.name).order_by(Category.display_order)
         ).scalars().all()
-        assert rows.index("Droit Pénal") < rows.index("Procédure Pénale")
+        assert "Droit Pénal et Procédure Pénale" in rows
+        assert "Santé Publique et Sécurité Sanitaire" in rows
+        assert len(rows) == len(CANONICAL_DOMAINS)
 
     def test_no_law_is_orphaned(self, migrated_categories):
         orphans = migrated_categories.execute(text(

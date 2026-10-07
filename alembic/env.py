@@ -24,6 +24,7 @@ if config.config_file_name is not None:
 
 # add your model's MetaData object here
 # for 'autogenerate' support
+from app.core.config import settings
 from app.core.database import Base
 from app.models import (
     Article,
@@ -37,9 +38,9 @@ from app.models import (
 
 target_metadata = Base.metadata
 
-# Override sqlalchemy.url from environment variable.
+# Override sqlalchemy.url from environment variable or settings.
 # L'application parle asyncpg ; Alembic a besoin d'un pilote synchrone.
-_db_url = os.environ.get("DATABASE_URL", "")
+_db_url = os.environ.get("DATABASE_URL", "") or settings.DATABASE_URL
 if _db_url:
     # Alembic needs a sync driver: swap asyncpg with psycopg2
     _db_url = _db_url.replace("postgresql+asyncpg://", "postgresql://")

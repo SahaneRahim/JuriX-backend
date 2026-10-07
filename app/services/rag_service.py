@@ -35,6 +35,12 @@ from app.services.gemini_service import (
     GeminiServiceError,
     get_gemini_service,
 )
+from app.services.mistral_service import (
+    MistralOverloadedError,
+    MistralQuotaError,
+    MistralServiceError,
+    get_mistral_service,
+)
 from app.services.intent_classifier import (
     INTENT_JURIDIQUE,
     IntentResult,
@@ -277,7 +283,10 @@ class RAGService:
         """
         self.db = db
         self.user_id = user_id
-        self.llm = get_gemini_service()
+        if settings.LLM_PROVIDER == "mistral":
+            self.llm = get_mistral_service()
+        else:
+            self.llm = get_gemini_service()
         self.search_service = SearchService(db)
 
     async def ask(self, request: RAGRequest) -> RAGResponse:
@@ -359,18 +368,13 @@ class RAGService:
             # d'appartenance est retraduit en RAGServiceError, donc rendu en
             # 500 par la route au lieu du 404 qui ne revele rien.
             raise
-        except GeminiQuotaError as e:
+        except (GeminiQuotaError, MistralQuotaError) as e:
             logger.warning(f"⚠️ Quota de generation epuise: {e}")
             raise RAGQuotaError(str(e)) from e
-        except GeminiOverloadedError as e:
-            # Saturation passagere du fournisseur, pas une panne du produit.
-            # `GeminiServiceError` etait levee en trois endroits de
-            # gemini_service.py et attrapee NULLE PART — l'import cense la
-            # traiter dormait, inutilise, en tete de ce fichier. Une salve de
-            # 503 remontait donc en 500 avec un message technique.
+        except (GeminiOverloadedError, MistralOverloadedError) as e:
             logger.warning(f"⚠️ Generation saturee: {e}")
             raise RAGOverloadedError(str(e)) from e
-        except GeminiServiceError as e:
+        except (GeminiServiceError, MistralServiceError) as e:
             logger.error(f"❌ Erreur de generation: {e}")
             raise RAGServiceError(f"Erreur de génération: {e}") from e
         except Exception as e:
@@ -729,8 +733,8 @@ class RAGService:
         except Exception as e:
             logger.error(f"❌ Streaming error: {e}")
             code = (
-                "quota" if isinstance(e, GeminiQuotaError)
-                else "overloaded" if isinstance(e, GeminiOverloadedError)
+                "quota" if isinstance(e, (GeminiQuotaError, MistralQuotaError))
+                else "overloaded" if isinstance(e, (GeminiOverloadedError, MistralOverloadedError))
                 else "server"
             )
             yield RAGStreamChunk(

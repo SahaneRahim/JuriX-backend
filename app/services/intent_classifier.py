@@ -215,7 +215,7 @@ async def _classer_localement(question: str, history: Optional[List[Any]]) -> In
 async def classify_intent(
     question: str,
     *,
-    llm: Any,
+    llm: Optional[Any] = None,
     history: Optional[List[Any]] = None,
     timeout: Optional[float] = None,
     max_tokens: Optional[int] = None,
@@ -265,10 +265,29 @@ async def classify_intent(
     if _est_une_salutation_pure(question):
         return IntentResult("smalltalk", 1.0, "court-circuit-salutation")
 
-    # Par defaut, sans Gemini : voir intent_local.py. Une panne retombe sur
-    # « juridique », jamais sur le modele — le choix du local est precisement
-    # de ne plus depenser le quota pour classer.
-    if settings.INTENT_CLASSIFIER == "local":
+    # Mode Groq : inférence ultra-rapide (< 100 ms) via LPU avec sortie JSON stricte
+    if settings.INTENT_CLASSIFIER == "groq" and settings.GROQ_API_KEY:
+        try:
+            from app.services.groq_service import get_groq_service
+            groq_svc = get_groq_service()
+            prompt = construire_prompt_de_classification(
+                question, format_conversation_history(history or [])
+            )
+            data = await groq_svc.classify_intent_json(
+                prompt=prompt,
+                system=CLASSIFICATION_SYSTEM,
+                timeout=timeout if timeout is not None else 3.0,
+            )
+            if data and isinstance(data, dict):
+                intention = data.get("intention")
+                if intention in INTENTS:
+                    confiance = float(data.get("confiance", 0.9))
+                    return IntentResult(intention, max(0.0, min(1.0, confiance)), "groq")
+        except Exception as e:
+            logger.warning(f"🧭 Groq en échec ({e}) : repli sur classement local")
+
+    # Par defaut ou en repli : voir intent_local.py.
+    if settings.INTENT_CLASSIFIER in ("local", "groq"):
         return await _classer_localement(question, history)
 
     prompt = construire_prompt_de_classification(
