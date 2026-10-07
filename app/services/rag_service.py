@@ -34,11 +34,15 @@ from app.services.intent_classifier import (
     IntentResult,
     classify_intent,
 )
-from app.services.llm import (
+from app.services.llm import (  # noqa: F401 - mentions reexportees pour les tests
     ERREURS_LLM,
     ERREURS_QUOTA,
     ERREURS_SATURATION,
+    MENTION_REPONSE_INTERROMPUE,
+    MENTION_REPONSE_TRONQUEE,
     get_llm_service,
+    mention_de_fin,
+    mention_de_reponse,
 )
 from app.services.postgres_search_service import escape_like
 from app.services.prompts import (
@@ -94,13 +98,6 @@ def _normalize_article_number(number: str) -> str:
 # 2 804 jetons de reflexion pour 695 de reponse, et la meme question, posee
 # depuis l'interface, s'arretait au milieu d'une phrase — sans erreur.
 ANSWER_MAX_TOKENS = 8192
-
-# Ajoute a une reponse que le modele n'a pas pu finir : sans lui, une phrase
-# coupee ressemble a une reponse complete.
-MENTION_REPONSE_TRONQUEE = (
-    "\n\n*(Réponse interrompue : longueur maximale atteinte. "
-    "Posez une question plus précise pour obtenir la suite.)*"
-)
 
 # Budget d'une reponse conversationnelle. Deux phrases sont attendues, et
 # pourtant 2048 : la reflexion du modele est facturee sur ce budget avant la
@@ -460,9 +457,7 @@ class RAGService:
             max_tokens=ANSWER_MAX_TOKENS, reflexion=settings.GEMINI_REFLEXION_REPONSE,
         )
         generation_time_ms = int((time.time() - generation_start) * 1000)
-        answer = llm_response["response"]
-        if llm_response.get("tronquee"):
-            answer += MENTION_REPONSE_TRONQUEE
+        answer = llm_response["response"] + mention_de_reponse(llm_response)
 
         # Extract citations
         citations = self._extract_citations(answer, search_results)
@@ -529,7 +524,9 @@ class RAGService:
             max_tokens=CONVERSATION_MAX_TOKENS, reflexion=settings.GEMINI_REFLEXION_REPONSE,
         )
         generation_time_ms = int((time.time() - generation_start) * 1000)
-        answer = llm_response["response"]
+        # Deux phrases attendues, mais un budget de jetons tout de meme : une
+        # reponse coupee le dit, ici comme ailleurs.
+        answer = llm_response["response"] + mention_de_reponse(llm_response)
 
         # `_calculate_confidence` n'est PAS appele : ses quatre facteurs
         # mesurent l'ancrage documentaire d'une reponse (citations, pertinence
@@ -695,12 +692,12 @@ class RAGService:
                 answer_parts.append(chunk)
                 yield RAGStreamChunk(chunk=chunk, done=False).model_dump_json(exclude_none=True)
 
-            # Une reponse coupee par le budget le dit, comme dans `ask`
-            if raison.get("fin") == "MAX_TOKENS":
-                answer_parts.append(MENTION_REPONSE_TRONQUEE)
-                yield RAGStreamChunk(
-                    chunk=MENTION_REPONSE_TRONQUEE, done=False
-                ).model_dump_json(exclude_none=True)
+            # Une reponse restee incomplete le dit, comme dans `ask` : coupee
+            # par le budget malgre la suite demandee, ou flux rompu.
+            mention = mention_de_fin(raison.get("fin"))
+            if mention:
+                answer_parts.append(mention)
+                yield RAGStreamChunk(chunk=mention, done=False).model_dump_json(exclude_none=True)
 
             generation_time_ms = int((time.time() - generation_start) * 1000)
 

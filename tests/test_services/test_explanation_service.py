@@ -386,3 +386,16 @@ class TestEchecsDuModele:
 
         with pytest.raises(ExplanationError):
             await service.explain(loi.id, "2", "fr")
+
+    async def test_explication_coupee_le_dit(self, db_session, loi, llm):
+        """Sa derniere phrase, inachevee, passerait pour la fin du raisonnement."""
+        from app.services.llm import MENTION_REPONSE_TRONQUEE
+
+        llm.generate.return_value = {
+            "response": "**En clair**\n\nCet article impose", "tronquee": True, "fin": "MAX_TOKENS",
+        }
+        service = ExplanationService(db_session, llm=llm)
+
+        reponse = await service.explain(loi.id, "2", "fr")
+
+        assert reponse.explanation.endswith(MENTION_REPONSE_TRONQUEE)

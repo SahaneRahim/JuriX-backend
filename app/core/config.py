@@ -36,7 +36,26 @@ class Settings(BaseSettings):
     # Mistral AI (LLM for RAG Chat - rapide, bilingue FR/EN, sans thinking bloquant)
     MISTRAL_API_KEY: str = ""
     MISTRAL_MODEL: str = "ministral-14b-latest"
+    # Modele de secours, essaye une fois quand le principal reste en 429 :
+    # meme famille, six fois plus de requetes permises (188 par minute).
+    # Vide : pas de secours.
+    MISTRAL_MODEL_SECOURS: str = "ministral-8b-latest"
+    # Delai d'une reponse entiere (hors flux) : au moins cette valeur, et
+    # 20 s + 1 s par 40 jetons demandes au-dela (225 s pour 8 192 jetons).
+    # En flux : delai maximal entre deux morceaux.
     MISTRAL_TIMEOUT_S: float = 60.0
+    # Debit du palier gratuit (verifie le 07/10/2026) : 30 requetes par minute
+    # pour ministral-14b, 188 pour ministral-8b. Le limiteur espace les
+    # departs plutot que de collectionner les 429.
+    MISTRAL_REQUETES_PAR_SECONDE: float = 0.5
+    MISTRAL_REQUETES_PAR_SECONDE_SECOURS: float = 3.0
+    # Generations simultanees au plus (un flux occupe sa place jusqu'au bout).
+    MISTRAL_CONCURRENCE: int = 4
+    # Attente totale acceptee, limiteur et 429 compris, avant de rendre
+    # « service sature, reessayez » (503).
+    MISTRAL_ATTENTE_MAX_S: float = 20.0
+    # Jetons de la suite demandee quand une reponse est coupee (une seule).
+    MISTRAL_JETONS_SUITE: int = 2048
 
     # Groq (LPU pour Routage / Système 1 ultra-rapide < 100 ms)
     GROQ_API_KEY: str = ""

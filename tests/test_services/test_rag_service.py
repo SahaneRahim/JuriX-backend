@@ -669,6 +669,22 @@ class TestRoutageIntention:
         assert reponse.intent == "smalltalk"
 
     @pytest.mark.asyncio
+    async def test_reponse_conversationnelle_coupee_le_dit(
+        self, rag_service, sample_rag_request, conversation_neuve, smalltalk
+    ):
+        """Le budget conversationnel est court : une phrase coupee le dit aussi ici."""
+        from app.services.rag_service import MENTION_REPONSE_TRONQUEE
+
+        rag_service.llm.generate.return_value = {
+            "response": "Je vais bien, merci. Je suis là pour", "tronquee": True,
+            "fin": "MAX_TOKENS",
+        }
+
+        reponse = await rag_service.ask(sample_rag_request)
+
+        assert reponse.answer.endswith(MENTION_REPONSE_TRONQUEE)
+
+    @pytest.mark.asyncio
     async def test_smalltalk_utilise_le_prompt_conversationnel(
         self, rag_service, sample_rag_request, conversation_neuve, smalltalk
     ):
@@ -944,6 +960,32 @@ class TestFluxAligneSurAsk:
         texte = "".join(e["chunk"] for e in evenements)
         assert texte.endswith(MENTION_REPONSE_TRONQUEE)
         assert evenements[-1]["done"] is True
+
+    @pytest.mark.asyncio
+    async def test_flux_rompu_signale_autrement(
+        self, rag_service, sample_rag_request, mock_search_results, mock_db_session
+    ):
+        """Coupee par la connexion, pas par sa longueur : la mention le dit."""
+        from app.services.llm import FIN_INTERROMPUE
+        from app.services.rag_service import MENTION_REPONSE_INTERROMPUE
+
+        self._preparer(rag_service, mock_db_session, mock_search_results,
+                       ["Un militaire qui abuse "], raison=FIN_INTERROMPUE)
+
+        evenements = await self._evenements(rag_service, sample_rag_request)
+
+        texte = "".join(e["chunk"] for e in evenements)
+        assert texte.endswith(MENTION_REPONSE_INTERROMPUE)
+
+    @pytest.mark.asyncio
+    async def test_reponse_complete_sans_mention(
+        self, rag_service, sample_rag_request, mock_search_results, mock_db_session
+    ):
+        self._preparer(rag_service, mock_db_session, mock_search_results, ["Réponse."])
+
+        evenements = await self._evenements(rag_service, sample_rag_request)
+
+        assert "".join(e["chunk"] for e in evenements) == "Réponse."
 
     @pytest.mark.asyncio
     async def test_meme_budget_et_reflexion_que_ask(

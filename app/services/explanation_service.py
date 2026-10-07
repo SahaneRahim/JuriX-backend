@@ -46,6 +46,7 @@ from app.services.llm import (
     ERREURS_QUOTA,
     ERREURS_SATURATION,
     get_llm_service,
+    mention_de_reponse,
 )
 from app.services.prompts import (
     CONTEXT_TEMPLATE,
@@ -365,4 +366,6 @@ class ExplanationService:
         texte = (reponse or {}).get("response", "")
         if not texte.strip():
             raise ExplanationError("Le modèle n'a produit aucune explication.")
-        return texte
+        # Une explication coupee le dit : sinon sa derniere phrase, inachevee,
+        # passerait pour la fin du raisonnement.
+        return texte + mention_de_reponse(reponse)

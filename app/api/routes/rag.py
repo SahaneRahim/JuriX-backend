@@ -454,7 +454,7 @@ async def health_check(rag_service: RAGService = Depends(get_rag_service)) -> di
         "search_service": "unknown",
     }
 
-    # Test LLM (Gemini - TODO: implement)
+    # Sonde du service de generation : sans generer (GET des modeles, en cache).
     if rag_service.llm is not None:
         try:
             llm_health = await rag_service.llm.health_check()
