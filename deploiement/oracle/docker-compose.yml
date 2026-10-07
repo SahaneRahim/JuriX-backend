@@ -1,0 +1,96 @@
+# JuriX en production sur UNE machine : une VM ARM d'Oracle Cloud (palier
+# « Always Free » : 2 coeurs, 12 Go de memoire, 200 Go de disque).
+#
+# Trois conteneurs :
+#   db     PostgreSQL 16 + pgvector. Aucun port publie : seule l'API le voit.
+#   api    l'image du Dockerfile du depot (FastAPI, EmbeddingGemma en memoire).
+#   caddy  le seul expose (80 et 443) : certificats HTTPS automatiques, front
+#          statique, et l'API sous /api sur le MEME domaine (pas de CORS).
+#
+# Lancement, depuis ce dossier :
+#   docker compose up -d --build
+# Voir README.md pour le premier deploiement et les mises a jour.
+
+name: jurix
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jurix
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?renseigner POSTGRES_PASSWORD dans .env}
+      POSTGRES_DB: jurix
+    # Reglages pour 12 Go partages avec l'API (le modele en prend ~1,5).
+    command: >
+      postgres
+      -c shared_buffers=1GB
+      -c effective_cache_size=4GB
+      -c maintenance_work_mem=512MB
+      -c max_connections=60
+    # L'index HNSW se construit en memoire partagee : les 64 Mo par defaut de
+    # Docker faisaient echouer sa reconstruction (« could not resize shared
+    # memory segment »), observe en developpement.
+    shm_size: 1gb
+    volumes:
+      - db:/var/lib/postgresql/data
+      - ./sauvegardes:/sauvegardes
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jurix -d jurix"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    mem_limit: 4g
+
+  api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # La base est le conteneur voisin ; le reseau interne n'a pas de TLS.
+      DATABASE_URL: postgresql+asyncpg://jurix:${POSTGRES_PASSWORD}@db:5432/jurix
+      PGSSLMODE: disable
+      GEMMA_MODEL_DIR: /app/modeles/embeddinggemma-300m-onnx
+    volumes:
+      # Le modele n'est pas dans l'image (500 Mo) : monte en lecture seule.
+      - ./modeles/embeddinggemma-300m-onnx:/app/modeles/embeddinggemma-300m-onnx:ro
+      # Les PDF d'origine (visionneuse, telechargement), et les envois futurs.
+      - ./donnees/uploads:/app/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # Chargement du modele et migrations au demarrage.
+      start_period: 120s
+    mem_limit: 5g
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      JURIX_DOMAINE: ${JURIX_DOMAINE:?renseigner JURIX_DOMAINE dans .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./front:/srv/front:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    mem_limit: 256m
+
+volumes:
+  db:
+  caddy_data:
+  caddy_config:

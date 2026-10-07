@@ -46,7 +46,9 @@ nul
 pyrefly.toml
 
 # Docker
-*.dockerignore
+# .dockerignore n'est PAS ignore : c'est lui qui tient le .env et les donnees
+# hors de l'image. Ignore, il manquait a tout checkout ou `git archive` — le
+# build sur la VM aurait embarque les secrets de production.
 
 # OS
 .DS_Store

@@ -1,0 +1,41 @@
+# Un seul domaine pour tout JuriX : le front et l'API, servis par la meme VM.
+# Caddy obtient et renouvelle seul le certificat HTTPS (Let's Encrypt) des que
+# le DNS du domaine pointe sur la VM et que les ports 80 et 443 sont ouverts.
+
+{$JURIX_DOMAINE} {
+	encode zstd gzip
+
+	# L'API, sous /api/v1, et sa sonde. Meme origine que le front : aucun CORS.
+	# flush_interval -1 : les reponses du chat arrivent en flux (SSE), mot apres
+	# mot ; mises en tampon, elles n'apparaitraient qu'a la fin.
+	handle /api/* {
+		reverse_proxy api:8000 {
+			flush_interval -1
+		}
+	}
+	handle /health {
+		reverse_proxy api:8000
+	}
+
+	# Le front statique (application monopage) : toute route inconnue rend
+	# index.html, sans quoi un lien profond (/laws/123) repondrait 404.
+	handle {
+		root * /srv/front
+		try_files {path} {path}/ /index.html
+		file_server
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output file /data/acces.log {
+			roll_size 20MiB
+			roll_keep 5
+		}
+	}
+}

@@ -1,0 +1,55 @@
+# Ce qui ne doit JAMAIS entrer dans l'image.
+#
+# .env en tete : le COPY . . du Dockerfile l'embarquait dans une couche, donc
+# les cles Gemini et LlamaParse etaient lisibles par quiconque peut telecharger
+# l'image. Les secrets se passent par variables d'environnement au deploiement.
+.env
+.env.*
+!.env.example
+
+# Historique et outils de developpement
+.git
+.gitignore
+.github
+*.md
+!README.md
+
+# Environnements et caches Python
+.venv
+venv
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+htmlcov
+.coverage
+coverage.xml
+
+# Donnees locales : uploads, cache OCR, sorties de mesure. Volumineux et
+# specifiques a une machine.
+data/
+logs/
+*.log
+
+# Tests et harnais de mesure : inutiles dans une image de production, et
+# tests/fixtures/ contient le jeu d'evaluation.
+tests/
+scripts/eval/
+
+# Modeles telecharges dans l'image elle-meme (voir le Dockerfile)
+models/fasttext/*.bin
+models/embeddinggemma-300m-onnx/
+
+# Deploiement : le .env de production (les secrets), le front construit, les
+# PDF et les sauvegardes vivent sous deploiement/oracle sur la VM. Le COPY . .
+# du Dockerfile les aurait embarques dans l'image ; « .env » plus haut ne vise
+# que la racine.
+deploiement/
+
+# Divers
+.DS_Store
+Thumbs.db
+.vscode
+.idea
