@@ -23,6 +23,7 @@ import pytest
 from app.models.law import Article, Law
 from app.schemas.search import SearchFilters, SearchRequest
 from app.services.embedding_service import EmbeddingService
+from app.services.legal_domain_classifier import CIVIL
 from app.services.postgres_search_service import search_articles_pg, search_laws_pg
 from app.services.search_service import SearchService
 from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
@@ -50,7 +51,7 @@ async def corpus(db_session, category_ids):
         type="loi",
         language="fr",
         status="published",
-        category_id=category_ids["Droit Civil"],
+        category_id=category_ids[CIVIL],
         publication_date=date(2024, 5, 1),
     )
     draft = Law(
@@ -61,7 +62,7 @@ async def corpus(db_session, category_ids):
         type="loi",
         language="fr",
         status="draft",
-        category_id=category_ids["Droit Civil"],
+        category_id=category_ids[CIVIL],
         publication_date=date(2025, 1, 10),
     )
     db_session.add_all([published, draft])
@@ -548,7 +549,7 @@ class TestTermesRaresDAbord:
         db_session.add(Law(
             id=300, reference="LOI-2016-007", title="Code pénal", content="Code pénal.",
             type="loi", language="fr", status="published",
-            category_id=category_ids["Droit Civil"], publication_date=date(2016, 7, 12),
+            category_id=category_ids[CIVIL], publication_date=date(2016, 7, 12),
         ))
         await db_session.flush()
         etudiants = (

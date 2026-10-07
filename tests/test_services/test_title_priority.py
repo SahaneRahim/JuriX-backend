@@ -29,6 +29,7 @@ import pytest
 
 from app.models.law import Article, Law
 from app.schemas.search import SearchRequest
+from app.services.legal_domain_classifier import AFFAIRES
 from app.services.postgres_search_service import (
     MAX_CHUNKS_PER_LAW,
     search_articles_pg,
@@ -66,7 +67,7 @@ async def ranking_corpus(db_session, category_ids):
             content=("La nomination des dirigeants, la nomination du président et "
                      "la nomination des commissaires obéissent aux statuts."),
             type="décret", language="fr", status="published",
-            category_id=category_ids["Droit des Affaires et OHADA"],
+            category_id=category_ids[AFFAIRES],
             publication_date=date(2024, 2, 1 + offset),
         ))
     db_session.add_all(laws)

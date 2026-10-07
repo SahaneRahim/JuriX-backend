@@ -10,6 +10,7 @@ from app.services.category_service import (
     CategoryService,
     DuplicateCategoryNameError,
 )
+from app.services.legal_domain_classifier import CANONICAL_DOMAINS, CIVIL, PENAL
 
 
 class TestCreateCategory:
@@ -35,14 +36,14 @@ class TestCreateCategory:
     async def test_create_category_duplicate_name(self, db_session: AsyncSession):
         """Test creating category with duplicate name fails."""
         service = CategoryService(db_session)
-        category_data = CategoryCreate(name="Droit Civil", description="Test")
+        category_data = CategoryCreate(name=CIVIL, description="Test")
 
-        # "Droit Civil" should already exist in seed data
+        # CIVIL existe deja : db_session seme les 14 domaines canoniques
         with pytest.raises(DuplicateCategoryNameError) as exc_info:
             await service.create_category(category_data)
 
         assert "already exists" in str(exc_info.value).lower()
-        assert "Droit Civil" in str(exc_info.value)
+        assert CIVIL in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_create_category_empty_name(self, db_session: AsyncSession):
@@ -108,7 +109,7 @@ class TestListCategories:
         result = await service.list_categories()
 
         # Should have at least the 12 seed categories
-        assert len(result) >= 12
+        assert len(result) >= len(CANONICAL_DOMAINS)
         assert all(hasattr(cat, "id") for cat in result)
         assert all(hasattr(cat, "name") for cat in result)
 
@@ -282,13 +283,13 @@ class TestCategoryMapping:
 
         # Should be a dict with int keys and string values
         assert isinstance(mapping, dict)
-        assert len(mapping) >= 12  # At least seed categories
+        assert len(mapping) >= len(CANONICAL_DOMAINS)  # At least seed categories
         assert all(isinstance(k, int) for k in mapping.keys())
         assert all(isinstance(v, str) for v in mapping.values())
 
         # Should include known categories
-        assert "Droit Civil" in mapping.values()
-        assert "Droit Pénal" in mapping.values()
+        assert CIVIL in mapping.values()
+        assert PENAL in mapping.values()
 
     @pytest.mark.asyncio
     async def test_get_reverse_category_mapping(self, db_session: AsyncSession):
@@ -299,13 +300,13 @@ class TestCategoryMapping:
 
         # Should be a dict with string keys and int values
         assert isinstance(mapping, dict)
-        assert len(mapping) >= 12  # At least seed categories
+        assert len(mapping) >= len(CANONICAL_DOMAINS)  # At least seed categories
         assert all(isinstance(k, str) for k in mapping.keys())
         assert all(isinstance(v, int) for v in mapping.values())
 
         # Should include known categories
-        assert "Droit Civil" in mapping.keys()
-        assert "Droit Pénal" in mapping.keys()
+        assert CIVIL in mapping.keys()
+        assert PENAL in mapping.keys()
 
     @pytest.mark.asyncio
     async def test_get_category_by_name(self, db_session: AsyncSession):
@@ -313,9 +314,9 @@ class TestCategoryMapping:
         service = CategoryService(db_session)
 
         # Test with existing category
-        result = await service.get_category_by_name("Droit Civil")
+        result = await service.get_category_by_name(CIVIL)
         assert result is not None
-        assert result.name == "Droit Civil"
+        assert result.name == CIVIL
 
         # Test with non-existent category
         result = await service.get_category_by_name("Non Existent Category")
@@ -373,7 +374,7 @@ class TestCategoryStats:
         stats_list = await service.get_all_category_stats()
 
         # Should have stats for all categories
-        assert len(stats_list) >= 12
+        assert len(stats_list) >= len(CANONICAL_DOMAINS)
 
         # All stats should have valid data
         for stats in stats_list:
@@ -452,7 +453,7 @@ class TestPrivateHelpers:
         service = CategoryService(db_session)
 
         with pytest.raises(DuplicateCategoryNameError):
-            await service._validate_unique_name("Droit Civil")
+            await service._validate_unique_name(CIVIL)
 
     @pytest.mark.asyncio
     async def test_validate_unique_name_with_exclusion(self, db_session: AsyncSession):

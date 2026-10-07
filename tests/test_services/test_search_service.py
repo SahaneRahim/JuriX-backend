@@ -32,6 +32,7 @@ from app.schemas.search import (
     SearchResponse,
 )
 from app.services.embedding_service import EmbeddingService
+from app.services.legal_domain_classifier import AFFAIRES, CIVIL, PENAL
 from app.services.search_service import (
     # NOTE: les fixtures db_engine / db_session locales (SQLite en memoire) ont ete
     # retirees. Elles masquaient celles de conftest.py et testaient un moteur qui ne
@@ -107,9 +108,9 @@ async def sample_data(db_session, category_ids):
     Lois et articles d'exemple.
 
     Les categories ne sont plus creees ici : la fixture db_session de conftest
-    seme deja les 12 categories de reference avec les ids 1 a 12. Les reinserer
-    avec des ids explicites provoquait une violation de contrainte d'unicite au
-    setup de chaque test de ce fichier.
+    seme deja les 14 domaines canoniques, et `category_ids` donne leurs ids.
+    Les reinserer provoquait une violation de contrainte d'unicite au setup de
+    chaque test de ce fichier.
     """
     await db_session.flush()
 
@@ -123,7 +124,7 @@ async def sample_data(db_session, category_ids):
             type="loi",
             language="fr",
             status="published",
-            category_id=category_ids["Droit Civil"],
+            category_id=category_ids[CIVIL],
             publication_date=date(2024, 1, 15),
             created_at=datetime(2024, 1, 15, 10, 0, 0)
         ),
@@ -135,7 +136,7 @@ async def sample_data(db_session, category_ids):
             type="loi",
             language="fr",
             status="published",
-            category_id=category_ids["Droit Pénal"],
+            category_id=category_ids[PENAL],
             publication_date=date(2024, 2, 20),
             created_at=datetime(2024, 2, 20, 10, 0, 0)
         ),
@@ -147,7 +148,7 @@ async def sample_data(db_session, category_ids):
             type="law",
             language="en",
             status="published",
-            category_id=category_ids["Droit des Affaires et OHADA"],
+            category_id=category_ids[AFFAIRES],
             publication_date=date(2024, 3, 10),
             created_at=datetime(2024, 3, 10, 10, 0, 0)
         ),

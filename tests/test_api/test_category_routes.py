@@ -3,6 +3,8 @@
 import pytest
 from httpx import AsyncClient
 
+from app.services.legal_domain_classifier import CANONICAL_DOMAINS, CIVIL
+
 
 class TestCreateCategoryAPI:
     """Tests for POST /api/v1/categories endpoint."""
@@ -62,7 +64,7 @@ class TestListCategoriesAPI:
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
-        assert len(data) >= 12  # At least seed categories
+        assert len(data) >= len(CANONICAL_DOMAINS)  # At least seed categories
 
         # Check structure
         if len(data) > 0:
@@ -264,7 +266,7 @@ class TestCategoryStatsAPI:
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
-        assert len(data) >= 12
+        assert len(data) >= len(CANONICAL_DOMAINS)
 
         # Check structure
         for stats in data:
@@ -295,7 +297,7 @@ class TestCategoryMappingAPI:
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, dict)
-        assert len(data) >= 12
+        assert len(data) >= len(CANONICAL_DOMAINS)
 
         # Keys should be stringified integers, values should be strings
         for key, value in data.items():
@@ -303,7 +305,7 @@ class TestCategoryMappingAPI:
             assert isinstance(value, str)
 
         # Should include known categories
-        assert "Droit Civil" in data.values()
+        assert CIVIL in data.values()
 
     @pytest.mark.asyncio
     async def test_get_name_to_id_mapping(self, client: AsyncClient):
@@ -313,7 +315,7 @@ class TestCategoryMappingAPI:
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, dict)
-        assert len(data) >= 12
+        assert len(data) >= len(CANONICAL_DOMAINS)
 
         # Keys should be strings, values should be integers
         for key, value in data.items():
@@ -321,7 +323,7 @@ class TestCategoryMappingAPI:
             assert isinstance(value, int)
 
         # Should include known categories
-        assert "Droit Civil" in data.keys()
+        assert CIVIL in data.keys()
 
     @pytest.mark.asyncio
     async def test_mapping_consistency(self, client: AsyncClient):

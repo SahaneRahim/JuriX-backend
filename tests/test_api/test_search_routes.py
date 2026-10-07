@@ -22,6 +22,7 @@ from fastapi import status
 
 from app.main import app
 from app.models.law import Article, Law
+from app.services.legal_domain_classifier import CIVIL, PENAL
 
 # NOTE: les fixtures db_engine / db_session locales (SQLite en memoire) ont ete
 # retirees. Elles masquaient celles de conftest.py et testaient un moteur qui ne
@@ -57,7 +58,7 @@ async def sample_laws(db_session, category_ids):
             type="loi",
             language="fr",
             status="published",
-            category_id=category_ids["Droit Civil"],
+            category_id=category_ids[CIVIL],
             publication_date=date(2024, 1, 15),
             created_at=datetime(2024, 1, 15, 10, 0, 0)
         ),
@@ -69,7 +70,7 @@ async def sample_laws(db_session, category_ids):
             type="loi",
             language="fr",
             status="published",
-            category_id=category_ids["Droit Pénal"],
+            category_id=category_ids[PENAL],
             publication_date=date(2024, 2, 20),
             created_at=datetime(2024, 2, 20, 10, 0, 0)
         ),
@@ -139,7 +140,7 @@ def mock_search_service():
                 language="fr",
                 status="published",
                 category_id=1,
-                category_name="Droit Civil",
+                category_name=CIVIL,
                 publication_date=date(2024, 1, 15),
                 relevance_score=0.95,
                 matched_articles=[],
