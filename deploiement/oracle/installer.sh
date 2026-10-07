@@ -42,16 +42,22 @@ if ! swapon --show | grep -q /swapfile; then
 fi
 
 echo "== 4. Dossiers des donnees"
-mkdir -p donnees/uploads modeles sauvegardes front
+# Le dossier du modele existe AVANT tout `docker compose up` : sinon Docker le
+# cree, en root, et l'envoi du modele echoue ensuite sur un refus d'acces.
+mkdir -p donnees/uploads modeles/embeddinggemma-300m-onnx sauvegardes front
 # L'API tourne sous l'utilisateur 1000 dans son conteneur : elle doit pouvoir
 # ecrire les PDF envoyes.
 sudo chown -R 1000:1000 donnees
 
 echo "== 5. Sauvegarde quotidienne de la base (03:15)"
 ligne="15 3 * * * cd $(pwd) && bash sauvegarde.sh >> sauvegardes/sauvegarde.log 2>&1"
-( crontab -l 2>/dev/null | grep -v 'sauvegarde.sh' ; echo "$ligne" ) | crontab -
+# `|| true` : sans crontab (VM neuve), `crontab -l` et `grep -v` echouent, et
+# sous `set -e` le sous-shell s'arretait avant d'ecrire la ligne — installant
+# une crontab VIDE, puis faisant echouer tout le script.
+{ crontab -l 2>/dev/null | grep -v 'sauvegarde.sh' || true; echo "$ligne"; } | crontab -
 
 echo
-echo "Pret. Se deconnecter puis se reconnecter (groupe docker), puis :"
-echo "  cp env.production.exemple .env   # et le renseigner"
-echo "  docker compose up -d --build"
+echo "VM prete. Suite (README §4) :"
+echo "  1. cp env.production.exemple .env, puis le renseigner ;"
+echo "  2. depuis la machine de developpement : deployer.sh ... --avec-donnees"
+echo "Ne pas lancer docker compose a la main avant : l'envoi des donnees vient d'abord."

@@ -84,6 +84,33 @@ async def test_secret_key_par_defaut_refuse_le_demarrage_hors_developpement():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cle", ["a-generer", "generate-a-strong-random-key-here", "trop-courte"])
+async def test_une_cle_publiee_ou_courte_refuse_le_demarrage(cle):
+    """
+    Le modele du .env de production (« a-generer ») passait le garde-fou, qui
+    ne connaissait que la valeur de developpement : oublie, il publiait la cle
+    de signature des jetons.
+    """
+    from app.core.config import settings
+    from app.main import lifespan
+
+    environnement, secret = settings.ENVIRONMENT, settings.SECRET_KEY
+    settings.ENVIRONMENT, settings.SECRET_KEY = "production", cle
+    try:
+        with pytest.raises(RuntimeError, match="SECRET_KEY refusée"):
+            async with lifespan(app):
+                pass
+    finally:
+        settings.ENVIRONMENT, settings.SECRET_KEY = environnement, secret
+
+
+def test_une_vraie_cle_est_acceptee():
+    from app.main import _secret_key_refusee
+
+    assert _secret_key_refusee("3f" * 32) == ""
+
+
+@pytest.mark.asyncio
 async def test_le_demarrage_precharge_le_modele_d_embeddings(monkeypatch):
     """
     Le modele d'embeddings est charge AVANT que l'API n'accepte de requete.

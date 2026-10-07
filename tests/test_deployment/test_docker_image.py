@@ -47,12 +47,32 @@ class TestBuildContext:
             "Sans .dockerignore, COPY . . embarque .env dans l'image."
         )
 
-    @pytest.mark.parametrize("pattern", [".env", ".git", ".venv", "data/", "tests/"])
+    @pytest.mark.parametrize("pattern", [".env", ".git", ".venv", "data/", "tests/", "deploiement/"])
     def test_excludes_what_must_not_ship(self, pattern):
         content = DOCKERIGNORE_PATH.read_text(encoding="utf-8")
         lines = {line.strip() for line in content.splitlines()}
 
         assert pattern in lines, f"{pattern} devrait etre exclu du contexte de build"
+
+    def test_dockerignore_est_versionne(self):
+        """
+        Il etait ignore par le .gitignore (*.dockerignore) : absent de tout
+        checkout et de `git archive`, il ne protegeait que la machine ou il
+        avait ete ecrit. Le build sur la VM aurait embarque le .env de
+        production.
+        """
+        import subprocess
+
+        try:
+            resultat = subprocess.run(
+                ["git", "check-ignore", "-q", ".dockerignore"], cwd=ROOT, capture_output=True
+            )
+        except FileNotFoundError:
+            pytest.skip("git absent")
+        if resultat.returncode == 128:
+            pytest.skip("hors d'un depot git")
+
+        assert resultat.returncode == 1, ".dockerignore est ignore par git"
 
     def test_env_example_stays_included(self):
         """Le modele de configuration, lui, doit rester : il documente les cles."""
@@ -71,3 +91,7 @@ class TestStartup:
 
     def test_runs_as_a_non_root_user(self):
         assert "USER jurix" in DOCKERFILE
+
+    def test_pas_de_journal_d_acces(self):
+        """Il ecrivait le jeton d'administration du WebSocket (?token=...) en clair."""
+        assert "--no-access-log" in DOCKERFILE

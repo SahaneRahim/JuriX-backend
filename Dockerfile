@@ -84,4 +84,9 @@ ENV PYTHONUNBUFFERED=1 \
 # par uvicorn, qui recoit alors le signal directement.
 #
 # Le shell reste necessaire pour `&&` et pour l'expansion de ${PORT}.
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level info"]
+#
+# --no-access-log : le journal d'acces d'uvicorn ecrit l'URL entiere, chaine de
+# requete comprise. Or le WebSocket de l'envoi par lots porte le jeton
+# d'administration dans l'URL (?token=...) : il finissait en clair dans
+# `docker compose logs`. L'application journalise elle-meme ce qui compte.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level info --no-access-log"]

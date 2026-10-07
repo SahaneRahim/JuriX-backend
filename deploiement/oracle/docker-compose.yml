@@ -36,7 +36,11 @@ services:
       - db:/var/lib/postgresql/data
       - ./sauvegardes:/sauvegardes
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U jurix -d jurix"]
+      # Par TCP : a sa premiere initialisation, l'image demarre un serveur
+      # temporaire qui n'ecoute que sur le socket ; pg_isready par defaut le
+      # prendrait pour le vrai, et l'API migrerait un serveur sur le point de
+      # s'arreter.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U jurix -d jurix"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -82,7 +86,9 @@ services:
     environment:
       JURIX_DOMAINE: ${JURIX_DOMAINE:?renseigner JURIX_DOMAINE dans .env}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Le DOSSIER, pas le fichier : un fichier monte seul garde l'ancienne
+      # version quand une mise a jour le remplace.
+      - ./caddy:/etc/caddy:ro
       - ./front:/srv/front:ro
       - caddy_data:/data
       - caddy_config:/config

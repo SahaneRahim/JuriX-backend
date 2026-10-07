@@ -32,10 +32,8 @@
 		-Server
 	}
 
-	log {
-		output file /data/acces.log {
-			roll_size 20MiB
-			roll_keep 5
-		}
-	}
+	# Pas de journal d'acces : il ecrirait les URL entieres, dont le jeton
+	# d'administration du WebSocket (?token=...) et les liens de
+	# reinitialisation de mot de passe. Les erreurs de Caddy restent dans
+	# `docker compose logs caddy`.
 }

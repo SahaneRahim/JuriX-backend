@@ -80,7 +80,9 @@ export JURIX_DOMAINE=jurix.exemple.cm
 git archive HEAD | ssh -i ~/.ssh/jurix_oracle ubuntu@$IP "mkdir -p jurix && tar -x -C jurix"
 ssh -i ~/.ssh/jurix_oracle ubuntu@$IP "bash jurix/deploiement/oracle/installer.sh"
 
-# b. Les secrets, SUR la VM uniquement
+# b. Les secrets, SUR la VM uniquement : domaine, mot de passe de la base et
+#    SECRET_KEY (openssl rand -hex 32 / -hex 24), clés Mistral et Groq,
+#    ADMIN_EMAIL et ADMIN_PASSWORD (le compte administrateur de la production)
 ssh -i ~/.ssh/jurix_oracle ubuntu@$IP
 cd jurix/deploiement/oracle && cp env.production.exemple .env && nano .env
 exit
@@ -89,9 +91,17 @@ exit
 deploiement/oracle/deployer.sh ubuntu@$IP --avec-donnees
 ```
 
-La base de la VM est restaurée depuis un dump de `jurix_dev`, seulement si elle
-est vide ; l'API applique ensuite les migrations au démarrage. Le certificat
-HTTPS est obtenu dès que le DNS pointe sur la VM.
+Prérequis sur la machine de développement : le dépôt du front à côté de celui-ci
+(ou `JURIX_FRONT`), sur la branche du site statique, avec ses `node_modules` ; le
+conteneur `jurix-pg` démarré ; le modèle dans `~/modeles` (ou `JURIX_MODELE`).
+Pour la connexion Google, `JURIX_GOOGLE_CLIENT_ID` (il est figé dans le front).
+
+La base de la VM est restaurée depuis un dump de `jurix_dev`, **seulement si
+elle ne contient aucune loi**, et **sans les comptes ni les conversations** de
+développement : le corpus seulement. Le compte administrateur de `.env` est
+créé ensuite. `demarrer.sh` refuse de démarrer si un secret du `.env` est vide
+ou recopié de l'exemple, et l'API refuse une `SECRET_KEY` de moins de 32
+caractères. Le certificat HTTPS est obtenu dès que le DNS pointe sur la VM.
 
 Vérifier : `https://jurix.exemple.cm` et `https://jurix.exemple.cm/health`.
 
@@ -112,8 +122,15 @@ gardé 14 jours. À la main :
 
 ```bash
 bash sauvegarde.sh
-# Restaurer (base vide) :
-docker compose exec -T db pg_restore -U jurix -d jurix --no-owner < sauvegardes/jurix_….dump
+```
+
+Restaurer une sauvegarde (la base actuelle est **remplacée**) :
+
+```bash
+docker compose stop api caddy
+docker compose exec -T db psql -U jurix -d postgres -c "DROP DATABASE jurix WITH (FORCE)" -c "CREATE DATABASE jurix OWNER jurix"
+docker compose exec -T db pg_restore -U jurix -d jurix --no-owner --exit-on-error < sauvegardes/jurix_….dump
+bash demarrer.sh
 ```
 
 Copier de temps en temps une sauvegarde hors de la VM :
@@ -135,5 +152,8 @@ free -h ; df -h                      # mémoire et disque
   7 jours, processeur, réseau ET mémoire sous 20 %). JuriX garde en permanence
   le modèle et PostgreSQL en mémoire (30 à 40 %) : elle ne devrait pas être
   jugée inactive.
-- **Déménager** : tout est dans Docker. Sur une autre machine : installer
-  Docker, copier ce dossier, son `.env` et une sauvegarde, `docker compose up`.
+- **Déménager** : tout est dans Docker. Sur la nouvelle machine : y copier le
+  dossier `jurix/` entier (le code et ce dossier, avec `.env`, `modeles/`,
+  `donnees/`), placer la dernière sauvegarde sous `sauvegardes/initial.dump`,
+  lancer `installer.sh`, puis `bash demarrer.sh` : la base, vide, est restaurée
+  avant le démarrage de l'API. Enfin, faire pointer le DNS sur la nouvelle IP.

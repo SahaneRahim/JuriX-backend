@@ -34,6 +34,29 @@ logger = logging.getLogger(__name__)
 # les JWT seraient signes avec une clé publiée dans le dépôt.
 _DEV_SECRET_KEY = "dev_secret_key_change_in_production_with_openssl_rand_hex_32"
 
+# Cles qu'aucune instance hors developpement ne doit garder : toutes sont
+# publiees dans le depot (valeur de developpement, modeles des fichiers
+# d'exemple). Un modele oublie dans le .env de production passait le
+# garde-fou, qui ne connaissait que la premiere.
+_CLES_PUBLIEES = frozenset({
+    _DEV_SECRET_KEY,
+    "a-generer",
+    "generate-a-strong-random-key-here",
+    "change-me",
+    "changeme",
+    "secret",
+})
+_LONGUEUR_MIN_SECRET = 32
+
+
+def _secret_key_refusee(cle: str) -> str:
+    """La raison de refuser cette SECRET_KEY hors developpement, ou "" si elle convient."""
+    if cle in _CLES_PUBLIEES:
+        return "c'est une valeur publiee dans le depot"
+    if len(cle) < _LONGUEUR_MIN_SECRET:
+        return f"elle est trop courte ({len(cle)} caracteres, {_LONGUEUR_MIN_SECRET} au moins)"
+    return ""
+
 
 # Intervalle de purge : desormais `settings.CACHE_CLEANUP_INTERVAL_S`, lu A
 # CHAQUE TOUR de boucle et non a l'import. Une constante de module est figee au
@@ -93,12 +116,12 @@ async def _purger_les_caches() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Cycle de vie de l'application."""
-    if settings.ENVIRONMENT != "development" and settings.SECRET_KEY == _DEV_SECRET_KEY:
+    raison = _secret_key_refusee(settings.SECRET_KEY)
+    if settings.ENVIRONMENT != "development" and raison:
         raise RuntimeError(
-            "SECRET_KEY est resté à sa valeur de développement alors que "
-            f"ENVIRONMENT={settings.ENVIRONMENT!r}. Générez-en une avec "
-            "`openssl rand -hex 32` et placez-la dans .env — sinon n'importe qui "
-            "peut forger un jeton d'administration."
+            f"SECRET_KEY refusée alors que ENVIRONMENT={settings.ENVIRONMENT!r} : "
+            f"{raison}. Générez-en une avec `openssl rand -hex 32` et placez-la "
+            "dans .env — sinon n'importe qui peut forger un jeton d'administration."
         )
     logger.info(f"🚀 {settings.APP_NAME} v{settings.VERSION} ({settings.ENVIRONMENT})")
 
