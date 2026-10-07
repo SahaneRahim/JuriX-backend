@@ -165,8 +165,13 @@ _SCHEMA_GROQ = {
     "additionalProperties": False,
 }
 
-# Un verdict tient en une quinzaine de jetons ; le modele ne reflechit pas.
-_JETONS_DE_SORTIE = 40
+# Un verdict tient en une quinzaine de jetons, mais le modele en depense
+# d'autres avant, invisibles, meme sans reflexion : mesure sur
+# qwen3.8-27b, 128 jetons factures pour un verdict de 15. A 40, deux
+# messages sur soixante revenaient VIDES (HTTP 400 json_validate_failed),
+# donc en « juridique » par defaut. Le quota compte l'usage reel, pas ce
+# plafond.
+_JETONS_DE_SORTIE = 256
 
 # Attente acceptee devant le limiteur. Au-dela, la question part tout de suite
 # en « juridique » : faire patienter l'utilisateur pour savoir s'il dit

@@ -110,7 +110,8 @@ class TestVerdict:
         schema = corps["response_format"]["json_schema"]
         assert schema["strict"] is True
         assert schema["schema"]["additionalProperties"] is False
-        assert corps["max_completion_tokens"] == 40
+        # 40 ne suffisaient pas : jetons invisibles avant le verdict, sortie vide.
+        assert corps["max_completion_tokens"] == 256
 
     def test_les_consignes_restent_courtes(self):
         """~870 jetons avant : le chat plafonnait vers 215 questions par jour."""

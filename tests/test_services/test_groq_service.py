@@ -153,11 +153,13 @@ class TestRequete:
         assert faux.corps()["include_reasoning"] is False
 
     async def test_sans_schema_json_libre(self, groq):
+        """Groq refuse json_object si « json » n'apparait nulle part (400)."""
         service, faux = groq(ok({"x": 1}))
 
         await service.completer_json(systeme="s", message="m")
 
         assert faux.corps()["response_format"] == {"type": "json_object"}
+        assert "JSON" in faux.corps()["messages"][0]["content"]
 
     def test_chemin_synchrone(self, groq):
         service, faux = groq(ok({"intention": "juridique"}))
@@ -299,6 +301,18 @@ class TestPannes:
             await _completer(service)
 
         assert "json_schema not supported" in str(erreur.value)
+        assert len(faux.requetes) == 1
+
+    async def test_sortie_non_conforme_au_schema(self, groq):
+        """Une reponse inexploitable, pas une panne : un lot se redecoupe."""
+        service, faux = groq(httpx.Response(400, json={"error": {
+            "message": "Failed to validate JSON.", "type": "invalid_request_error",
+            "code": "json_validate_failed", "failed_generation": "",
+        }}))
+
+        with pytest.raises(GroqReponseInvalideError):
+            await _completer(service)
+
         assert len(faux.requetes) == 1
 
     async def test_reponse_coupee(self, groq):

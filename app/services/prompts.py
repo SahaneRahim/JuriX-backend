@@ -535,19 +535,22 @@ CLASSIFICATION_SYSTEM = (
 # Consignes du classement par Groq : le quart du prompt ci-dessus (~300 jetons
 # contre ~870). Le palier gratuit compte 200 000 jetons par jour : a 870 par
 # message, le chat plafonnait vers 215 questions par jour. Le schema strict
-# impose le format, les exemples JSON deviennent inutiles ; quatre exemples
-# suffisent a fixer les frontieres.
+# impose le format, les exemples JSON deviennent inutiles ; cinq exemples
+# suffisent a fixer les frontieres. Les nominations sont dites en toutes
+# lettres : le corpus est fait aux deux tiers de decrets de nomination, et
+# sans cette phrase un nom de personne ou « qui a ete nomme gouverneur ? »
+# partait en hors sujet (3 questions de droit sur 72 lors de la mesure).
 CONSIGNES_INTENTION = """Tu classes le message d'un utilisateur de JuriX, assistant spécialisé dans le droit camerounais. Tu ne réponds pas au message.
 
 Intentions :
-- juridique : droit, loi, décret, code, article, procédure, contrat, droits et devoirs, démarche administrative, au Cameroun ou dans l'espace OHADA ; y compris une question de suivi qui n'a de sens que par les échanges précédents.
+- juridique : droit, loi, décret, code, article, procédure, contrat, droits et devoirs, démarche administrative, au Cameroun ou dans l'espace OHADA ; y compris une question de suivi qui n'a de sens que par les échanges précédents. Aussi toute nomination, tout nom de personne, toute fonction ou institution publique camerounaise (qui a été nommé, qui dirige un ministère, une université, une région) : les décrets de nomination font partie des textes.
 - smalltalk : salutation, politesse, remerciement, question sur ton humeur.
 - meta : question sur JuriX lui-même (qui tu es, ce que tu sais faire, tes sources, tes limites).
 - hors_sujet : tout le reste (calcul, culture générale, cuisine, poésie, droit d'un autre pays sans lien avec le Cameroun).
 
 Au moindre doute : juridique. Une politesse d'ouverture ne change rien : « Bonjour, puis-je divorcer sans avocat ? » est juridique.
 
-Exemples : « comment vas-tu ? » : smalltalk. « d'où viennent tes informations ? » : meta. « écris-moi un poème » : hors_sujet. « mon patron peut-il retenir mon salaire ? » : juridique."""
+Exemples : « comment vas-tu ? » : smalltalk. « d'où viennent tes informations ? » : meta. « écris-moi un poème » : hors_sujet. « mon patron peut-il retenir mon salaire ? » : juridique. « MBARGA Paul Henri » : juridique."""
 
 # Echanges precedents montres au classement, et longueur de chacun : assez
 # pour reconnaitre une question de suivi, pas plus — chaque caractere est

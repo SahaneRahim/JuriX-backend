@@ -20,7 +20,7 @@ sont comptes a part.
 
 Usage:
     python -m scripts.eval.evaluer_intention --limite 60
-    python -m scripts.eval.evaluer_intention --limite 122 --pause 3
+    python -m scripts.eval.evaluer_intention --depuis 60 --limite 62   # le reste du jeu
 """
 
 import argparse
@@ -105,6 +105,8 @@ def rapport(resultat: dict) -> float:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parseur = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parseur.add_argument("--limite", type=int, default=60, help="Messages evalues (defaut 60)")
+    parseur.add_argument("--depuis", type=int, default=0,
+                         help="Saute les N premiers messages de l'echantillon (une seconde passe)")
     parseur.add_argument("--pause", type=float, default=3.0,
                          help="Secondes entre deux messages (defaut 3 : sous 30 req/min et 7 000 jetons/min)")
     args = parseur.parse_args(argv)
@@ -113,7 +115,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("GROQ_API_KEY absente du .env : rien a mesurer.")
         return 2
     settings.INTENT_CLASSIFIER = "groq"
-    messages = echantillon(json.loads(JEU.read_text(encoding="utf-8"))["messages"], args.limite)
+    tous = echantillon(json.loads(JEU.read_text(encoding="utf-8"))["messages"], None)
+    messages = tous[args.depuis: args.depuis + args.limite]
     print(f"{len(messages)} messages, modele {settings.GROQ_MODEL}")
 
     resultat = asyncio.run(evaluer(messages, args.pause))

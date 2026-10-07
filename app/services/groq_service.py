@@ -157,15 +157,20 @@ def parametres_de_raisonnement(modele: str) -> Dict[str, Any]:
     return {}
 
 
-def _message_d_erreur(reponse: httpx.Response) -> str:
+def _erreur(reponse: httpx.Response) -> Dict[str, str]:
+    """Le message et le code d'erreur de Groq (`error.message`, `error.code`)."""
     try:
         corps = reponse.json()
     except ValueError:
-        return reponse.text[:300]
+        return {"message": reponse.text[:300], "code": ""}
     erreur = corps.get("error") if isinstance(corps, dict) else None
     if isinstance(erreur, dict):
-        return str(erreur.get("message") or erreur)[:300]
-    return str(corps)[:300]
+        return {"message": str(erreur.get("message") or erreur)[:300], "code": str(erreur.get("code") or "")}
+    return {"message": str(corps)[:300], "code": ""}
+
+
+def _message_d_erreur(reponse: httpx.Response) -> str:
+    return _erreur(reponse)["message"]
 
 
 def _entier(valeur: Optional[str]) -> Optional[int]:
@@ -220,6 +225,10 @@ class GroqService:
         max_jetons: int,
     ) -> Dict[str, Any]:
         if schema is None:
+            # Groq refuse le mode json_object si le mot « json » n'apparait
+            # nulle part dans les messages (HTTP 400).
+            if "json" not in (systeme + message).lower():
+                systeme = f"{systeme}\n\nRéponds uniquement en JSON."
             format_de_reponse: Dict[str, Any] = {"type": "json_object"}
         else:
             format_de_reponse = {
@@ -299,7 +308,15 @@ class GroqService:
                 raise GroqReponseInvalideError(f"Objet JSON attendu de {modele}")
             return ReponseGroq(donnees, int(usage.get("total_tokens") or reservation.jetons), modele)
 
-        message = _message_d_erreur(reponse)
+        erreur = _erreur(reponse)
+        message = erreur["message"]
+        if code == 400 and erreur["code"] == "json_validate_failed":
+            # Le modele n'a pas produit un JSON conforme (souvent : sortie
+            # vide, budget epuise avant elle). Une reponse inexploitable, pas
+            # une panne : un lot de classement se redecoupe au lieu d'arreter.
+            raise GroqReponseInvalideError(
+                f"Sortie de {modele} non conforme au schema (json_validate_failed)"
+            )
         if code == 429:
             attente = lire_duree(reponse.headers.get("retry-after"))
             if attente is None:
