@@ -38,6 +38,7 @@ from app.models.user import User
 from app.services.legal_domain_classifier import (
     CANONICAL_DOMAINS,
     ClassementIndisponible,
+    DocumentVide,
     LegalDomainClassifier,
     get_legal_domain_classifier,
 )
@@ -130,6 +131,13 @@ async def classify_document(
         # await : l'appel synchrone bloquait la boucle d'evenements, donc
         # toutes les autres requetes, le temps de l'appel a Groq.
         result = await classifier.classify_async(request.title, request.text, request.doc_type)
+    except DocumentVide as exc:
+        # Un texte fait seulement de visas n'a pas d'objet a classer : la
+        # demande est en cause, et un « reessayez plus tard » serait faux.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Rien à classer : ni titre, ni texte en dehors des visas.",
+        ) from exc
     except ClassementIndisponible as exc:
         logger.warning("Classement indisponible : %s", exc.raison)
         entetes = {}

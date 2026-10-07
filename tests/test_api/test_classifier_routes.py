@@ -110,6 +110,18 @@ class TestClassify:
         assert response.status_code == 422
         assert classeur.titres == []
 
+    async def test_texte_reduit_aux_visas_rend_422(self, admin_client: AsyncClient, classeur):
+        """Une erreur de la demande, qu'un nouvel essai ne corrigera pas : pas de 503."""
+        from app.services.legal_domain_classifier import DocumentVide
+
+        classeur.erreur = DocumentVide("document vide")
+
+        response = await admin_client.post(
+            URL, json={"title": "", "text": "Vu la Constitution ;\nVu le décret n°2011/408 ;"}
+        )
+
+        assert response.status_code == 422
+
     async def test_classement_indisponible_rend_503(self, admin_client: AsyncClient, classeur):
         """Jamais de domaine invente : l'ancien code rendait Droit Administratif."""
         classeur.erreur = ClassementIndisponible("quota Groq", retry_after=41.2, quota=True)

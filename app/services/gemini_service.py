@@ -111,6 +111,15 @@ class GeminiServiceError(Exception):
     pass
 
 
+class GeminiBudgetEpuiseError(GeminiServiceError):
+    """
+    Budget de jetons epuise AVANT la premiere phrase (la reflexion l'a pris).
+
+    Nommee a part : un appelant qui peut augmenter le budget — la comparaison
+    redemande au double — doit la reconnaitre sans lire le message.
+    """
+
+
 class GeminiQuotaError(GeminiServiceError):
     """
     Quota du fournisseur epuise (429).
@@ -308,7 +317,7 @@ FORBIDDEN:
             finish = _finish_reason(response)
             logger.warning(f"⚠️ Reponse vide de Gemini (finish_reason={finish})")
             if finish == "MAX_TOKENS":
-                raise GeminiServiceError(
+                raise GeminiBudgetEpuiseError(
                     "Reponse tronquee : le budget de jetons a ete epuise avant "
                     "la premiere phrase."
                 )

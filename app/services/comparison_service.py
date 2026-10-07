@@ -52,6 +52,7 @@ from app.schemas.comparison import (
 from app.schemas.search import ChunkResult, SearchFilters, SearchRequest
 from app.services.article_reference import normalize_number
 from app.services.llm import (
+    ERREURS_BUDGET,
     ERREURS_LLM,
     ERREURS_QUOTA,
     ERREURS_SATURATION,
@@ -343,6 +344,10 @@ class ComparisonService:
             raise ComparisonQuotaError(str(e)) from e
         except ERREURS_SATURATION as e:
             raise ComparisonOverloadedError(str(e)) from e
+        except ERREURS_BUDGET:
+            # Gemini : la reflexion a pris tout le budget avant la grille. Le
+            # cas meme que le second essai, au double, est fait pour corriger.
+            return None
         except ERREURS_LLM as e:
             raise ComparisonError(str(e)) from e
 

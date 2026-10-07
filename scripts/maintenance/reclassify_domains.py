@@ -28,8 +28,9 @@ Usage:
     python scripts/maintenance/reclassify_domains.py classer --extrait 0 --lot 40
     # 2. Les incertains, avec l'article premier, 15 par requete
     python scripts/maintenance/reclassify_domains.py classer --incertains --extrait 500 --lot 15
-    # 3. Relire le rapport, changements.csv et a_revoir.csv
-    python scripts/maintenance/reclassify_domains.py appliquer --dry-run
+    # 3. Simuler EXACTEMENT ce que fera l'etape 4, puis relire le rapport,
+    #    changements.csv et a_revoir.csv
+    python scripts/maintenance/reclassify_domains.py appliquer --dry-run --force
     # 4. Ecrire en base, categories existantes comprises
     python scripts/maintenance/reclassify_domains.py appliquer --force
 """
@@ -109,6 +110,16 @@ def _incertain(verdict: dict, seuil: float) -> bool:
     return verdict.get("statut") != "ok" or float(verdict.get("confiance") or 0) < seuil
 
 
+def _meme_loi(verdict: dict, loi: Law) -> bool:
+    """
+    Le verdict designe-t-il bien CETTE loi ? Le journal est indexe par
+    l'identifiant, qui change si la base est reconstruite ; la reference, non.
+    Une ligne d'avant ce controle (sans reference) est crue sur parole.
+    """
+    reference = verdict.get("reference")
+    return reference is None or reference == loi.reference
+
+
 # ==================== CLASSER ====================
 
 
@@ -118,6 +129,7 @@ def lois_a_classer(
     *,
     incertains: bool = False,
     seuil: float = 0.6,
+    longueur_extrait: int = 0,
     law_ids: Optional[Sequence[int]] = None,
     limite: Optional[int] = None,
 ) -> List[Law]:
@@ -126,13 +138,18 @@ def lois_a_classer(
 
     Par defaut : celles sans verdict « ok » obtenu avec les consignes
     actuelles. Avec `incertains` : celles dont le dernier verdict est « a
-    revoir » ou sous le seuil, a redemander avec un extrait.
+    revoir » ou sous le seuil, a redemander avec un extrait — sauf si ce
+    verdict a deja ete obtenu avec un extrait au moins aussi long : apres un
+    arret sur quota, la relance ne repaie pas les lois deja retentees.
+
+    Un verdict d'une AUTRE loi (meme identifiant, autre reference : base
+    reconstruite, autre base) compte comme absent.
     """
     # Sans le contenu : 2 226 textes integraux en memoire pour lire des titres.
     # Il n'est charge, loi par loi, que pour l'extrait de repli (extrait_de).
     requete = (
         session.query(Law)
-        .options(load_only(Law.id, Law.title, Law.type, Law.status))
+        .options(load_only(Law.id, Law.reference, Law.title, Law.type, Law.status))
         .filter(Law.status == "published")
         .order_by(Law.id)
     )
@@ -141,8 +158,14 @@ def lois_a_classer(
     lois = []
     for loi in requete:
         verdict = verdicts.get(loi.id)
+        if verdict is not None and not _meme_loi(verdict, loi):
+            verdict = None
         if incertains:
-            garder = verdict is not None and _incertain(verdict, seuil)
+            garder = (
+                verdict is not None
+                and _incertain(verdict, seuil)
+                and int(verdict.get("extrait") or 0) < max(1, longueur_extrait)
+            )
         else:
             garder = (
                 verdict is None
@@ -168,6 +191,21 @@ def extrait_de(session, loi: Law, longueur: int) -> str:
         {"id": loi.id},
     ).scalar()
     return extrait_pour_classement(premier or loi.content, longueur)
+
+
+def _terminer_la_derniere_ligne(journal: Path) -> None:
+    """
+    Un arret brutal peut laisser une ligne coupee, sans saut de ligne : la
+    suivante s'y collerait, et les deux seraient perdues a la relecture.
+    """
+    if not journal.exists() or journal.stat().st_size == 0:
+        return
+    with journal.open("rb") as fichier:
+        fichier.seek(-1, 2)
+        if fichier.read(1) == b"\n":
+            return
+    with journal.open("a", encoding="utf-8") as fichier:
+        fichier.write("\n")
 
 
 def _horodatage() -> str:
@@ -196,7 +234,8 @@ def classer(
     """Classe par lots et ajoute les verdicts au journal. Rend le code de sortie."""
     lois = lois_a_classer(
         session, charger_verdicts(journal),
-        incertains=incertains, seuil=seuil, law_ids=law_ids, limite=limite,
+        incertains=incertains, seuil=seuil, longueur_extrait=longueur_extrait,
+        law_ids=law_ids, limite=limite,
     )
     lots = [lois[i:i + taille_lot] for i in range(0, len(lois), taille_lot)]
     logger.info(
@@ -204,6 +243,7 @@ def classer(
         len(lois), len(lots), taille_lot, classifieur.modele, longueur_extrait,
     )
     journal.parent.mkdir(parents=True, exist_ok=True)
+    _terminer_la_derniere_ligne(journal)
     jetons_total = requetes_total = 0
     debut = time.time()
 
@@ -243,6 +283,7 @@ def classer(
             for loi, verdict in zip(lot, resultat.verdicts):
                 ligne = {
                     "law_id": loi.id,
+                    "reference": loi.reference,
                     "titre": (loi.title or "")[:200],
                     "statut": "ok" if verdict else "a_revoir",
                     "domaine": verdict.domain if verdict else None,
@@ -294,7 +335,12 @@ def appliquer(
     """
     Ecrit les verdicts « ok » au-dessus du seuil. Sans `force`, une loi qui a
     deja une autre categorie la garde (choix d'un administrateur, peut-etre).
-    Ecrit changements.csv et a_revoir.csv dans tous les cas.
+
+    Ecrit changements.csv et a_revoir.csv dans tous les cas. changements.csv
+    liste TOUTE loi dont le verdict differe de la categorie actuelle, avec ce
+    qui lui arrive (`suite`) : appliquee, ou gardee faute de --force. Une
+    simulation sans --force ne montrait pas les categories qu'un --force
+    allait remplacer — precisement celles qu'il faut relire.
     """
     carte = load_domain_map(session)
     noms = {identifiant: nom for nom, identifiant in session.query(Category.name, Category.id)}
@@ -304,18 +350,22 @@ def appliquer(
         session.query(Law)
         .options(load_only(
             Law.id, Law.reference, Law.title, Law.category_id,
-            Law.category_confidence, Law.suggested_categories,
+            Law.category_confidence, Law.suggested_categories, Law.processing_error,
         ))
         .filter(Law.id.in_(list(verdicts)))
         .order_by(Law.id)
         .all()
     )
 
-    for position, loi in enumerate(lois, start=1):
+    ecrites = 0
+    for loi in lois:
         verdict = verdicts[loi.id]
         actuelle = noms.get(loi.category_id, "(aucune)")
         bilan.avant[actuelle] += 1
         cible = carte.get((verdict.get("domaine") or "").lower())
+        if not _meme_loi(verdict, loi):
+            # Le verdict d'une autre loi : base reconstruite depuis le classement.
+            verdict = {**verdict, "statut": "autre_loi"}
 
         if _incertain(verdict, seuil) or cible is None:
             bilan.a_revoir += 1
@@ -330,6 +380,10 @@ def appliquer(
         if loi.category_id not in (None, cible) and not force:
             bilan.protegees += 1
             bilan.apres[actuelle] += 1
+            changements.append([
+                loi.id, loi.reference, loi.title, actuelle, verdict["domaine"],
+                verdict["confiance"], "gardee (--force pour appliquer)",
+            ])
             continue
 
         bilan.appliquees += 1
@@ -337,7 +391,8 @@ def appliquer(
         if loi.category_id != cible:
             bilan.changees += 1
             changements.append([
-                loi.id, loi.reference, loi.title, actuelle, verdict["domaine"], verdict["confiance"],
+                loi.id, loi.reference, loi.title, actuelle, verdict["domaine"],
+                verdict["confiance"], "appliquee",
             ])
         if not dry_run:
             secondaires = [carte[nom.lower()] for nom in verdict.get("secondaires") or []
@@ -345,7 +400,11 @@ def appliquer(
             loi.category_id = cible
             loi.category_confidence = float(verdict["confiance"])
             loi.suggested_categories = [cible, *[s for s in secondaires if s != cible]]
-            if position % LOIS_PAR_COMMIT == 0:
+            loi.processing_error = _sans_anomalie_de_classement(loi.processing_error)
+            ecrites += 1
+            # Compte les lois ECRITES : compter les positions sautait le commit
+            # chaque fois que la 200e loi etait gardee ou a revoir.
+            if ecrites % LOIS_PAR_COMMIT == 0:
                 session.commit()
 
     if not dry_run:
@@ -354,7 +413,7 @@ def appliquer(
     dossier.mkdir(parents=True, exist_ok=True)
     _ecrire_csv(
         dossier / "changements.csv",
-        ["law_id", "reference", "titre", "avant", "apres", "confiance"], changements,
+        ["law_id", "reference", "titre", "avant", "apres", "confiance", "suite"], changements,
     )
     _ecrire_csv(
         dossier / "a_revoir.csv",
@@ -362,6 +421,22 @@ def appliquer(
         a_revoir,
     )
     return bilan
+
+
+# Prefixe de l'anomalie que le pipeline pose quand le classement est
+# indisponible (app/tasks/process_law.py). Elle n'a plus lieu d'etre une fois
+# la loi classee ; les autres anomalies (pages illisibles, vecteurs) restent.
+_ANOMALIE_DE_CLASSEMENT = "Classement indisponible"
+
+
+def _sans_anomalie_de_classement(erreur: Optional[str]) -> Optional[str]:
+    if not erreur:
+        return erreur
+    restes = [
+        morceau for morceau in erreur.split(" | ")
+        if not morceau.startswith(_ANOMALIE_DE_CLASSEMENT)
+    ]
+    return " | ".join(restes) or None
 
 
 def _ecrire_csv(chemin: Path, entete: List[str], lignes: List[list]) -> None:
@@ -378,7 +453,8 @@ def _rapport(bilan: Bilan, dossier: Path, dry_run: bool) -> None:
             logger.info("%-55s %7d %7d", nom[:55], bilan.avant[nom], bilan.apres[nom])
     logger.info(
         "%s : %d verdicts appliques dont %d changements de categorie, %d categories "
-        "existantes gardees (--force pour les remplacer), %d a revoir",
+        "existantes gardees (--force pour les remplacer ; elles figurent dans "
+        "changements.csv), %d a revoir",
         "SIMULATION, rien n'est ecrit" if dry_run else "Ecrit en base",
         bilan.appliquees, bilan.changees, bilan.protegees, bilan.a_revoir,
     )

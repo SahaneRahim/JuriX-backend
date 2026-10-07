@@ -154,6 +154,13 @@ class ClassementIndisponible(Exception):
         self.quota = quota
 
 
+class DocumentVide(ClassementIndisponible):
+    """
+    Rien a classer : ni titre, ni texte une fois les visas retires. Une erreur
+    de la DEMANDE, qu'aucun nouvel essai ne corrigera (422, pas 503).
+    """
+
+
 @dataclass(frozen=True)
 class DomainResult:
     """
@@ -434,7 +441,7 @@ class LegalDomainClassifier:
         titre = (title or "").strip()
         extrait = extrait_pour_classement(content)
         if not titre and not extrait:
-            raise ClassementIndisponible("document vide : ni titre ni contenu")
+            raise DocumentVide("document vide : ni titre, ni texte hors des visas")
         return DocumentAClasser(titre=titre, extrait=extrait, type_acte=doc_type or None)
 
     def classify(

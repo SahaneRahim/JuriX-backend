@@ -579,6 +579,23 @@ class TestEchecs:
         budgets = [appel.kwargs["max_tokens"] for appel in llm.generate.await_args_list]
         assert budgets == [COMPARISON_MAX_TOKENS, COMPARISON_MAX_TOKENS_SECOND_ESSAI]
 
+    async def test_budget_epuise_avant_la_grille_redemande_au_double(
+        self, db_session, code_minier, llm
+    ):
+        """Gemini leve une erreur, sans texte, quand la reflexion prend tout le budget."""
+        from app.services.gemini_service import GeminiBudgetEpuiseError
+
+        llm.generate.side_effect = [
+            GeminiBudgetEpuiseError("budget epuise avant la premiere phrase"),
+            {"response": _grille(CRITERES_PAR_DEFAUT)},
+        ]
+        service = ComparisonService(db_session, llm=llm)
+
+        resultat = await service.compare("permis de recherche", "permis d'exploitation")
+
+        assert len(resultat.rows) == len(CRITERES_PAR_DEFAUT)
+        assert llm.generate.await_args.kwargs["max_tokens"] == COMPARISON_MAX_TOKENS_SECOND_ESSAI
+
     async def test_grille_coupee_redemandee_au_double(self, db_session, code_minier, llm):
         llm.generate.side_effect = [
             {"response": '{"lignes": [{"index": 0', "tronquee": True},

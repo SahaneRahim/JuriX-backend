@@ -37,6 +37,7 @@ from app.services.legal_domain_classifier import (
     SANTE,
     ClassementIndisponible,
     DocumentAClasser,
+    DocumentVide,
     LegalDomainClassifier,
     extrait_pour_classement,
     get_legal_domain_classifier,
@@ -303,8 +304,16 @@ class TestUnDocument:
     def test_document_vide(self):
         classifieur, faux = classeur()
 
-        with pytest.raises(ClassementIndisponible):
+        with pytest.raises(DocumentVide):
             classifieur.classify("", "   ")
+        assert faux.appels == []
+
+    def test_texte_reduit_aux_visas_est_vide(self):
+        """Les visas sont retires de l'extrait : il ne reste rien a classer."""
+        classifieur, faux = classeur()
+
+        with pytest.raises(DocumentVide):
+            classifieur.classify("", "Vu la Constitution ;\nVu le décret n°2011/408 ;")
         assert faux.appels == []
 
     def test_aucun_verdict(self):

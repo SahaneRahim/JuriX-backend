@@ -177,6 +177,39 @@ class TestClasser:
         assert derniers[lois[1]]["domaine"] == FINANCES
         assert derniers[lois[1]]["extrait"] == 500
 
+        # Relance apres un arret : la loi 3, encore « a revoir » mais deja
+        # retentee avec un extrait, n'est pas repayee.
+        troisieme = _Classeur()
+        script.classer(
+            session, troisieme, journal=journal, taille_lot=15,
+            longueur_extrait=500, incertains=True,
+        )
+        assert troisieme.lots == []
+
+    def test_une_ligne_coupee_n_absorbe_pas_la_suivante(self, base, tmp_path):
+        session, ids, lois = base
+        journal = tmp_path / "verdicts.jsonl"
+        journal.write_text('{"law_id": 999, "titre": "Déc', encoding="utf-8")
+
+        script.classer(session, _Classeur([(FINANCES, 0.9)] * 5), journal=journal, taille_lot=5)
+
+        assert set(script.charger_verdicts(journal)) == set(lois)
+
+    def test_le_verdict_d_une_autre_loi_ne_compte_pas(self, base, tmp_path):
+        """Base reconstruite : l'identifiant 1 designe maintenant une autre loi."""
+        session, ids, lois = base
+        journal = tmp_path / "verdicts.jsonl"
+        journal.write_text(json.dumps({
+            "law_id": lois[0], "reference": "AUTRE-LOI", "statut": "ok",
+            "domaine": FINANCES, "confiance": 0.9, "consignes": script.VERSION_DES_CONSIGNES,
+        }) + "\n", encoding="utf-8")
+        classeur = _Classeur([(FINANCES, 0.9)] * 5)
+
+        script.classer(session, classeur, journal=journal, taille_lot=5)
+
+        assert len(classeur.lots[0]) == 5
+        assert script.charger_verdicts(journal)[lois[0]]["reference"] == "R-1"
+
 
 def _verdicts(lois, *domaines):
     """{law_id: verdict} : (domaine, confiance) ou None pour « a revoir »."""
@@ -208,6 +241,68 @@ class TestAppliquer:
         assert [ligne["apres"] for ligne in _csv(tmp_path / "changements.csv")] == [
             FINANCES, FONCTION_PUBLIQUE,
         ]
+
+    def test_la_simulation_sans_force_montre_les_categories_qu_il_remplacera(self, base, tmp_path):
+        """
+        Le cas du corpus : toutes les lois ont deja une categorie. Une
+        simulation qui n'en listait aucune laissait relire un fichier vide
+        avant un --force qui les reecrivait toutes.
+        """
+        session, ids, lois = base
+        verdicts = _verdicts(lois, (FINANCES, 0.9))
+
+        bilan = script.appliquer(session, verdicts, dossier=tmp_path, dry_run=True)
+
+        assert bilan.protegees == 1
+        lignes = _csv(tmp_path / "changements.csv")
+        assert [(ligne["apres"], ligne["suite"]) for ligne in lignes] == [
+            (FINANCES, "gardee (--force pour appliquer)"),
+        ]
+
+    def test_l_anomalie_de_classement_est_effacee(self, base, tmp_path):
+        session, ids, lois = base
+        session.execute(text("UPDATE laws SET processing_error = :e WHERE id = :id"), {
+            "id": lois[0],
+            "e": "page 3 illisible | Classement indisponible (quota Groq) : relancer "
+                 "scripts/maintenance/reclassify_domains.py",
+        })
+        session.execute(text("UPDATE laws SET processing_error = :e WHERE id = :id"), {
+            "id": lois[1], "e": "Classement indisponible (panne) : relancer ...",
+        })
+        session.commit()
+
+        script.appliquer(
+            session, _verdicts(lois, (FINANCES, 0.9), (FINANCES, 0.9)), dossier=tmp_path, force=True
+        )
+
+        session.expire_all()
+        assert session.get(Law, lois[0]).processing_error == "page 3 illisible"
+        assert session.get(Law, lois[1]).processing_error is None
+
+    def test_commit_toutes_les_n_lois_ecrites(self, base, tmp_path, monkeypatch):
+        """Compter les positions sautait le commit quand la n-ieme loi etait a revoir."""
+        session, ids, lois = base
+        monkeypatch.setattr(script, "LOIS_PAR_COMMIT", 2)
+        commits = []
+        vrai_commit = session.commit
+        monkeypatch.setattr(session, "commit", lambda: (commits.append(1), vrai_commit()))
+        verdicts = _verdicts(lois, (FINANCES, 0.9), None, (FINANCES, 0.9), None, (FINANCES, 0.9))
+
+        script.appliquer(session, verdicts, dossier=tmp_path, force=True)
+
+        # 3 lois ecrites : un commit a la 2e, puis le commit final.
+        assert len(commits) == 2
+
+    def test_le_verdict_d_une_autre_loi_n_est_pas_applique(self, base, tmp_path):
+        session, ids, lois = base
+        verdicts = _verdicts(lois, (FINANCES, 0.9))
+        verdicts[lois[0]]["reference"] = "AUTRE-LOI"
+
+        bilan = script.appliquer(session, verdicts, dossier=tmp_path, force=True)
+
+        session.expire_all()
+        assert bilan.a_revoir == 1
+        assert session.get(Law, lois[0]).category_id == ids[ADMINISTRATIF]
 
     def test_force_applique_categorie_confiance_et_suggestions(self, base, tmp_path):
         session, ids, lois = base
