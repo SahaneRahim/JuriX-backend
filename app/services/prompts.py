@@ -454,10 +454,10 @@ Extraits concernant le sujet B :
 Compare le sujet A et le sujet B sur EXACTEMENT ces criteres, dans cet ordre :
 {criteres}
 
-Reponds une ligne par critere, en reportant dans le champ `index` le NUMERO du critere tel qu'il est ecrit ci-dessus.
-
-Remplis la grille, puis enonce les differences majeures, puis les angles morts :
-les criteres que les extraits ne permettent pas de trancher.""",
+Reponds en JSON, avec exactement ces cles :
+- `lignes` : une entree par critere, avec `index` (le NUMERO du critere tel qu'il est ecrit ci-dessus), `critere` (son libelle), `valeur_a` et `valeur_b` (ce que disent les extraits de chaque sujet), `sources_a` et `sources_b` (les numeros d'article cites, liste vide si rien ne le dit) ;
+- `differences_majeures` : les differences majeures, une phrase chacune ;
+- `angles_morts` : les criteres que les extraits ne permettent pas de trancher.""",
 
     "en": """Subject A: {a}
 Extracts about subject A:
@@ -474,10 +474,10 @@ Extracts about subject B:
 Compare subject A and subject B on EXACTLY these criteria, in this order:
 {criteres}
 
-Answer one row per criterion, copying into the `index` field the NUMBER of the criterion exactly as written above.
-
-Fill the grid, then state the key differences, then the blind spots: the
-criteria the extracts do not allow you to settle.""",
+Answer in JSON, with exactly these keys:
+- `lignes`: one entry per criterion, with `index` (the criterion NUMBER exactly as written above), `critere` (its label), `valeur_a` and `valeur_b` (what the extracts say for each subject), `sources_a` and `sources_b` (the article numbers cited, an empty list when nothing says it);
+- `differences_majeures`: the key differences, one sentence each;
+- `angles_morts`: the criteria the extracts do not allow you to settle.""",
 }
 
 

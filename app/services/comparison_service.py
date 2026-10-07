@@ -73,6 +73,10 @@ COMPARISON_TEMPERATURE = 0.2
 # Sept criteres x deux colonnes, plus les differences et les angles morts. A
 # 4096 la grille se tronquait en JSON invalide sur les textes denses.
 COMPARISON_MAX_TOKENS = 8192
+# Second essai d'une grille coupee ou illisible : le double. Le JSON coupe ne
+# se recolle pas, et l'utilisateur recevait une erreur apres une minute
+# d'attente.
+COMPARISON_MAX_TOKENS_SECOND_ESSAI = 16384
 # Facteur de sur-echantillonnage quand la comparaison est bornee a un document.
 # Le plafond de `SearchRequest.limit` est 50, d'ou le min() a l'usage.
 SUR_ECHANTILLON = 5
@@ -310,12 +314,28 @@ class ComparisonService:
         )
         systeme = get_compare_system_prompt(langue, mention_absence(langue))
 
+        for budget in (COMPARISON_MAX_TOKENS, COMPARISON_MAX_TOKENS_SECOND_ESSAI):
+            donnees = await self._appeler(prompt, systeme, axes, budget)
+            if donnees is not None:
+                return donnees
+            logger.warning("⚖️ Grille coupee ou illisible a %d jetons", budget)
+        # La cause est presque toujours une sortie tronquee au plafond de
+        # jetons. Le message doit le dire : « JSON invalide » enverrait
+        # chercher un bug la ou il n'y a qu'un budget trop court.
+        raise ComparisonError(
+            "La comparaison n'a pas pu etre lue (reponse incomplete du modele)."
+        )
+
+    async def _appeler(
+        self, prompt: str, systeme: str, axes: List[str], budget: int
+    ) -> Optional[Dict[str, Any]]:
+        """La grille decodee, ou None si la reponse est coupee ou illisible."""
         try:
             reponse = await self.llm.generate(
                 prompt=prompt,
                 system=systeme,
                 temperature=COMPARISON_TEMPERATURE,
-                max_tokens=COMPARISON_MAX_TOKENS,
+                max_tokens=budget,
                 response_mime_type="application/json",
                 response_schema=_schema_de_sortie(axes),
             )
@@ -326,16 +346,12 @@ class ComparisonService:
         except ERREURS_LLM as e:
             raise ComparisonError(str(e)) from e
 
-        texte = (reponse or {}).get("response", "")
+        if (reponse or {}).get("tronquee"):
+            return None
         try:
-            donnees = json.loads(texte)
-        except (json.JSONDecodeError, TypeError) as e:
-            # Arrive quand la sortie est tronquee au plafond de jetons. Le
-            # message doit le dire : « JSON invalide » enverrait chercher un bug
-            # la ou il n'y a qu'un budget trop court.
-            raise ComparisonError(
-                "La comparaison n'a pas pu etre lue (reponse incomplete du modele)."
-            ) from e
+            donnees = json.loads((reponse or {}).get("response", ""))
+        except (json.JSONDecodeError, TypeError):
+            return None
         if not isinstance(donnees, dict):
             raise ComparisonError("Reponse du modele inattendue.")
         return donnees
@@ -430,6 +446,7 @@ class ComparisonService:
                 par_libelle.setdefault(libelle, ligne)
 
         lignes: List[ComparisonRow] = []
+        sans_reponse: List[str] = []
         for position, axe in enumerate(axes):
             # Index d'abord, libelle ensuite, ABSENCE a defaut.
             #
@@ -443,11 +460,20 @@ class ComparisonService:
             # vide est un defaut visible ; une case juste sous le mauvais
             # libelle ne l'est pas.
             ligne = par_index.get(position) or par_libelle.get(axe.strip().lower()) or {}
+            if not ligne:
+                sans_reponse.append(axe)
             lignes.append(
                 ComparisonRow(
                     criterion=axe,
                     a=cellule(ligne.get("valeur_a"), ligne.get("sources_a"), index_a),
                     b=cellule(ligne.get("valeur_b"), ligne.get("sources_b"), index_b),
                 )
+            )
+        if sans_reponse:
+            # Affichees comme absentes, et dites ici : un modele qui saute des
+            # criteres de facon repetee doit se voir dans les journaux.
+            logger.warning(
+                "⚖️ %d critere(s) sans reponse du modele : %s",
+                len(sans_reponse), ", ".join(sans_reponse),
             )
         return lignes, orphelines

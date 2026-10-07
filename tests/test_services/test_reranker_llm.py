@@ -76,6 +76,17 @@ class TestHappyPath:
         assert "scores" in llm.calls[0]["response_schema"]["properties"]
 
     @pytest.mark.asyncio
+    async def test_systeme_neutre(self):
+        """Sans lui, le systeme du chat exigerait « Sources: » au lieu des notes JSON."""
+        llm = _LLM(json.dumps({"scores": []}))
+
+        await rerank_with_llm("question", _chunks(2), llm=llm)
+
+        systeme = llm.calls[0]["system"]
+        assert "JSON" in systeme
+        assert "Sources" not in systeme
+
+    @pytest.mark.asyncio
     async def test_only_the_head_is_sent(self):
         chunks = _chunks(30)
         llm = _LLM(json.dumps({"scores": [{"id": 0, "score": 5.0}]}))

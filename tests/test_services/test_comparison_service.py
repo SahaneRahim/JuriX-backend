@@ -30,6 +30,7 @@ from app.schemas.comparison import (
 )
 from app.services.comparison_service import (
     COMPARISON_MAX_TOKENS,
+    COMPARISON_MAX_TOKENS_SECOND_ESSAI,
     COMPARISON_TEMPERATURE,
     ComparisonError,
     ComparisonOverloadedError,
@@ -345,6 +346,33 @@ class TestGrille:
         assert len(resultat.rows) == len(CRITERES_PAR_DEFAUT)
         assert resultat.rows[-1].a.value == MENTION_ABSENCE
 
+    async def test_lignes_manquantes_journalisees(self, db_session, code_minier, llm, caplog):
+        llm.generate.return_value = {"response": json.dumps({
+            "lignes": [{"index": 0, "critere": CRITERES_PAR_DEFAUT[0], "valeur_a": "A",
+                        "sources_a": ["32"], "valeur_b": "B", "sources_b": ["53"]}],
+            "differences_majeures": [], "angles_morts": [],
+        })}
+        service = ComparisonService(db_session, llm=llm)
+
+        with caplog.at_level("WARNING", logger="app.services.comparison_service"):
+            await service.compare("permis de recherche", "permis d'exploitation")
+
+        assert f"{len(CRITERES_PAR_DEFAUT) - 1} critere(s) sans reponse" in caplog.text
+        assert CRITERES_PAR_DEFAUT[-1] in caplog.text
+
+    @pytest.mark.parametrize("langue", ["fr", "en"])
+    async def test_le_prompt_nomme_les_cles_et_le_json(self, db_session, code_minier, llm, langue):
+        """Le schema seul ne suffisait pas : la grille revenait sous d'autres cles."""
+        service = ComparisonService(db_session, llm=llm)
+
+        await service.compare("permis de recherche", "permis d'exploitation", language=langue)
+
+        prompt = llm.generate.await_args.kwargs["prompt"]
+        assert "JSON" in prompt
+        for cle in ("lignes", "index", "critere", "valeur_a", "valeur_b",
+                    "sources_a", "sources_b", "differences_majeures", "angles_morts"):
+            assert f"`{cle}`" in prompt
+
     async def test_reponses_desordonnees_ne_glissent_pas(
         self, db_session, code_minier, llm
     ):
@@ -547,6 +575,22 @@ class TestEchecs:
         with pytest.raises(ComparisonError, match="incomplete"):
             await service.compare("permis de recherche", "permis d'exploitation")
 
+        # Un second essai, au double du budget, avant d'abandonner.
+        budgets = [appel.kwargs["max_tokens"] for appel in llm.generate.await_args_list]
+        assert budgets == [COMPARISON_MAX_TOKENS, COMPARISON_MAX_TOKENS_SECOND_ESSAI]
+
+    async def test_grille_coupee_redemandee_au_double(self, db_session, code_minier, llm):
+        llm.generate.side_effect = [
+            {"response": '{"lignes": [{"index": 0', "tronquee": True},
+            {"response": _grille(CRITERES_PAR_DEFAUT)},
+        ]
+        service = ComparisonService(db_session, llm=llm)
+
+        resultat = await service.compare("permis de recherche", "permis d'exploitation")
+
+        assert resultat.rows[0].a.value == f"Regime A sur {CRITERES_PAR_DEFAUT[0]}"
+        assert llm.generate.await_args.kwargs["max_tokens"] == COMPARISON_MAX_TOKENS_SECOND_ESSAI == 16384
+
     @pytest.mark.parametrize(
         "erreur,attendue",
         [
@@ -563,3 +607,41 @@ class TestEchecs:
 
         with pytest.raises(attendue):
             await service.compare("permis de recherche", "permis d'exploitation")
+
+
+# ==================== VRAIE API (sur demande) ====================
+
+
+@pytest.mark.mistral_live
+async def test_vrai_mistral_comparaison_json_sept_lignes():
+    """
+    UN appel au vrai Mistral, sous le schema strict : un JSON valide, et une
+    ligne par critere, chacune a sa place. Avant le mode strict, chaque case
+    revenait « Non trouvé » : la grille arrivait sous d'autres cles.
+    """
+    from unittest.mock import MagicMock
+
+    from app.schemas.search import ChunkResult
+    from app.services.mistral_service import MistralService
+
+    def chunk(numero, texte):
+        return ChunkResult(
+            article_id=int(numero), law_id=1, number=numero, content=texte,
+            reference="LOI-2016-017", law_title="Loi portant Code Minier",
+        )
+
+    service = ComparisonService(MagicMock(), llm=MistralService())
+    chunks_a = [chunk("32", A_32), chunk("33", A_33)]
+    chunks_b = [chunk("49", A_49), chunk("53", A_53)]
+
+    brut = await service._generer(
+        "permis de recherche", "permis d'exploitation",
+        chunks_a, chunks_b, CRITERES_PAR_DEFAUT, "fr",
+    )
+    lignes, orphelines = service._assembler(
+        brut, CRITERES_PAR_DEFAUT, service._indexer(chunks_a), service._indexer(chunks_b), "fr",
+    )
+
+    assert sorted(ligne["index"] for ligne in brut["lignes"]) == list(range(len(CRITERES_PAR_DEFAUT)))
+    assert any(ligne.a.sources and ligne.b.sources for ligne in lignes)
+    assert orphelines == []

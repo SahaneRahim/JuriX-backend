@@ -239,6 +239,15 @@ Extraits numérotés :
 Attribue à chaque extrait une note de 0 à 10 : 10 si l'extrait répond directement à la question, 0 s'il est hors sujet. Réponds uniquement par le JSON demandé, une entrée par extrait, en reprenant les numéros donnés."""
 
 
+# Systeme court et neutre, OBLIGATOIRE : sans lui, `generate` retombe sur
+# l'instruction du chat, qui impose de citer des articles et de finir par
+# « Sources: » — de la prose au lieu des notes JSON demandees.
+_LLM_SYSTEM = (
+    "Tu notes la pertinence d'extraits juridiques. Tu réponds uniquement par "
+    "le JSON demandé, sans commentaire."
+)
+
+
 def _format_blocks(chunks: List[ChunkResult], excerpt_chars: int = 600) -> str:
     parts = []
     for index, chunk in enumerate(chunks):
@@ -282,7 +291,7 @@ async def rerank_with_llm(
     """
     Notation des `top_n` premiers chunks par le modele, melangee a l'etage 1.
 
-    Le LLM est un PARAMETRE et non un appel a get_gemini_service() : un test
+    Le LLM est un PARAMETRE et non un appel a get_llm_service() : un test
     injecte une doublure, et le harnais d'evaluation peut changer de modele.
 
     Toute defaillance — expiration, exception, reponse vide, JSON invalide,
@@ -307,6 +316,7 @@ async def rerank_with_llm(
                 prompt=_LLM_PROMPT.format(
                     question=question, blocks=_format_blocks(head)
                 ),
+                system=_LLM_SYSTEM,
                 temperature=0.0,
                 max_tokens=1024,
                 response_mime_type="application/json",
