@@ -4,7 +4,7 @@ Modèles SQLAlchemy pour les lois, articles et catégories.
 Ce module définit les modèles de base de données pour le système JuriX:
 - Law: Documents juridiques (lois, décrets, ordonnances)
 - Article: Articles individuels d'une loi
-- Category: Catégories juridiques (12 catégories camerounaises)
+- Category: Catégories juridiques (les 14 domaines canoniques, migration 013)
 
 Features v2.1:
 - Détection automatique de langue (language, language_confidence)
@@ -47,19 +47,11 @@ class Category(Base):
     """
     Modèle pour les catégories juridiques.
 
-    Représente les 12 catégories de droit camerounais:
-    1. Droit Constitutionnel
-    2. Droit Civil
-    3. Droit Pénal
-    4. Droit Commercial OHADA
-    5. Droit du Travail
-    6. Droit Fiscal
-    7. Droit Administratif
-    8. Droit Foncier
-    9. Droit de la Famille
-    10. Droit de l'Environnement
-    11. Droit International
-    12. Droit des Affaires
+    Représente les 14 domaines canoniques du droit camerounais, fixés par
+    la migration 013 et repris dans legal_domain_classifier.CANONICAL_DOMAINS
+    (un test vérifie l'accord) : du Droit Constitutionnel à l'Éducation,
+    Recherche, Culture et Médias. Une loi s'y rattache PAR LE NOM du domaine,
+    jamais par une position.
 
     Attributes:
         id: Identifiant unique

@@ -362,7 +362,7 @@ class CategoryService:
             Dictionary mapping category IDs to names
 
         Example:
-            {1: "Droit Civil", 2: "Droit Pénal", ...}
+            {1007: "Droit Civil et Procédure Civile", 1006: "Droit Pénal et Procédure Pénale", ...}
         """
         try:
             logger.debug("🗺️  Fetching category ID → Name mapping")
@@ -387,7 +387,7 @@ class CategoryService:
             Dictionary mapping category names to IDs
 
         Example:
-            {"Droit Civil": 1, "Droit Pénal": 2, ...}
+            {"Droit Civil et Procédure Civile": 1007, "Droit Pénal et Procédure Pénale": 1006, ...}
         """
         try:
             logger.debug("🗺️  Fetching category Name → ID mapping")

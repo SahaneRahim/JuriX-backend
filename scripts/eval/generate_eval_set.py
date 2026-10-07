@@ -208,7 +208,9 @@ def _write_review_file(path: Path, items: List[Dict[str, Any]],
     for index, item in enumerate(items):
         source = articles[item["expected_article_id"]]
         excerpt = " ".join(source["content"].split())[:140]
-        flag = " ⚠️" if item["rejected"] else ""
+        # `rejected` est retire des items retenus avant l'ecriture du jeu :
+        # le lire en dur levait KeyError apres une generation entiere.
+        flag = " ⚠️" if item.get("rejected") else ""
         lines.append(
             f"| {index} | {item['lexical_overlap']:.2f}{flag} | {item['question']} | "
             f"{source['reference']} art. {source['number']} — {excerpt}… |"

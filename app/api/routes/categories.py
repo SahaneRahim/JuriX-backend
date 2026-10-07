@@ -140,9 +140,9 @@ async def list_categories(
     ```json
     [
         {
-            "id": 1,
-            "name": "Droit Civil",
-            "description": "Civil law",
+            "id": 1007,
+            "name": "Droit Civil et Procédure Civile",
+            "description": "Personnes, obligations, contrats, instances civiles et voies d'exécution",
             "created_at": "2024-01-01T00:00:00",
             "law_count": 45
         }
@@ -424,8 +424,8 @@ async def get_category_stats(
     **Example Response:**
     ```json
     {
-        "category_id": 1,
-        "category_name": "Droit Civil",
+        "category_id": 1007,
+        "category_name": "Droit Civil et Procédure Civile",
         "law_count": 45,
         "percentage": 26.47
     }
@@ -476,14 +476,14 @@ async def get_all_category_stats(
     ```json
     [
         {
-            "category_id": 1,
-            "category_name": "Droit Civil",
+            "category_id": 1007,
+            "category_name": "Droit Civil et Procédure Civile",
             "law_count": 45,
             "percentage": 26.47
         },
         {
-            "category_id": 2,
-            "category_name": "Droit Pénal",
+            "category_id": 1006,
+            "category_name": "Droit Pénal et Procédure Pénale",
             "law_count": 38,
             "percentage": 22.35
         }
@@ -532,9 +532,9 @@ async def get_id_to_name_mapping(
     **Example Response:**
     ```json
     {
-        "1": "Droit Civil",
-        "2": "Droit Pénal",
-        "3": "Droit Commercial"
+        "1007": "Droit Civil et Procédure Civile",
+        "1006": "Droit Pénal et Procédure Pénale",
+        "1010": "Droit des Affaires, Banque et OHADA"
     }
     ```
 
@@ -576,9 +576,9 @@ async def get_name_to_id_mapping(
     **Example Response:**
     ```json
     {
-        "Droit Civil": 1,
-        "Droit Pénal": 2,
-        "Droit Commercial": 3
+        "Droit Civil et Procédure Civile": 1007,
+        "Droit Pénal et Procédure Pénale": 1006,
+        "Droit des Affaires, Banque et OHADA": 1010
     }
     ```
 

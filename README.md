@@ -4,7 +4,7 @@ API de la plateforme juridique camerounaise JuriX.
 
 Recherche et question-réponse sur un corpus de textes officiels : recherche
 plein texte et sémantique, extraction OCR des PDF scannés, découpage par
-article, réponses citées via Gemini.
+article, réponses citées via Mistral, classements par Groq.
 
 ## Pile technique
 
@@ -15,7 +15,8 @@ article, réponses citées via Gemini.
 | Recherche plein texte | `tsvector` / `websearch_to_tsquery`, index GIN, triggers |
 | Recherche sémantique | `pgvector` + index HNSW, embeddings EmbeddingGemma 768 dim. calculés en local (Gemini en option) |
 | Cache | tables `query_cache` et `embedding_cache` |
-| LLM | Gemini (`google-genai`) |
+| Réponses du chat, explications, comparaisons | Mistral `ministral-14b` (API REST, `LLM_PROVIDER=mistral`) ; Gemini en option |
+| Classement d'intention et des lois | Groq : `qwen3.8-27b` (chat), `gpt-oss-120b` (lois) |
 | Extraction PDF | Docling en local, OCR pleine page (Gemini en option) |
 | Tâches de fond | `BackgroundTasks` FastAPI |
 
@@ -26,7 +27,9 @@ d'attente sont assurés par PostgreSQL et par le serveur applicatif.
 
 - Python 3.11
 - PostgreSQL 16 avec les extensions `vector` et `pg_trgm`
-- Une clé API Gemini (Google AI Studio), pour le chat
+- Une clé API Mistral (console.mistral.ai), pour le chat
+- Une clé API Groq (console.groq.com), pour le classement des messages et des
+  lois
 - Le modèle EmbeddingGemma sur disque (voir plus bas), pour la recherche
   sémantique
 - Pour ingérer des PDF : Docling et torch (`requirements-ingestion.txt`), un GPU
@@ -52,7 +55,9 @@ pip install -r requirements-dev.txt      # + outils de test
 
 cp .env.example .env                     # puis renseigner les valeurs
 
-alembic upgrade head                     # schéma, extensions, index, triggers
+# Schéma, extensions, index, triggers. Alembic ne lit PAS le .env : la base
+# visée est nommée à chaque commande, et elle est affichée avant de migrer.
+DATABASE_URL=postgresql://jurix:jurix@localhost:5433/jurix_dev alembic upgrade head
 python scripts/create_admin.py           # premier compte administrateur
 
 uvicorn app.main:app --reload
@@ -101,12 +106,69 @@ Toutes les variables de `.env.example` sont réellement lues par
 | Variable | Rôle |
 |---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://…` — le driver asyncpg est obligatoire |
-| `GEMINI_API_KEY` / `GEMINI_MODEL` | LLM des réponses. Modèles Flash actuels : `gemini-3.8-flash`, `3.7`, `3.6`, `3.5` |
+| `LLM_PROVIDER` | `mistral` (défaut) ou `gemini` : le modèle des réponses, explications et comparaisons |
+| `MISTRAL_API_KEY` / `MISTRAL_MODEL` | Modèle des réponses (`ministral-14b-latest`) ; `MISTRAL_MODEL_SECOURS` (`ministral-8b-latest`) sert quand le premier reste saturé |
+| `GROQ_API_KEY` | Classement d'intention (`GROQ_MODEL`) et classement des lois (`GROQ_MODEL_CLASSEMENT`), deux modèles pour deux quotas |
+| `INTENT_CLASSIFIER` | `groq` (défaut) ou `llm` (le modèle du chat, un appel de plus par question) |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | Seulement si `LLM_PROVIDER=gemini` ou `EMBEDDING_PROVIDER=gemini` |
 | `EMBEDDING_PROVIDER` | `gemma` (défaut, local et gratuit) ou `gemini` (API payante). En changer impose de régénérer les vecteurs |
 | `GEMMA_MODEL_DIR` | Dossier du modèle EmbeddingGemma (défaut `models/embeddinggemma-300m-onnx`) |
 | `PDF_EXTRACTION_PAGES_PER_CALL` | Pages envoyées par appel d'extraction (défaut 20) |
 | `SECRET_KEY` | Signature JWT. **Obligatoire hors développement** : l'application refuse de démarrer si la valeur du dépôt est conservée |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Valeurs par défaut de `scripts/create_admin.py` |
+
+### Fournisseurs et quotas
+
+Paliers gratuits vérifiés le 07/10/2026 :
+
+| Fournisseur | Modèle | Plafonds |
+|---|---|---|
+| Mistral | `ministral-14b` | 30 requêtes par minute |
+| Mistral | `ministral-8b` (secours) | 188 requêtes par minute |
+| Groq, **par modèle** | `qwen3.8-27b`, `gpt-oss-120b` | 30 requêtes et 8 000 jetons par minute, 1 000 requêtes et 200 000 jetons par jour |
+
+Chaque appel passe par un **limiteur** (`app/core/limiteur.py`) qui fait
+attendre avant d'envoyer, plutôt que de collectionner les refus.
+
+- **Mistral.** Un 429 est rejoué (`Retry-After`), puis le modèle de secours
+  prend le relais ; au-delà de 20 s d'attente, l'utilisateur reçoit « service
+  saturé, réessayez » (503), jamais « quota épuisé ». Une réponse coupée — budget
+  de jetons, ou flux rompu en cours de route — est **complétée** par une suite ;
+  la mention « réponse interrompue » ne reste que si la suite échoue. Chaque
+  appel journalise modèle, fin, jetons et durée.
+- **Groq, classement d'intention.** Consignes courtes, verdicts en cache. Quand
+  Groq ne peut pas répondre dans les temps (quota, attente, panne), le message
+  est traité comme une question de droit : c'est l'erreur sans conséquence. Mesure
+  sur 122 messages étiquetés : 121 justes, aucune question de droit perdue
+  (`python -m scripts.eval.evaluer_intention --limite 122`).
+- **Groq, classement des lois.** Par lots (40 titres par requête). Jamais de
+  catégorie inventée : un classement impossible laisse la catégorie vide et le
+  dit dans `processing_error`.
+
+### Reclassement des lois
+
+Les catégories se recalculent par lots, en deux temps, avec relecture entre
+les deux (`scripts/maintenance/reclassify_domains.py`) :
+
+```bash
+# 1. Verdicts dans data/reclassement/verdicts.jsonl, rien en base. Reprenable :
+#    une relance saute les lois déjà classées. Code 4 = quota du jour épuisé,
+#    l'heure de reprise est affichée.
+python scripts/maintenance/reclassify_domains.py classer --extrait 0 --lot 40
+python scripts/maintenance/reclassify_domains.py classer --incertains --extrait 500 --lot 15
+
+# 2. Simulation : rapport, changements.csv et a_revoir.csv. À RELIRE.
+python scripts/maintenance/reclassify_domains.py appliquer --dry-run
+
+# 3. Écriture en base, catégories déjà posées comprises.
+python scripts/maintenance/reclassify_domains.py appliquer --force
+```
+
+Une loi « à revoir » ou sous le seuil de confiance (`--seuil`, 0,6) n'est jamais
+appliquée. Le nom de la catégorie est figé dans le texte vectorisé
+(`embed_text`) : les lois de `changements.csv` sont à redécouper puis
+revectoriser. Pour une ingestion de masse, `ingest_corpus.py --sans-classement`
+laisse le classement à ce script : une requête pour 40 lois au lieu de 40.
 
 ## Authentification
 
@@ -295,7 +357,7 @@ restauration ou un changement de fournisseur, les vecteurs manquants ou
 d'un autre modèle doivent être régénérés :
 
 ```bash
-alembic upgrade head
+DATABASE_URL=postgresql://jurix:jurix@localhost:5433/jurix_dev alembic upgrade head
 python scripts/regenerate_embeddings.py --all --batch-size 16   # reprenable
 python scripts/regenerate_embeddings.py --reindex               # index en masse
 ```
@@ -310,7 +372,7 @@ Les chunks remontés passent par `app/services/reranker.py` avant d'être tronqu
 et mis en cache. L'étage 1 est lexical (numéro d'article demandé, densité des
 termes, expression exacte, titre de loi, pénalité des formules d'exécution) :
 sans dépendance, sans réseau, actif par défaut. L'étage 2 fait noter les 20
-meilleurs chunks par Gemini ; il ajoute un appel facturé sur le chemin critique,
+meilleurs chunks par le modèle du chat ; il ajoute un appel sur le chemin critique,
 reste désactivé (`RERANK_LLM_ENABLED`) et dégrade toujours vers l'étage 1.
 
 ### Explication et comparaison
@@ -328,12 +390,13 @@ n'y a rien à converser :
   (`app/services/comparison_service.py`). **Une recherche par sujet**, l'une
   après l'autre : une requête unique mélangeant les deux termes rendait six
   articles d'un régime contre trois de l'autre, en ratant le bloc qui définissait
-  le second. La sortie est contrainte par un schéma JSON où chaque cellule doit
-  citer ses articles ; un numéro cité sans article correspondant est renvoyé
+  le second. La sortie est contrainte par un schéma JSON **strict** où chaque
+  cellule doit citer ses articles (une grille coupée est redemandée une fois, au
+  double du budget) ; un numéro cité sans article correspondant est renvoyé
   dans `unmatched_citations` plutôt qu'avalé, et le texte intégral des sources
   accompagne chaque cellule pour que le lecteur vérifie lui-même.
 
-Aucun des deux n'est mis en cache : chaque appel dépense un appel Gemini.
+Aucun des deux n'est mis en cache : chaque appel dépense un appel au modèle.
 
 ### Mesure
 
@@ -365,13 +428,23 @@ triggers, extensions) n'existent que dans les migrations, jamais dans
      realite n'en a jamais compte qu'un. -->
 
 export TEST_DATABASE_URL=postgresql+asyncpg://jurix:jurix@localhost:5433/jurix_test
-pytest                                   # tout
+pytest                                   # tout, sans aucun appel reseau
 pytest -m "not integration"              # sans base
+pytest -m groq_live                      # appels reels a Groq (une poignee)
+pytest -m mistral_live                   # appels reels a Mistral (cinq)
 pytest --cov=app --cov-report=term-missing
 ```
 
 Sans base joignable, les tests qui en dépendent sont **ignorés avec la commande
 à lancer** — jamais silencieusement verts.
+
+**Aucun appel réel par défaut.** Les clés de Gemini, Groq et Mistral sont
+remplacées par des clés factices, et une garde réseau fait échouer tout test qui
+tenterait de joindre Groq ou Mistral : une suite complète vidait le quota
+gratuit de Groq. Les tests marqués `groq_live` ou `mistral_live` lèvent la garde
+du seul service visé, avec les vraies clés, et ne tournent que sur demande
+(`-m`). `JURIX_E2E=1` garde les vraies clés et ouvre tout, pour un essai de bout
+en bout délibéré.
 
 ## Structure
 

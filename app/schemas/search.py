@@ -384,8 +384,8 @@ class SearchResponse(BaseModel):
                         "type": "code",
                         "language": "fr",
                         "status": "published",
-                        "category_id": 3,
-                        "category_name": "Droit Commercial OHADA",
+                        "category_id": 1010,
+                        "category_name": "Droit des Affaires, Banque et OHADA",
                         "relevance_score": 0.92,
                         "matched_articles": [],
                         "highlights": {

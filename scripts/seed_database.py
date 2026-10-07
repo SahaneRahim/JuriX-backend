@@ -1,4 +1,14 @@
-"""Seed database with sample Cameroonian laws for testing."""
+"""
+Seed database with sample Cameroonian laws for testing.
+
+Les categories sont les 14 domaines canoniques, crees PAR LEUR NOM s'ils
+manquent, et les lois s'y rattachent par le nom. L'ancienne version semait
+cinq categories aux identifiants fixes (1 a 5) et aux noms d'avant la
+migration 013 : sur une base migree, elle en ajoutait une quinzieme, et ses
+lois pointaient sur la categorie qui portait par hasard l'identifiant 1, 2
+ou 3 — le defaut meme que la resolution par le nom a corrige dans le
+pipeline.
+"""
 
 import asyncio
 import sys
@@ -11,21 +21,20 @@ from datetime import date
 
 from app.core.database import AsyncSessionLocal, Base, engine
 from app.models.law import Article, Category, Law
-
-SAMPLE_CATEGORIES = [
-    {"id": 1, "name": "Droit Civil", "description": "Droit civil camerounais"},
-    {"id": 2, "name": "Droit Commercial OHADA", "description": "Droit commercial OHADA"},
-    {"id": 3, "name": "Droit Pénal", "description": "Droit pénal camerounais"},
-    {"id": 4, "name": "Droit Administratif", "description": "Droit administratif"},
-    {"id": 5, "name": "Droit du Travail", "description": "Code du travail"},
-]
+from app.services.legal_domain_classifier import (
+    AFFAIRES,
+    CANONICAL_DOMAINS,
+    CIVIL,
+    DESCRIPTIONS_DOMAINES,
+    PENAL,
+)
 
 SAMPLE_LAWS = [
     {
         "reference": "LOI-2024-001",
         "title": "Code Civil Camerounais - Livre 1",
         "type": "Loi",
-        "category_id": 1,
+        "domaine": CIVIL,
         "language": "fr",
         "status": "published",
         "publication_date": date(2024, 1, 15),
@@ -73,7 +82,7 @@ Article 9. La responsabilité civile engage celui qui cause un dommage à autrui
         "reference": "LOI-OHADA-2023-015",
         "title": "Acte Uniforme OHADA - Droit Commercial",
         "type": "Acte Uniforme",
-        "category_id": 2,
+        "domaine": AFFAIRES,
         "language": "fr",
         "status": "published",
         "publication_date": date(2023, 6, 20),
@@ -115,7 +124,7 @@ Article 7. Les formes de sociétés commerciales reconnues sont : la société e
         "reference": "LOI-2016-007",
         "title": "Code Pénal Camerounais",
         "type": "Loi",
-        "category_id": 3,
+        "domaine": PENAL,
         "language": "fr",
         "status": "published",
         "publication_date": date(2016, 7, 12),
@@ -164,25 +173,33 @@ async def seed_database():
     print("   Tables created successfully")
 
     async with AsyncSessionLocal() as session:
-        # Create categories (skip if exist)
+        # Les 14 domaines, par leur nom : seuls les manquants sont crees.
         print("\n[2/4] Creating categories...")
         from sqlalchemy import select
-        result = await session.execute(select(Category))
-        existing_categories = result.scalars().all()
-
-        if not existing_categories:
-            for cat_data in SAMPLE_CATEGORIES:
-                category = Category(**cat_data)
-                session.add(category)
-            await session.commit()
-            print(f"   Created {len(SAMPLE_CATEGORIES)} categories")
-        else:
-            print(f"   Skipped (already exist: {len(existing_categories)} categories)")
+        presents = {
+            nom.lower(): identifiant
+            for nom, identifiant in (await session.execute(select(Category.name, Category.id))).all()
+        }
+        crees = 0
+        for ordre, nom in enumerate(CANONICAL_DOMAINS):
+            if nom.lower() not in presents:
+                session.add(Category(
+                    name=nom, description=DESCRIPTIONS_DOMAINES[nom], display_order=ordre,
+                ))
+                crees += 1
+        await session.commit()
+        ids = {
+            nom.lower(): identifiant
+            for nom, identifiant in (await session.execute(select(Category.name, Category.id))).all()
+        }
+        print(f"   {crees} created, {len(CANONICAL_DOMAINS) - crees} already present")
 
         # Create laws with articles
         print("\n[3/4] Creating laws and articles...")
         for law_data in SAMPLE_LAWS:
             articles_data = law_data.pop("articles")
+            # Rattachement par le NOM du domaine, jamais par une position.
+            law_data["category_id"] = ids[law_data.pop("domaine").lower()]
             law = Law(**law_data)
             session.add(law)
             await session.flush()  # Get law ID
