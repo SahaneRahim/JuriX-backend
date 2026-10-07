@@ -2,7 +2,7 @@
 Genere un jeu d'evaluation (question -> article attendu) a partir du corpus.
 
 Le principe est simple et le piege l'est tout autant : des questions ecrites par
-Gemini a partir d'un article, notees par un systeme qui doit retrouver cet
+un modele (celui de LLM_PROVIDER) a partir d'un article, notees par un systeme qui doit retrouver cet
 article, forment une boucle fermee. Deux garde-fous l'ouvrent, et ils ne sont pas
 optionnels :
 
@@ -83,6 +83,13 @@ Contraintes strictes :
 - reprends au maximum DEUX mots de contenu présents dans l'article ;
 - interroge la SITUATION concrète, pas la formulation du texte ;
 - français, une phrase par question."""
+
+# Systeme neutre, OBLIGATOIRE : sans lui, `generate` retombe sur l'instruction
+# du chat, qui exige de citer des articles et de finir par « Sources: ».
+_SYSTEME = (
+    "Tu rédiges des questions de test pour un moteur de recherche juridique. "
+    "Tu réponds uniquement par le JSON demandé."
+)
 
 
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -232,11 +239,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logger.info("--dry-run : aucun appel a l'API, aucune ecriture")
         return 0
 
-    from app.services.gemini_service import get_gemini_service
+    from app.services.llm import get_llm_service
 
-    llm = get_gemini_service()
-    if llm is None:
-        logger.error("Service Gemini indisponible")
+    try:
+        llm = get_llm_service()
+    except Exception as exc:
+        logger.error("Service de generation indisponible : %s", exc)
         return 1
 
     import asyncio
@@ -255,7 +263,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             try:
                 response = await llm.generate(
-                    prompt=prompt, temperature=0.7, max_tokens=512,
+                    prompt=prompt, system=_SYSTEME, temperature=0.7, max_tokens=512,
                     response_mime_type="application/json", response_schema=_SCHEMA,
                 )
                 payload = json.loads(response["response"])

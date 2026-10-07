@@ -370,6 +370,14 @@ class TestFlux:
         assert fins == ["STOP"]
         assert faux.corps(0)["stream"] is True
 
+    async def test_usage_rapporte(self, mistral):
+        service, _ = mistral(flux("Oui."))
+        usages = []
+
+        [m async for m in service.generate_stream("q", usage=usages.append)]
+
+        assert usages == [{"prompt_tokens": 12, "completion_tokens": 7, "modele": PRINCIPAL}]
+
     async def test_coupe_puis_suite_echo_retire(self, mistral):
         service, faux = mistral(
             flux("La loi ", "dispose", fin="length"),

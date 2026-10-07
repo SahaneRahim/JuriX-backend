@@ -576,6 +576,7 @@ FORBIDDEN:
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         fin: Optional[Callable[[str], None]] = None,
+        usage: Optional[Callable[[Dict[str, Any]], None]] = None,
         **kwargs,
     ) -> AsyncIterator[str]:
         """
@@ -583,7 +584,8 @@ FORBIDDEN:
 
         `fin` recoit la fin normalisee : « STOP », « MAX_TOKENS » si la reponse
         reste coupee malgre la suite, FIN_INTERROMPUE si le flux s'est rompu
-        et que la suite a echoue.
+        et que la suite a echoue. `usage` recoit le decompte de jetons du
+        premier flux et le modele qui a repondu (mesures, evaluation).
         """
         messages = [
             {"role": "system", "content": system or self.SYSTEM_INSTRUCTION},
@@ -591,7 +593,7 @@ FORBIDDEN:
         ]
         produit: List[str] = []
         brute: Optional[str] = None
-        usage = None
+        usage_flux = None
         modele = self.model_name
         rupture: Optional[Exception] = None
         debut = time.monotonic()
@@ -603,7 +605,7 @@ FORBIDDEN:
                 if raison:
                     brute = raison
                 if morceau_usage:
-                    usage = morceau_usage
+                    usage_flux = morceau_usage
                 if texte:
                     produit.append(texte)
                     yield texte
@@ -618,8 +620,12 @@ FORBIDDEN:
 
         fin_normalisee = FIN_INTERROMPUE if rupture else FINS.get(brute, "UNKNOWN")
         self._journal(
-            modele, f"{FIN_INTERROMPUE} ({rupture!r})" if rupture else fin_normalisee, usage, debut
+            modele, f"{FIN_INTERROMPUE} ({rupture!r})" if rupture else fin_normalisee,
+            usage_flux, debut,
         )
+
+        if usage is not None:
+            usage({**(usage_flux or {}), "modele": modele})
 
         texte = "".join(produit)
         if fin_normalisee in ("MAX_TOKENS", FIN_INTERROMPUE) and texte and not en_boucle(texte):
