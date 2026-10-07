@@ -187,6 +187,24 @@ class TestMontee:
         assert set(_ids(session)) == set(CANONICAL_DOMAINS)
         assert _lire(session, loi) == (cible, [cible])
 
+    def test_cible_absente_inseree_avant_le_re_pointage(self, session):
+        """
+        La premiere version re-pointait les lois AVANT d'inserer les cibles :
+        une fusion vers un domaine absent laissait ses lois sur la ligne
+        source, que l'etape de suppression passait ensuite a NULL.
+        """
+        avant = _etat_de_007(session)
+        # « Droit Pénal » efface (par l'interface, par exemple) : la cible de
+        # la fusion de « Procédure Pénale » n'existe plus avant la migration.
+        session.execute(text("DELETE FROM categories WHERE name = 'Droit Pénal'"))
+        loi = _loi(session, "L-PROC", avant["Procédure Pénale"])
+        session.commit()
+
+        _alembic("upgrade", "head")
+        session.expire_all()
+
+        assert _lire(session, loi)[0] == _ids(session)[PENAL]
+
     def test_est_idempotente(self, session):
         """Rejouee sur une base deja migree, la montee ne change rien."""
         avant = _etat_de_007(session)
@@ -205,6 +223,22 @@ class TestMontee:
 
 
 class TestDescente:
+    def test_sans_aucun_nom_de_013_rien_n_est_fait(self, session):
+        """
+        Le harnais (migrated_categories) descend sous 007 depuis un etat
+        ancien : la descente de 013 ne doit rien y ajouter ni y reecrire.
+        """
+        _seme(session, ["Droit Civil", "Lois", "Décrets"])
+        avant = session.execute(text(
+            "SELECT id, name, icon, description, display_order FROM categories ORDER BY id"
+        )).all()
+
+        _alembic("downgrade", AVANT_013)
+
+        assert session.execute(text(
+            "SELECT id, name, icon, description, display_order FROM categories ORDER BY id"
+        )).all() == avant
+
     def test_defait_013(self, session):
         ids = _seme(session, CANONICAL_DOMAINS)
         sante = _loi(session, "L-SANTE", ids[SANTE], [ids[SANTE], ids[CIVIL]])
@@ -266,3 +300,42 @@ def test_alembic_sans_database_url_echoue_et_dit_quoi_faire():
     assert resultat.returncode != 0
     assert "DATABASE_URL absente" in resultat.stderr
     assert "alembic upgrade head" in resultat.stderr
+    # La commande suggeree doit marcher : env.py importe l'application, dont le
+    # moteur asynchrone refuse un postgresql:// nu.
+    assert "DATABASE_URL=postgresql+asyncpg://" in resultat.stderr
+
+
+def test_alembic_accepte_l_url_de_l_application():
+    """La forme documentee (+asyncpg, celle du .env) fonctionne, cible affichee."""
+    environnement = {**os.environ, "DATABASE_URL": TEST_DATABASE_URL}
+
+    resultat = subprocess.run(
+        [sys.executable, "-m", "alembic", "current"],
+        cwd=RACINE,
+        env=environnement,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert resultat.returncode == 0, resultat.stderr
+    assert "Alembic -> postgresql://" in resultat.stderr
+    assert "***" in resultat.stderr  # mot de passe masque
+
+
+class TestMigration014:
+    def test_nettoie_les_suggestions_orphelines(self, session):
+        """
+        Une base deja passee par l'ancienne 013 est a d5e6f7a8b9c0 : seule 014
+        y retire les identifiants disparus (10 et 11 sur jurix_dev).
+        """
+        ids = _seme(session, CANONICAL_DOMAINS)
+        _alembic("downgrade", "d5e6f7a8b9c0")
+        loi = _loi(session, "L-ORPH", ids[CIVIL], [99999, ids[CIVIL], 99998, ids[CIVIL], ids[PENAL]])
+        propre = _loi(session, "L-PROPRE", ids[PENAL], [ids[PENAL]])
+        session.commit()
+
+        _alembic("upgrade", "head")
+
+        assert _lire(session, loi)[1] == [ids[CIVIL], ids[PENAL]]
+        assert _lire(session, propre)[1] == [ids[PENAL]]

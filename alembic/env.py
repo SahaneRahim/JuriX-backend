@@ -53,7 +53,7 @@ if not _db_url:
     raise RuntimeError(
         "DATABASE_URL absente de l'environnement : Alembic ne lit pas le .env, "
         "la base visee doit etre nommee a chaque commande. Par exemple :\n"
-        "  DATABASE_URL=postgresql://jurix:jurix@localhost:5433/jurix_dev alembic upgrade head"
+        "  DATABASE_URL=postgresql+asyncpg://jurix:jurix@localhost:5433/jurix_dev alembic upgrade head"
     )
 
 # Alembic needs a sync driver: swap asyncpg with psycopg2

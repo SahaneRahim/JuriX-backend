@@ -285,11 +285,19 @@ def downgrade() -> None:
     - « Procédure Pénale » et « Procédure Civile » reviennent VIDES : apres la
       fusion, rien ne distingue une loi de procedure d'une loi de fond.
 
-    Les lignes que 013 n'a pas creees ne sont pas touchees : une base dans un
-    etat anterieur a 007 (le harnais de test en fabrique une) doit arriver
-    intacte au retour arriere de 007.
+    Sur une base qui ne porte AUCUN nom propre a 013, rien n'est fait : le
+    harnais de test fabrique un etat anterieur a 007, qui doit arriver intact
+    au retour arriere de 007. Sinon, seules les lignes creees ou renommees par
+    013 sont retirees ou renommees ; les autres gardent leur identifiant, et
+    celles qui portent un nom de 007 retrouvent ses descriptions.
     """
     conn = op.get_bind()
+
+    noms_de_013 = [cible for _, cible in RENAMES] + list(NOUVEAUX)
+    if not conn.execute(
+        sa.text(f"SELECT count(*) FROM categories WHERE {_PARMI}"), {"noms": noms_de_013}
+    ).scalar_one():
+        return
 
     # --- 1. Santé et Éducation : lois a NULL, lignes retirees ---------------
     _supprimer(conn, _PARMI, list(NOUVEAUX))

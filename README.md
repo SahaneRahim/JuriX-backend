@@ -57,7 +57,10 @@ cp .env.example .env                     # puis renseigner les valeurs
 
 # Schéma, extensions, index, triggers. Alembic ne lit PAS le .env : la base
 # visée est nommée à chaque commande, et elle est affichée avant de migrer.
-DATABASE_URL=postgresql://jurix:jurix@localhost:5433/jurix_dev alembic upgrade head
+# Même forme d'URL que l'application (+asyncpg) : alembic/env.py importe
+# l'application, dont le moteur asynchrone refuse un postgresql:// nu, et
+# passe lui-même au pilote synchrone.
+DATABASE_URL=postgresql+asyncpg://jurix:jurix@localhost:5433/jurix_dev alembic upgrade head
 python scripts/create_admin.py           # premier compte administrateur
 
 uvicorn app.main:app --reload
@@ -157,15 +160,17 @@ les deux (`scripts/maintenance/reclassify_domains.py`) :
 python scripts/maintenance/reclassify_domains.py classer --extrait 0 --lot 40
 python scripts/maintenance/reclassify_domains.py classer --incertains --extrait 500 --lot 15
 
-# 2. Simulation : rapport, changements.csv et a_revoir.csv. À RELIRE.
-python scripts/maintenance/reclassify_domains.py appliquer --dry-run
+# 2. Simulation de l'étape 3, à l'identique : rapport, changements.csv (toute
+#    loi dont la catégorie changerait) et a_revoir.csv. À RELIRE.
+python scripts/maintenance/reclassify_domains.py appliquer --dry-run --force
 
 # 3. Écriture en base, catégories déjà posées comprises.
 python scripts/maintenance/reclassify_domains.py appliquer --force
 ```
 
 Une loi « à revoir » ou sous le seuil de confiance (`--seuil`, 0,6) n'est jamais
-appliquée. Le nom de la catégorie est figé dans le texte vectorisé
+appliquée. Sans `--force`, une catégorie déjà posée (le choix d'un administrateur,
+peut-être) est gardée, et `changements.csv` le dit pour chaque loi concernée. Le nom de la catégorie est figé dans le texte vectorisé
 (`embed_text`) : les lois de `changements.csv` sont à redécouper puis
 revectoriser. Pour une ingestion de masse, `ingest_corpus.py --sans-classement`
 laisse le classement à ce script : une requête pour 40 lois au lieu de 40.
@@ -357,7 +362,7 @@ restauration ou un changement de fournisseur, les vecteurs manquants ou
 d'un autre modèle doivent être régénérés :
 
 ```bash
-DATABASE_URL=postgresql://jurix:jurix@localhost:5433/jurix_dev alembic upgrade head
+DATABASE_URL=postgresql+asyncpg://jurix:jurix@localhost:5433/jurix_dev alembic upgrade head
 python scripts/regenerate_embeddings.py --all --batch-size 16   # reprenable
 python scripts/regenerate_embeddings.py --reindex               # index en masse
 ```
