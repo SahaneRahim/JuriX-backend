@@ -1,7 +1,9 @@
 import os
+import sys
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine import make_url
 
 from alembic import context
 
@@ -24,7 +26,6 @@ if config.config_file_name is not None:
 
 # add your model's MetaData object here
 # for 'autogenerate' support
-from app.core.config import settings
 from app.core.database import Base
 from app.models import (
     Article,
@@ -38,34 +39,54 @@ from app.models import (
 
 target_metadata = Base.metadata
 
-# Override sqlalchemy.url from environment variable or settings.
+# La base visee vient de DATABASE_URL, et de NULLE PART AILLEURS.
+#
+# Un repli sur settings.DATABASE_URL — donc sur le .env — avait ete ajoute pour
+# eviter de taper la variable. Il faisait migrer en silence la base que le .env
+# designe ce jour-la : demain, celle de production chez Neon. alembic.ini porte
+# volontairement `placeholder://not-used` pour qu'un oubli echoue ; l'echec
+# dit desormais quoi faire.
+#
 # L'application parle asyncpg ; Alembic a besoin d'un pilote synchrone.
-_db_url = os.environ.get("DATABASE_URL", "") or settings.DATABASE_URL
-if _db_url:
-    # Alembic needs a sync driver: swap asyncpg with psycopg2
-    _db_url = _db_url.replace("postgresql+asyncpg://", "postgresql://")
-    _db_url = _db_url.replace("postgres://", "postgresql://")  # parfois donne en postgres:// nu
+_db_url = os.environ.get("DATABASE_URL", "")
+if not _db_url:
+    raise RuntimeError(
+        "DATABASE_URL absente de l'environnement : Alembic ne lit pas le .env, "
+        "la base visee doit etre nommee a chaque commande. Par exemple :\n"
+        "  DATABASE_URL=postgresql://jurix:jurix@localhost:5433/jurix_dev alembic upgrade head"
+    )
 
-    # LA CHAINE DE REQUETE EST RETIREE, et ce n'est pas une precaution de style.
-    #
-    # Echanger le schema sans toucher aux parametres laissait passer a psycopg2
-    # des options qu'il ne connait pas. Mesure :
-    #
-    #     postgresql://...?prepared_statement_cache_size=0
-    #     -> ProgrammingError: invalid dsn: invalid URI query parameter
-    #
-    # Or ce parametre est INDISPENSABLE cote application avec un pooler en mode
-    # transaction, qui ne supporte pas les instructions preparees. Une seule URL
-    # devait donc servir deux pilotes qui n'acceptent pas les memes options.
-    #
-    # Le conteneur lance `alembic upgrade head` a chaque demarrage : sans ce
-    # nettoyage, l'image ne demarre pas du tout en production.
-    #
-    # Rien d'utile n'est perdu : le TLS se regle par PGSSLMODE, variable
-    # d'environnement lue nativement par libpq comme par asyncpg.
-    _db_url = _db_url.split("?", 1)[0]
+# Alembic needs a sync driver: swap asyncpg with psycopg2
+_db_url = _db_url.replace("postgresql+asyncpg://", "postgresql://")
+_db_url = _db_url.replace("postgres://", "postgresql://")  # parfois donne en postgres:// nu
 
-    config.set_main_option("sqlalchemy.url", _db_url)
+# LA CHAINE DE REQUETE EST RETIREE, et ce n'est pas une precaution de style.
+#
+# Echanger le schema sans toucher aux parametres laissait passer a psycopg2
+# des options qu'il ne connait pas. Mesure :
+#
+#     postgresql://...?prepared_statement_cache_size=0
+#     -> ProgrammingError: invalid dsn: invalid URI query parameter
+#
+# Or ce parametre est INDISPENSABLE cote application avec un pooler en mode
+# transaction, qui ne supporte pas les instructions preparees. Une seule URL
+# devait donc servir deux pilotes qui n'acceptent pas les memes options.
+#
+# Le conteneur lance `alembic upgrade head` a chaque demarrage : sans ce
+# nettoyage, l'image ne demarre pas du tout en production.
+#
+# Rien d'utile n'est perdu : le TLS se regle par PGSSLMODE, variable
+# d'environnement lue nativement par libpq comme par asyncpg.
+_db_url = _db_url.split("?", 1)[0]
+
+config.set_main_option("sqlalchemy.url", _db_url)
+
+# La cible est affichee AVANT toute migration, mot de passe masque : une
+# erreur de base se voit avant d'avoir des consequences.
+print(
+    f"Alembic -> {make_url(_db_url).render_as_string(hide_password=True)}",
+    file=sys.stderr,
+)
 
 
 def run_migrations_offline() -> None:
