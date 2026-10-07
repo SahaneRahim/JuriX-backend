@@ -13,6 +13,7 @@ import json
 import httpx
 import pytest
 
+from app.core.config import settings
 from app.core.limiteur import Limiteur
 from app.services import groq_service
 from app.services.groq_service import (
@@ -92,6 +93,8 @@ def horloge():
 @pytest.fixture
 def groq(monkeypatch, horloge):
     """Un service sur faux transport, avec des limiteurs sur horloge factice."""
+    # Lu a chaque appel : un .env qui le changerait changerait ces tests.
+    monkeypatch.setattr(settings, "GROQ_ATTENTE_MAX_429_S", 120.0)
     limiteurs = {}
 
     def limiteur_pour(modele):
@@ -260,6 +263,23 @@ class TestLimiteur:
 
         assert erreur.value.retry_after == pytest.approx(150)
         assert len(faux.requetes) == 1
+
+    async def test_le_recalage_voit_les_autres_processus(self, groq):
+        """
+        Groq annonce 7 000 jetons restants sur 8 000 ; cet appel en a consomme
+        200 (estime a bien plus). Les 800 autres viennent d'un autre processus :
+        la fenetre doit totaliser ce que Groq compte. Recaler AVANT de corriger
+        laissait l'estimation masquer cette consommation.
+        """
+        service, faux = groq(ok(
+            {"intention": "juridique"}, jetons=200,
+            entetes={"x-ratelimit-remaining-tokens": "7000"},
+        ))
+        lim = service.limiteur(QWEN)
+
+        await _completer(service, max_jetons=3000)
+
+        assert lim._jetons_minute.total(lim.maintenant()) == 1000
 
     async def test_usage_reel_corrige_la_reservation(self, groq):
         """L'estimation (entree + max_jetons) est remplacee par l'usage reel."""

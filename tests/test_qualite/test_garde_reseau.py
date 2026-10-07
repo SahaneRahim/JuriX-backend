@@ -24,13 +24,18 @@ from app.services.groq_service import GroqService
 from app.services.mistral_service import MistralService
 from tests.conftest import CLE_FACTICE
 
+# JURIX_E2E=1 ouvre tout, vraies cles comprises : il n'y a alors aucune garde
+# a verifier, et ces tests echouaient sur un transport absent.
+pytestmark = pytest.mark.skipif(
+    os.environ.get("JURIX_E2E") == "1", reason="JURIX_E2E : aucune garde posee"
+)
+
 
 def _garde(module):
     """Le gardien derriere le transport pose par conftest."""
     return module.transport_http.handler.__self__
 
 
-@pytest.mark.skipif(os.environ.get("JURIX_E2E") == "1", reason="JURIX_E2E garde les vraies cles")
 @pytest.mark.parametrize("cle", ["GEMINI_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY"])
 def test_les_cles_sont_factices(cle):
     assert getattr(settings, cle) == CLE_FACTICE

@@ -978,6 +978,21 @@ class TestFluxAligneSurAsk:
         assert texte.endswith(MENTION_REPONSE_INTERROMPUE)
 
     @pytest.mark.asyncio
+    async def test_mention_dans_la_langue_de_la_question(
+        self, rag_service, sample_rag_request, mock_search_results, mock_db_session
+    ):
+        """Une reponse en anglais ne se termine pas par une mention en francais."""
+        requete = sample_rag_request.model_copy(update={"language": "en"})
+        self._preparer(rag_service, mock_db_session, mock_search_results,
+                       ["A soldier who abuses "], raison="MAX_TOKENS")
+
+        evenements = await self._evenements(rag_service, requete)
+
+        texte = "".join(e["chunk"] for e in evenements)
+        assert texte.endswith("*(Answer cut short: maximum length reached. "
+                              "Ask a more specific question to get the rest.)*")
+
+    @pytest.mark.asyncio
     async def test_reponse_complete_sans_mention(
         self, rag_service, sample_rag_request, mock_search_results, mock_db_session
     ):

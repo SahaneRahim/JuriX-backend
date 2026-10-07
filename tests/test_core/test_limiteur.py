@@ -209,6 +209,25 @@ class TestRecaler:
         assert lim.reserver(jetons=50).attente == 0.0
         assert lim.reserver(jetons=200).attente == pytest.approx(60.0)
 
+    def test_l_ecart_s_inscrit_a_sa_place_dans_le_temps(self, horloge):
+        """
+        Le recalage tombe a « maintenant », AVANT un depart deja reserve pour
+        plus tard. Ajoute en queue, il faisait attendre 88 s au lieu de 59.
+        """
+        lim = limiteur(horloge, jetons_par_minute=8000)
+        horloge.t = 99.0
+        lim.reserver(jetons=1000)
+        lim.repousser(31)
+        assert lim.reserver(jetons=3000).depart == pytest.approx(130.0)
+        horloge.t = 101.0
+        lim.recaler(jetons_restants_minute=2000)  # les autres ont pris 2 000
+
+        horloge.t = 102.0
+        reservation = lim.reserver(jetons=4000)
+
+        # A 161, l'ecart (inscrit a 101) est sorti de la fenetre : 3 000 + 4 000.
+        assert reservation.depart == pytest.approx(161.0)
+
     def test_requetes_du_jour_recalees(self, horloge):
         lim = limiteur(horloge, requetes_par_jour=10)
 
@@ -220,6 +239,41 @@ class TestRecaler:
 
 
 class TestAttendre:
+    def test_un_429_pendant_le_sommeil_retarde_le_depart(self, horloge):
+        """
+        Un autre appel recoit un 429 pendant que celui-ci dort : partir a
+        l'heure reservee, c'etait partir en pleine penalite.
+        """
+        lim = limiteur(horloge, requetes_par_minute=30)
+        lim.reserver()
+        dormir = horloge.dormir
+
+        def dormir_et_subir_un_429(secondes):
+            dormir(secondes)
+            if len(horloge.sommeils) == 1:
+                lim.repousser(10, "429")
+
+        lim._dormir = dormir_et_subir_un_429
+
+        lim.attendre_sync()
+
+        assert horloge.sommeils == [2.0, 10.0]
+        assert horloge.t == pytest.approx(1012.0)
+
+    def test_le_supplement_respecte_attente_max(self, horloge):
+        lim = limiteur(horloge, requetes_par_minute=30)
+        lim.reserver()
+        dormir = horloge.dormir
+
+        def dormir_et_subir_un_429(secondes):
+            dormir(secondes)
+            lim.repousser(60, "429")
+
+        lim._dormir = dormir_et_subir_un_429
+
+        with pytest.raises(AttenteTropLongue):
+            lim.attendre_sync(attente_max=5)
+
     def test_synchrone_dort_l_attente(self, horloge):
         lim = limiteur(horloge, requetes_par_minute=30)
 
@@ -260,15 +314,45 @@ class TestConcurrence:
         assert dedans == ["a", "b"]
 
     def test_un_semaphore_par_boucle(self, horloge):
-        """Partage entre deux boucles, un asyncio.Semaphore leverait RuntimeError."""
-        lim = limiteur(horloge, concurrence=2)
+        """
+        Partage entre deux boucles, un asyncio.Semaphore leverait RuntimeError.
+        Il ne se lie a sa boucle que lorsqu'un appel doit ATTENDRE : d'ou deux
+        appels concurrents pour une seule place, dans chaque boucle.
+        """
+        lim = limiteur(horloge, concurrence=1)
 
-        async def appel():
+        async def deux_appels():
+            async def appel():
+                async with lim.creneau():
+                    await asyncio.sleep(0)
+
+            await asyncio.gather(appel(), appel())
+
+        asyncio.run(deux_appels())
+        asyncio.run(deux_appels())
+
+    async def test_l_attente_d_une_place_est_bornee(self, horloge):
+        """
+        Toutes les places prises par des generations longues : l'appel
+        attendait sans limite, sans secours ni 503.
+        """
+        lim = limiteur(horloge, concurrence=1)
+        liberer = asyncio.Event()
+
+        async def occuper():
             async with lim.creneau():
-                await asyncio.sleep(0)
+                await liberer.wait()
 
-        asyncio.run(appel())
-        asyncio.run(appel())
+        occupant = asyncio.create_task(occuper())
+        await asyncio.sleep(0)
+
+        with pytest.raises(AttenteTropLongue) as erreur:
+            async with lim.creneau(attente_max=0.05):
+                pass
+
+        assert erreur.value.raison == "concurrence"
+        liberer.set()
+        await occupant
 
     async def test_le_refus_rend_la_place(self, horloge):
         lim = limiteur(horloge, requetes_par_minute=30, concurrence=1)

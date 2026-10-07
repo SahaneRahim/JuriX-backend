@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional
 
 from app.core.config import settings
 from app.services.gemini_service import (
+    GeminiBudgetEpuiseError,
     GeminiOverloadedError,
     GeminiQuotaError,
     GeminiServiceError,
@@ -38,39 +39,57 @@ ERREURS_QUOTA = (GeminiQuotaError, MistralQuotaError)
 ERREURS_SATURATION = (GeminiOverloadedError, MistralOverloadedError)
 # Toute erreur de generation, y compris les deux familles ci-dessus.
 ERREURS_LLM = (GeminiServiceError, MistralServiceError)
+# Budget epuise avant toute sortie : un budget plus grand peut suffire.
+ERREURS_BUDGET = (GeminiBudgetEpuiseError,)
 
-# Ajoutee a une reponse que le modele n'a pas pu finir : sans elle, une phrase
-# coupee ressemble a une reponse complete.
-MENTION_REPONSE_TRONQUEE = (
-    "\n\n*(Réponse interrompue : longueur maximale atteinte. "
-    "Posez une question plus précise pour obtenir la suite.)*"
-)
-# Le flux s'est rompu en cours de reponse, et la suite demandee a echoue :
-# incomplete, mais pas a cause de sa longueur.
-MENTION_REPONSE_INTERROMPUE = (
-    "\n\n*(Réponse interrompue : la connexion avec le modèle a été coupée. "
-    "Reposez la question pour obtenir une réponse complète.)*"
-)
+# Ajoutees a une reponse que le modele n'a pas pu finir : sans elles, une
+# phrase coupee ressemble a une reponse complete. Deux causes, deux remedes :
+# la LONGUEUR (poser une question plus precise) et l'INTERRUPTION — flux
+# rompu, ou fin « error » du fournisseur — (reposer la question). Dans la
+# langue de la reponse ; sans conseil quand il n'y a pas de question a
+# reformuler (l'explication d'un article).
+_MENTIONS = {
+    "fr": {
+        "longueur": "Réponse interrompue : longueur maximale atteinte.",
+        "conseil_longueur": "Posez une question plus précise pour obtenir la suite.",
+        "interruption": "Réponse interrompue : la connexion avec le modèle a été coupée.",
+        "conseil_interruption": "Reposez la question pour obtenir une réponse complète.",
+    },
+    "en": {
+        "longueur": "Answer cut short: maximum length reached.",
+        "conseil_longueur": "Ask a more specific question to get the rest.",
+        "interruption": "Answer interrupted: the connection with the model was lost.",
+        "conseil_interruption": "Ask again to get a complete answer.",
+    },
+}
+# Fins dues a une interruption, et non a la longueur.
+_FINS_INTERROMPUES = frozenset({FIN_INTERROMPUE, "ERROR"})
 
 
-def mention_de_fin(fin: Optional[str]) -> str:
+def mention_de_fin(fin: Optional[str], langue: str = "fr", conseil: bool = True) -> str:
     """
     La mention a ajouter a une reponse selon sa fin, ou "" si elle est
     complete. `fin` suit le vocabulaire commun (« STOP », « MAX_TOKENS »...) ;
     Gemini et Mistral le partagent.
     """
-    if fin == FIN_INTERROMPUE:
-        return MENTION_REPONSE_INTERROMPUE
-    if fin in FINS_INCOMPLETES:
-        return MENTION_REPONSE_TRONQUEE
-    return ""
+    if fin not in FINS_INCOMPLETES:
+        return ""
+    textes = _MENTIONS.get(langue, _MENTIONS["fr"])
+    cause = "interruption" if fin in _FINS_INTERROMPUES else "longueur"
+    phrase = textes[cause] + (" " + textes[f"conseil_{cause}"] if conseil else "")
+    return f"\n\n*({phrase})*"
 
 
-def mention_de_reponse(reponse: Dict[str, Any]) -> str:
+def mention_de_reponse(reponse: Dict[str, Any], langue: str = "fr", conseil: bool = True) -> str:
     """La mention d'une reponse de `generate` : coupee si elle le dit."""
     if not (reponse or {}).get("tronquee"):
         return ""
-    return mention_de_fin(reponse.get("fin") or "MAX_TOKENS")
+    return mention_de_fin(reponse.get("fin") or "MAX_TOKENS", langue, conseil)
+
+
+# Les mentions francaises completes, telles que le chat les affiche.
+MENTION_REPONSE_TRONQUEE = mention_de_fin("MAX_TOKENS")
+MENTION_REPONSE_INTERROMPUE = mention_de_fin(FIN_INTERROMPUE)
 
 
 def get_llm_service() -> Any:

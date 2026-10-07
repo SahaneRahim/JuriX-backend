@@ -332,13 +332,16 @@ FORBIDDEN:
                         reponse.status_code, reponse.content, reponse.headers, essai
                     )
                     cause = f"HTTP {reponse.status_code}"
+                # Le delai impose est inscrit AVANT de decider d'abandonner :
+                # sinon un Retry-After plus long que le budget etait perdu, et
+                # l'appel suivant repartait aussitot vers le modele sanctionne.
+                limiteur.repousser(attente, cause)
                 if self._abandonner(limiteur, debut, essai, attente):
                     break
                 logger.warning(
                     "⚠️ Mistral %s : %s, nouvel essai dans %.1f s (%d/%d)",
                     modele, cause, attente, essai, ESSAIS,
                 )
-                limiteur.repousser(attente, cause)
 
         secours = self._secours(modele) if secours_permis else None
         if secours:
@@ -401,13 +404,13 @@ FORBIDDEN:
                 except AttenteTropLongue as e:
                     cause = f"attente {e.attente:.0f} s ({e.raison})"
                     break
+                limiteur.repousser(attente, cause)
                 if self._abandonner(limiteur, debut, essai, attente):
                     break
                 logger.warning(
                     "⚠️ Mistral %s (flux) : %s, nouvel essai dans %.1f s (%d/%d)",
                     modele, cause, attente, essai, ESSAIS,
                 )
-                limiteur.repousser(attente, cause)
 
         secours = self._secours(modele) if secours_permis else None
         if secours:

@@ -161,7 +161,7 @@ class ExplanationService:
         prompt = self._construire_prompt(law, chunks, numero_resolu, langue)
         systeme = get_system_prompt(EXPLANATION_PERSONA, langue)
 
-        texte = await self._generer(prompt, systeme)
+        texte = await self._generer(prompt, systeme, langue)
 
         duree_ms = int((time.perf_counter() - debut) * 1000)
         logger.info(
@@ -341,7 +341,7 @@ class ExplanationService:
 
         return "\n".join(entete) + "\n\n" + contexte + "\n" + tache
 
-    async def _generer(self, prompt: str, systeme: str) -> str:
+    async def _generer(self, prompt: str, systeme: str, langue: str = "fr") -> str:
         """
         Appelle le modele et traduit ses echecs.
 
@@ -367,5 +367,6 @@ class ExplanationService:
         if not texte.strip():
             raise ExplanationError("Le modèle n'a produit aucune explication.")
         # Une explication coupee le dit : sinon sa derniere phrase, inachevee,
-        # passerait pour la fin du raisonnement.
-        return texte + mention_de_reponse(reponse)
+        # passerait pour la fin du raisonnement. Sans conseil : il n'y a pas de
+        # question a reformuler derriere le bouton « Expliquer ».
+        return texte + mention_de_reponse(reponse, langue, conseil=False)

@@ -457,7 +457,7 @@ class RAGService:
             max_tokens=ANSWER_MAX_TOKENS, reflexion=settings.GEMINI_REFLEXION_REPONSE,
         )
         generation_time_ms = int((time.time() - generation_start) * 1000)
-        answer = llm_response["response"] + mention_de_reponse(llm_response)
+        answer = llm_response["response"] + mention_de_reponse(llm_response, request.language)
 
         # Extract citations
         citations = self._extract_citations(answer, search_results)
@@ -526,7 +526,7 @@ class RAGService:
         generation_time_ms = int((time.time() - generation_start) * 1000)
         # Deux phrases attendues, mais un budget de jetons tout de meme : une
         # reponse coupee le dit, ici comme ailleurs.
-        answer = llm_response["response"] + mention_de_reponse(llm_response)
+        answer = llm_response["response"] + mention_de_reponse(llm_response, request.language)
 
         # `_calculate_confidence` n'est PAS appele : ses quatre facteurs
         # mesurent l'ancrage documentaire d'une reponse (citations, pertinence
@@ -694,7 +694,7 @@ class RAGService:
 
             # Une reponse restee incomplete le dit, comme dans `ask` : coupee
             # par le budget malgre la suite demandee, ou flux rompu.
-            mention = mention_de_fin(raison.get("fin"))
+            mention = mention_de_fin(raison.get("fin"), request.language)
             if mention:
                 answer_parts.append(mention)
                 yield RAGStreamChunk(chunk=mention, done=False).model_dump_json(exclude_none=True)

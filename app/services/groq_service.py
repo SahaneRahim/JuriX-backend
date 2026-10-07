@@ -279,14 +279,19 @@ class GroqService:
         repousse), ou une exception. Commun aux chemins sync et async.
         """
         limiteur = self.limiteur(modele)
-        self._recaler(limiteur, reponse.headers)
         code = reponse.status_code
-
+        corps = None
         if code == 200:
             corps = reponse.json()
             usage = corps.get("usage") or {}
+            # Corriger AVANT de recaler : le recalage compare la fenetre a ce
+            # que Groq annonce, et l'estimation laissee en place y masquait la
+            # consommation des autres processus.
             if usage.get("total_tokens") is not None:
                 reservation.corriger(usage["total_tokens"], usage.get("prompt_tokens"))
+        self._recaler(limiteur, reponse.headers)
+
+        if code == 200:
             choix = corps["choices"][0]
             fin = choix.get("finish_reason")
             contenu = (choix.get("message") or {}).get("content") or ""

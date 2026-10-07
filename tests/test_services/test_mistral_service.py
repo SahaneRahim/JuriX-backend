@@ -16,6 +16,7 @@ Usage:
     pytest tests/test_services/test_mistral_service.py -m mistral_live
 """
 
+import asyncio
 import json
 
 import httpx
@@ -349,6 +350,45 @@ class TestSaturation:
         assert (await service.generate("p"))["response"] == "Oui."
         assert faux.modeles() == [SECOURS]
 
+    async def test_un_long_retry_after_est_retenu_meme_en_abandonnant(self, mistral):
+        """
+        30 s depassent le budget : l'appel passe au secours. Le delai doit
+        rester inscrit, sinon l'appel suivant retourne frapper le modele
+        sanctionne.
+        """
+        service, faux = mistral(
+            refus(429, "Rate limit", {"retry-after": "30"}),
+            ok("Oui.", modele=SECOURS),
+            ok("Encore.", modele=SECOURS),
+        )
+
+        await service.generate("p")
+        await service.generate("p")
+
+        assert faux.modeles() == [PRINCIPAL, SECOURS, SECOURS]
+
+    async def test_toutes_les_places_prises_va_au_secours(self, mistral, monkeypatch):
+        """L'attente d'une place etait sans limite : ni secours, ni 503."""
+        monkeypatch.setattr(settings, "MISTRAL_ATTENTE_MAX_S", 0.05)
+        service, faux = mistral(ok("Oui.", modele=SECOURS))
+        principal = service.limiteur(PRINCIPAL)
+        principal.concurrence = 1
+        liberer = asyncio.Event()
+
+        async def occuper():
+            async with principal.creneau():
+                await liberer.wait()
+
+        occupant = asyncio.create_task(occuper())
+        await asyncio.sleep(0)
+
+        resultat = await service.generate("p")
+
+        assert resultat["response"] == "Oui."
+        assert faux.modeles() == [SECOURS]
+        liberer.set()
+        await occupant
+
     async def test_sans_secours(self, mistral, monkeypatch):
         monkeypatch.setattr(settings, "MISTRAL_MODEL_SECOURS", "")
         service, faux = mistral(ok("Oui."))
@@ -437,12 +477,14 @@ class TestFlux:
             await _tout_lire(service)
 
     async def test_429_avant_le_premier_octet(self, mistral, horloge):
-        service, faux = mistral(refus(429, "Rate limit", {"retry-after": "2"}), flux("Oui."))
+        # 5 s, et non 2 : l'espacement du limiteur (2 s) masquerait un
+        # Retry-After ignore.
+        service, faux = mistral(refus(429, "Rate limit", {"retry-after": "5"}), flux("Oui."))
 
         morceaux, fins = await _tout_lire(service)
 
         assert morceaux == ["Oui."]
-        assert horloge.sommeils == [2.0]
+        assert horloge.sommeils == [5.0]
 
     async def test_secours_en_flux(self, mistral):
         trop = refus(429, "Rate limit", {"retry-after": "6"})

@@ -387,15 +387,21 @@ class TestEchecsDuModele:
         with pytest.raises(ExplanationError):
             await service.explain(loi.id, "2", "fr")
 
-    async def test_explication_coupee_le_dit(self, db_session, loi, llm):
-        """Sa derniere phrase, inachevee, passerait pour la fin du raisonnement."""
-        from app.services.llm import MENTION_REPONSE_TRONQUEE
-
+    @pytest.mark.parametrize("langue, mention", [
+        ("fr", "*(Réponse interrompue : longueur maximale atteinte.)*"),
+        ("en", "*(Answer cut short: maximum length reached.)*"),
+    ])
+    async def test_explication_coupee_le_dit(self, db_session, loi, llm, langue, mention):
+        """
+        Sa derniere phrase, inachevee, passerait pour la fin du raisonnement.
+        Dans la langue demandee, et sans « posez une question plus precise » :
+        il n'y a pas de question derriere le bouton « Expliquer ».
+        """
         llm.generate.return_value = {
             "response": "**En clair**\n\nCet article impose", "tronquee": True, "fin": "MAX_TOKENS",
         }
         service = ExplanationService(db_session, llm=llm)
 
-        reponse = await service.explain(loi.id, "2", "fr")
+        reponse = await service.explain(loi.id, "2", langue)
 
-        assert reponse.explanation.endswith(MENTION_REPONSE_TRONQUEE)
+        assert reponse.explanation.endswith(mention)

@@ -88,3 +88,29 @@ def test_quota_et_saturation_sont_aussi_des_erreurs_de_generation(erreur):
     """
     assert issubclass(erreur, ERREURS_LLM)
     assert issubclass(erreur, ERREURS_QUOTA + ERREURS_SATURATION)
+
+
+@pytest.mark.parametrize("fin, attendu", [
+    ("STOP", ""),
+    ("UNKNOWN", ""),
+    ("MAX_TOKENS", "longueur maximale atteinte"),
+    ("INTERROMPUE", "connexion avec le modèle a été coupée"),
+    # Une fin « error » du fournisseur n'est pas une affaire de longueur :
+    # « posez une question plus precise » serait le mauvais remede.
+    ("ERROR", "connexion avec le modèle a été coupée"),
+])
+def test_mention_selon_la_fin(fin, attendu):
+    from app.services.llm import mention_de_fin
+
+    mention = mention_de_fin(fin)
+
+    assert (attendu in mention) if attendu else mention == ""
+
+
+def test_mention_dans_la_langue_de_la_reponse():
+    from app.services.llm import mention_de_fin
+
+    assert "maximum length reached" in mention_de_fin("MAX_TOKENS", "en")
+    assert "Ask again" in mention_de_fin("ERROR", "en")
+    # Langue inconnue : le francais, jamais une mention vide.
+    assert "longueur maximale" in mention_de_fin("MAX_TOKENS", "de")

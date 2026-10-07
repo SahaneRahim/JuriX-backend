@@ -124,10 +124,20 @@ class _Fenetre:
         return debut  # inatteignable : la fenetre vide accepte toujours
 
     def ajouter(self, instant: float, quantite: int) -> Optional[list]:
+        """
+        Inscrit une entree A SA PLACE dans le temps. Les departs reserves
+        arrivent dans l'ordre, mais un recalage (consommation des autres
+        processus, inscrite a « maintenant ») peut tomber avant des departs
+        deja reserves pour plus tard : ajoutee en queue, elle faussait
+        `premier_instant`, qui suppose l'ordre.
+        """
         if self.plafond is None:
             return None
         entree = [instant, quantite]
-        self.entrees.append(entree)
+        position = len(self.entrees)
+        while position > 0 and self.entrees[position - 1][0] > instant:
+            position -= 1
+        self.entrees.insert(position, entree)
         return entree
 
     def total(self, instant: float) -> int:
@@ -352,8 +362,13 @@ class Limiteur:
     ) -> Reservation:
         """Reserve, puis dort jusqu'au depart (sans bloquer la boucle)."""
         reservation = self.reserver(jetons, attente_max, jetons_entree=jetons_entree)
+        debut = self._horloge()
         if reservation.attente > 0:
             await self._dormir_async(reservation.attente)
+        supplement = self._supplement(debut, attente_max)
+        while supplement > 0:
+            await self._dormir_async(supplement)
+            supplement = self._supplement(debut, attente_max)
         return reservation
 
     def attendre_sync(
@@ -365,9 +380,34 @@ class Limiteur:
     ) -> Reservation:
         """Reserve, puis dort jusqu'au depart : pour le pipeline et les scripts."""
         reservation = self.reserver(jetons, attente_max, jetons_entree=jetons_entree)
+        debut = self._horloge()
         if reservation.attente > 0:
             self._dormir(reservation.attente)
+        supplement = self._supplement(debut, attente_max)
+        while supplement > 0:
+            self._dormir(supplement)
+            supplement = self._supplement(debut, attente_max)
         return reservation
+
+    def _supplement(self, debut: float, attente_max: Optional[float]) -> float:
+        """
+        L'attente qu'impose un `repousser` survenu PENDANT le sommeil.
+
+        Un appelant deja endormi partait a l'heure reservee, en plein dans la
+        penalite qu'un 429 venait d'imposer : chaque depart reserve recoltait
+        son propre 429. Au-dela de `attente_max` (compte depuis la
+        reservation), AttenteTropLongue ; la reservation reste comptee, ce qui
+        est prudent.
+        """
+        with self._verrou:
+            maintenant = self._horloge()
+            supplement = self._pas_avant - maintenant
+            raison = self._raison_pas_avant
+        if supplement <= 0:
+            return 0.0
+        if attente_max is not None and maintenant + supplement - debut > attente_max:
+            raise AttenteTropLongue(self.nom, maintenant + supplement - debut, raison)
+        return supplement
 
     @asynccontextmanager
     async def creneau(
@@ -383,12 +423,27 @@ class Limiteur:
         La place est prise AVANT la reservation : reserver d'abord ferait
         partir la requete plus tard que prevu, et les fenetres compteraient
         un depart qui n'a pas eu lieu a l'instant inscrit.
+
+        `attente_max` borne AUSSI l'attente d'une place : sans cela, quand
+        toutes les places sont prises par des generations longues, l'appel
+        attendait sans limite, et ni le modele de secours ni le 503 promis
+        n'arrivaient. Le temps passe a attendre la place est deduit du budget
+        de la reservation.
         """
         semaphore = self._semaphore()
+        restant = attente_max
         if semaphore is not None:
-            await semaphore.acquire()
+            if attente_max is None:
+                await semaphore.acquire()
+            else:
+                debut = time.monotonic()
+                try:
+                    await asyncio.wait_for(semaphore.acquire(), timeout=attente_max)
+                except asyncio.TimeoutError:
+                    raise AttenteTropLongue(self.nom, attente_max, "concurrence") from None
+                restant = max(0.0, attente_max - (time.monotonic() - debut))
         try:
-            yield await self.attendre(jetons, attente_max, jetons_entree=jetons_entree)
+            yield await self.attendre(jetons, restant, jetons_entree=jetons_entree)
         finally:
             if semaphore is not None:
                 semaphore.release()

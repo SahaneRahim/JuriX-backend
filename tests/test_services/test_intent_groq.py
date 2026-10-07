@@ -67,6 +67,7 @@ def groq(monkeypatch):
     """
     monkeypatch.setattr(settings, "INTENT_CLASSIFIER", "groq")
     monkeypatch.setattr(settings, "GROQ_API_KEY", "cle-test")
+    monkeypatch.setattr(settings, "GROQ_ATTENTE_MAX_429_S", 120.0)
     intent_classifier.cache_des_verdicts.vider()
     horloge = Horloge()
     limiteur = Limiteur(
