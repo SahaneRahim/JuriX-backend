@@ -110,7 +110,7 @@ Toutes les variables de `.env.example` sont réellement lues par
 |---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://…` — le driver asyncpg est obligatoire |
 | `LLM_PROVIDER` | `mistral` (défaut) ou `gemini` : le modèle des réponses, explications et comparaisons |
-| `MISTRAL_API_KEY` / `MISTRAL_MODEL` | Modèle des réponses (`ministral-14b-latest`) ; `MISTRAL_MODEL_SECOURS` (`ministral-8b-latest`) sert quand le premier reste saturé |
+| `MISTRAL_API_KEY` / `MISTRAL_MODEL` | Modèle des réponses, version épinglée (`ministral-14b-2512`) ; `MISTRAL_MODEL_SECOURS` (`ministral-8b-2512`) sert quand le premier reste saturé |
 | `GROQ_API_KEY` | Classement d'intention (`GROQ_MODEL`) et classement des lois (`GROQ_MODEL_CLASSEMENT`), deux modèles pour deux quotas |
 | `INTENT_CLASSIFIER` | `groq` (défaut) ou `llm` (le modèle du chat, un appel de plus par question) |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | Seulement si `LLM_PROVIDER=gemini` ou `EMBEDDING_PROVIDER=gemini` |

@@ -35,11 +35,17 @@ class Settings(BaseSettings):
 
     # Mistral AI (LLM for RAG Chat - rapide, bilingue FR/EN, sans thinking bloquant)
     MISTRAL_API_KEY: str = ""
-    MISTRAL_MODEL: str = "ministral-14b-latest"
+    # Version EPINGLEE, pas l'alias « -latest » : un changement de modele chez
+    # Mistral ne doit pas changer les reponses sans qu'on le sache. Choisi par
+    # mesure (scripts/eval/comparer_mistral.py, 07/10/2026, 20 questions et 4
+    # comparaisons, meme contexte) : citations justes a 96,6 % contre 96,4 %
+    # pour le 8b, mais moins d'ajouts non sources en relecture a l'aveugle
+    # (13 contre 14,5) ; le 8b est un peu plus rapide (2,2 s contre 2,7 s).
+    MISTRAL_MODEL: str = "ministral-14b-2512"
     # Modele de secours, essaye une fois quand le principal reste en 429 :
     # meme famille, six fois plus de requetes permises (188 par minute).
     # Vide : pas de secours.
-    MISTRAL_MODEL_SECOURS: str = "ministral-8b-latest"
+    MISTRAL_MODEL_SECOURS: str = "ministral-8b-2512"
     # Delai d'une reponse entiere (hors flux) : au moins cette valeur, et
     # 20 s + 1 s par 40 jetons demandes au-dela (225 s pour 8 192 jetons).
     # En flux : delai maximal entre deux morceaux.
