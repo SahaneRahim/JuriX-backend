@@ -6,7 +6,7 @@ Provides utilities for building context strings and formatting conversation hist
 """
 
 import logging
-from typing import List
+from typing import List, Tuple
 
 from app.utils.chunk_refiner import est_pseudo_numero
 
@@ -531,6 +531,43 @@ CLASSIFICATION_SYSTEM = (
     "Tu es un classificateur. Tu réponds uniquement par le JSON demandé, "
     "sans commentaire, sans explication."
 )
+
+# Consignes du classement par Groq : le quart du prompt ci-dessus (~300 jetons
+# contre ~870). Le palier gratuit compte 200 000 jetons par jour : a 870 par
+# message, le chat plafonnait vers 215 questions par jour. Le schema strict
+# impose le format, les exemples JSON deviennent inutiles ; quatre exemples
+# suffisent a fixer les frontieres.
+CONSIGNES_INTENTION = """Tu classes le message d'un utilisateur de JuriX, assistant spécialisé dans le droit camerounais. Tu ne réponds pas au message.
+
+Intentions :
+- juridique : droit, loi, décret, code, article, procédure, contrat, droits et devoirs, démarche administrative, au Cameroun ou dans l'espace OHADA ; y compris une question de suivi qui n'a de sens que par les échanges précédents.
+- smalltalk : salutation, politesse, remerciement, question sur ton humeur.
+- meta : question sur JuriX lui-même (qui tu es, ce que tu sais faire, tes sources, tes limites).
+- hors_sujet : tout le reste (calcul, culture générale, cuisine, poésie, droit d'un autre pays sans lien avec le Cameroun).
+
+Au moindre doute : juridique. Une politesse d'ouverture ne change rien : « Bonjour, puis-je divorcer sans avocat ? » est juridique.
+
+Exemples : « comment vas-tu ? » : smalltalk. « d'où viennent tes informations ? » : meta. « écris-moi un poème » : hors_sujet. « mon patron peut-il retenir mon salaire ? » : juridique."""
+
+# Echanges precedents montres au classement, et longueur de chacun : assez
+# pour reconnaitre une question de suivi, pas plus — chaque caractere est
+# facture sur le quota du jour.
+ECHANGES_POUR_L_INTENTION = 2
+LONGUEUR_ECHANGE_INTENTION = 200
+
+
+def message_d_intention(question: str, echanges: List[Tuple[str, str]]) -> str:
+    """
+    Le message soumis au classement : les derniers echanges (role, texte), deja
+    tronques par l'appelant, puis le message a classer.
+    """
+    lignes = []
+    if echanges:
+        lignes.append("Échanges précédents :")
+        lignes.extend(f"{role} : {texte}" for role, texte in echanges)
+        lignes.append("")
+    lignes.append(f"Message à classer : {question}")
+    return "\n".join(lignes)
 
 
 def construire_prompt_de_classification(question: str, historique_formate: str) -> str:

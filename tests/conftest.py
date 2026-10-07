@@ -352,10 +352,11 @@ def _epingler_le_fournisseur_d_embeddings(request):
     avant = settings.EMBEDDING_PROVIDER
     avant_classement = settings.INTENT_CLASSIFIER
     settings.EMBEDDING_PROVIDER = "gemini"
-    # Le classement local d'intention passerait par la doublure d'embeddings
-    # et rendrait des verdicts arbitraires : les tests du routage doublent le
-    # modele (Gemini) ; ceux du classement local le reglent eux-memes.
-    settings.INTENT_CLASSIFIER = "gemini"
+    # Le classement d'intention passe par le modele PASSE EN PARAMETRE (mode
+    # « llm »), que les tests du routage doublent. En mode « groq », chaque
+    # question du chat appellerait Groq, que la garde reseau interdit ; les
+    # tests du mode « groq » le reglent eux-memes.
+    settings.INTENT_CLASSIFIER = "llm"
     try:
         yield
     finally:

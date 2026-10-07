@@ -456,28 +456,6 @@ class GroqService:
         self._sante = (maintenant, resultat)
         return resultat
 
-    # ---------------------------------------------------- intention (chat)
-
-    async def classify_intent_json(
-        self,
-        prompt: str,
-        system: str,
-        timeout: Optional[float] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Classement d'intention en JSON libre. Rend None sur tout echec : le
-        classement d'intention retombe alors sur « juridique ».
-        """
-        try:
-            reponse = await self.completer_json(
-                systeme=system, message=prompt, max_jetons=120,
-                attente_max=0.5, timeout=timeout,
-            )
-            return reponse.donnees
-        except GroqServiceError as e:
-            logger.warning(f"🧭 Classement d'intention Groq en echec : {e}")
-            return None
-
 
 @lru_cache(maxsize=1)
 def get_groq_service() -> GroqService:

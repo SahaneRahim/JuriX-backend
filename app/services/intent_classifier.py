@@ -16,9 +16,14 @@ CE MODULE NE CLASSE PAS DES DOCUMENTS. `legal_domain_classifier.py` range un
 texte du corpus dans un domaine juridique a l'ingestion ; ici on lit la
 question de l'utilisateur, ce qui n'a ni les memes entrees ni le meme verdict.
 
-LA MECANIQUE EST CELLE DE `reranker.rerank_with_llm` : le modele est un
-parametre, l'appel est borne par `asyncio.wait_for`, et AUCUNE exception ne
-sort. Le repli d'un composant optionnel, c'est l'absence du composant.
+LA MECANIQUE EST CELLE DE `reranker.rerank_with_llm` : l'appel est borne par
+`asyncio.wait_for`, et AUCUNE exception ne sort. Le repli d'un composant
+optionnel, c'est l'absence du composant : « juridique ».
+
+DEUX MODES (INTENT_CLASSIFIER). « groq », le defaut : consignes courtes,
+schema strict, verdicts en cache, et « juridique » des que Groq ne peut pas
+repondre dans les temps (quota, attente, panne). « llm » : le modele du chat,
+passe en parametre. Le classement local par embeddings a ete retire.
 
 Author: JuriX Team
 """
@@ -26,17 +31,23 @@ Author: JuriX Team
 import asyncio
 import json
 import logging
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
 from app.core.config import settings
-from app.services.intent_local import ClasseurLocal, question_precedente
 from app.services.prompts import (
     CLASSIFICATION_SYSTEM,
+    CONSIGNES_INTENTION,
+    ECHANGES_POUR_L_INTENTION,
+    LONGUEUR_ECHANGE_INTENTION,
     construire_prompt_de_classification,
     format_conversation_history,
+    message_d_intention,
 )
 from app.services.reranker import _article_number_in
+from app.services.text_features import fold_accents
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +132,11 @@ def _parse_intent(raw: Any) -> Optional[Tuple[str, float]]:
     except (ValueError, TypeError):
         return None
 
+    return _verdict_de(charge)
+
+
+def _verdict_de(charge: Any) -> Optional[Tuple[str, float]]:
+    """Le verdict d'un objet JSON deja decode, ou None. Pure, comme _parse_intent."""
     if not isinstance(charge, dict):
         return None
 
@@ -136,80 +152,147 @@ def _parse_intent(raw: Any) -> Optional[Tuple[str, float]]:
     return intention, max(0.0, min(1.0, confiance))
 
 
-# ==================== CLASSEMENT LOCAL ====================
+# ==================== CLASSEMENT PAR GROQ ====================
 
-_classeur_local: Optional[ClasseurLocal] = None
+# Schema STRICT : la sortie ne peut etre que cet objet, rien d'autre.
+_SCHEMA_GROQ = {
+    "type": "object",
+    "properties": {
+        "intention": {"type": "string", "enum": list(INTENTS)},
+        "confiance": {"type": "number"},
+    },
+    "required": ["intention", "confiance"],
+    "additionalProperties": False,
+}
+
+# Un verdict tient en une quinzaine de jetons ; le modele ne reflechit pas.
+_JETONS_DE_SORTIE = 40
+
+# Attente acceptee devant le limiteur. Au-dela, la question part tout de suite
+# en « juridique » : faire patienter l'utilisateur pour savoir s'il dit
+# bonjour couterait plus qu'une recherche inutile.
+ATTENTE_MAX_INTENTION_S = 0.5
 
 
-def _similarite_corpus(vecteur) -> Optional[float]:
+class _CacheDeVerdicts:
     """
-    Similarite du message avec l'article vectorise le plus proche (index HNSW).
-    None si la base ne repond pas : le garde-fou s'efface, il ne bloque rien.
+    Les derniers verdicts, par message et echanges precedents.
+
+    « bonjour », « merci » ou « que dit le code du travail ? » reviennent
+    souvent a l'identique : chacun coutait une requete sur les 1 000 du jour.
+    Taille et duree bornees ; seuls les verdicts du modele y entrent, jamais
+    un defaut.
     """
-    from sqlalchemy import text
 
-    from app.core.database import SyncSessionLocal
+    def __init__(self, taille: int = 2000, duree_s: float = 86_400.0, horloge=time.monotonic):
+        self.taille = taille
+        self.duree_s = duree_s
+        self._horloge = horloge
+        self._entrees: "OrderedDict[Tuple[str, str], Tuple[float, IntentResult]]" = OrderedDict()
 
-    litteral = "[" + ",".join(f"{float(x):.6f}" for x in vecteur) + "]"
-    try:
-        with SyncSessionLocal() as session:
-            return session.execute(text(
-                "SELECT 1 - (embedding <=> CAST(:v AS vector)) FROM articles "
-                "WHERE embedding IS NOT NULL "
-                "ORDER BY embedding <=> CAST(:v AS vector) LIMIT 1"
-            ), {"v": litteral}).scalar()
-    except Exception as exc:
-        logger.warning("🧭 Garde-fou du corpus indisponible : %s", exc)
-        return None
-
-
-def classeur_local() -> Optional[ClasseurLocal]:
-    """Le classeur local du processus, sur le service d'embeddings partage."""
-    global _classeur_local
-    if _classeur_local is None:
-        from app.services import search_service
-
-        search_service._init_global_singletons()
-        service = search_service._embedding_service_instance
-        if service is None:
+    def lire(self, cle: Tuple[str, str]) -> Optional[IntentResult]:
+        entree = self._entrees.get(cle)
+        if entree is None:
             return None
-        _classeur_local = ClasseurLocal(service, similarite_corpus=_similarite_corpus)
-    return _classeur_local
+        if self._horloge() - entree[0] > self.duree_s:
+            del self._entrees[cle]
+            return None
+        self._entrees.move_to_end(cle)
+        return entree[1]
+
+    def ecrire(self, cle: Tuple[str, str], verdict: IntentResult) -> None:
+        self._entrees[cle] = (self._horloge(), verdict)
+        self._entrees.move_to_end(cle)
+        while len(self._entrees) > self.taille:
+            self._entrees.popitem(last=False)
+
+    def vider(self) -> None:
+        self._entrees.clear()
+
+    def __len__(self) -> int:
+        return len(self._entrees)
 
 
-def prechauffer_classement_local() -> None:
+cache_des_verdicts = _CacheDeVerdicts()
+
+
+def _normaliser(texte: str) -> str:
+    return " ".join(fold_accents((texte or "").lower()).split())
+
+
+def _echanges(history: Optional[List[Any]]) -> List[Tuple[str, str]]:
+    """Les derniers echanges (role, texte tronque), du plus ancien au plus recent."""
+    echanges = []
+    for message in (history or [])[-ECHANGES_POUR_L_INTENTION:]:
+        role = "utilisateur" if getattr(message, "role", "") == "user" else "assistant"
+        texte = " ".join((getattr(message, "content", "") or "").split())
+        echanges.append((role, texte[:LONGUEUR_ECHANGE_INTENTION]))
+    return echanges
+
+
+async def _classer_par_groq(
+    question: str, history: Optional[List[Any]], timeout: Optional[float]
+) -> IntentResult:
     """
-    Vectorise la banque d'exemples au demarrage : quelques secondes de calcul
-    qui, sinon, retomberaient sur la premiere question posee. Synchrone, a
-    lancer hors de la boucle d'evenements. Ne leve jamais.
+    Classement par Groq. Ne leve jamais : toute impossibilite rend
+    « juridique », avec une regle `defaut-groq-<raison>` qui dit laquelle.
     """
-    if not settings.INTENT_ROUTING_ENABLED or settings.INTENT_CLASSIFIER != "local":
-        return
-    try:
-        classeur = classeur_local()
-        if classeur is not None:
-            classeur.banque()
-    except Exception as exc:
-        logger.warning("🧭 Banque d'intentions non prechauffee : %s", exc)
+    from app.services.groq_service import (
+        GroqLimiteError,
+        GroqQuotaError,
+        GroqReponseInvalideError,
+        get_groq_service,
+    )
 
+    if not settings.GROQ_API_KEY:
+        return IntentResult(INTENT_JURIDIQUE, 0.0, "defaut-groq-cle")
 
-async def _classer_localement(question: str, history: Optional[List[Any]]) -> IntentResult:
-    """Classement local ; sur toute panne, « juridique » — jamais d'exception."""
+    echanges = _echanges(history)
+    cle = (_normaliser(question), _normaliser(" | ".join(t for _, t in echanges)))
+    en_cache = cache_des_verdicts.lire(cle)
+    if en_cache is not None:
+        return IntentResult(en_cache.intent, en_cache.confidence, "groq-cache")
+
+    delai = timeout if timeout is not None else settings.GROQ_INTENTION_TIMEOUT_S
+    raison = None
     try:
-        classeur = classeur_local()
-        if classeur is None:
-            return IntentResult(INTENT_JURIDIQUE, 0.0, "defaut-local-indisponible")
-        intention, confiance, regle = await asyncio.wait_for(
-            asyncio.to_thread(classeur.classer, question, question_precedente(history)),
-            timeout=settings.INTENT_TIMEOUT_S,
+        reponse = await asyncio.wait_for(
+            get_groq_service().completer_json(
+                systeme=CONSIGNES_INTENTION,
+                message=message_d_intention(question, echanges),
+                schema=_SCHEMA_GROQ,
+                nom_schema="intention",
+                max_jetons=_JETONS_DE_SORTIE,
+                attente_max=ATTENTE_MAX_INTENTION_S,
+                timeout=delai,
+            ),
+            timeout=delai,
         )
-        return IntentResult(intention, confiance, regle)
+        verdict = _verdict_de(reponse.donnees)
+        if verdict is None:
+            raison = "json"
     except asyncio.TimeoutError:
-        logger.warning("🧭 Classement local expire : repli sur juridique")
-        return IntentResult(INTENT_JURIDIQUE, 0.0, "defaut-local-timeout")
+        raison = "timeout"
+    except GroqQuotaError:
+        raison = "quota"
+    except GroqLimiteError:
+        raison = "limite"
+    except GroqReponseInvalideError:
+        raison = "json"
     except Exception as exc:
-        logger.warning("🧭 Classement local en echec (%s) : repli sur juridique", exc)
-        return IntentResult(INTENT_JURIDIQUE, 0.0, "defaut-local-erreur")
+        # Panne, cle refusee, schema refuse : tout est avale. Une defaillance
+        # du routeur ne doit jamais faire echouer la question.
+        logger.warning("🧭 Groq en echec (%r)", exc)
+        raison = "erreur"
+
+    if raison is not None:
+        logger.warning("🧭 Classement d'intention impossible (%s) : repli sur juridique", raison)
+        return IntentResult(INTENT_JURIDIQUE, 0.0, f"defaut-groq-{raison}")
+
+    intention, confiance = verdict
+    resultat = IntentResult(intention, confiance, "groq")
+    cache_des_verdicts.ecrire(cle, resultat)
+    return resultat
 
 
 async def classify_intent(
@@ -225,9 +308,10 @@ async def classify_intent(
 
     Args:
         question: le message de l'utilisateur, tel qu'il l'a ecrit
-        llm: service de generation. PARAMETRE et non `get_gemini_service()` en
-            dur, meme raison que `rerank_with_llm` : un test injecte une
-            doublure, le harnais d'evaluation peut changer de modele.
+        llm: service de generation du mode « llm ». PARAMETRE et non
+            `get_llm_service()` en dur, meme raison que `rerank_with_llm` : un
+            test injecte une doublure, le harnais d'evaluation peut changer de
+            modele. Le mode « groq » ne s'en sert pas.
         history: les derniers messages, pour les questions de suivi. « et
             l'article 12 ? » n'est juridique que par ce qui precede.
 
@@ -265,31 +349,10 @@ async def classify_intent(
     if _est_une_salutation_pure(question):
         return IntentResult("smalltalk", 1.0, "court-circuit-salutation")
 
-    # Mode Groq : inférence ultra-rapide (< 100 ms) via LPU avec sortie JSON stricte
-    if settings.INTENT_CLASSIFIER == "groq" and settings.GROQ_API_KEY:
-        try:
-            from app.services.groq_service import get_groq_service
-            groq_svc = get_groq_service()
-            prompt = construire_prompt_de_classification(
-                question, format_conversation_history(history or [])
-            )
-            data = await groq_svc.classify_intent_json(
-                prompt=prompt,
-                system=CLASSIFICATION_SYSTEM,
-                timeout=timeout if timeout is not None else 3.0,
-            )
-            if data and isinstance(data, dict):
-                intention = data.get("intention")
-                if intention in INTENTS:
-                    confiance = float(data.get("confiance", 0.9))
-                    return IntentResult(intention, max(0.0, min(1.0, confiance)), "groq")
-        except Exception as e:
-            logger.warning(f"🧭 Groq en échec ({e}) : repli sur classement local")
+    if settings.INTENT_CLASSIFIER == "groq":
+        return await _classer_par_groq(question, history, timeout)
 
-    # Par defaut ou en repli : voir intent_local.py.
-    if settings.INTENT_CLASSIFIER in ("local", "groq"):
-        return await _classer_localement(question, history)
-
+    # « llm » : le modele du chat, passe en parametre.
     prompt = construire_prompt_de_classification(
         question, format_conversation_history(history or [])
     )

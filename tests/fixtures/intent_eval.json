@@ -1,5 +1,5 @@
 {
-  "_doc": "Jeu d'evaluation du classement local de l'intention. Phrases DISTINCTES de app/services/intent_examples.py. Champ `precedente` : derniere question de l'utilisateur, pour les suites.",
+  "_doc": "Jeu d'evaluation du classement de l'intention (scripts/eval/evaluer_intention.py). Phrases distinctes des exemples des consignes. Champ `precedente` : derniere question de l'utilisateur, pour les suites.",
   "messages": [
     {"message": "mon employeur m'a renvoyé sans préavis, est-ce légal ?", "intention": "juridique"},
     {"message": "j'ai travaillé 10 ans sans contrat écrit, quels sont mes droits ?", "intention": "juridique"},

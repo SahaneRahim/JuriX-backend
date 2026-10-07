@@ -169,10 +169,14 @@ class Settings(BaseSettings):
     # "juridique" a chaque appel, donc un routeur qui ne route jamais, sans
     # qu'aucun test ne le voie — ils doublent tous le modele.
     INTENT_MAX_TOKENS: int = 1024
-    # « groq » : routage JSON ultra-rapide (< 100 ms) via Groq (LPU).
-    # « local » : rapprochement du message avec des exemples etiquetes (sans appel reseau).
-    # « gemini » : l'ancien classement par Gemini.
-    INTENT_CLASSIFIER: Literal["groq", "local", "gemini"] = "groq"
+    # « groq » : classement par Groq (GROQ_MODEL), consignes courtes et schema
+    # strict, verdicts gardes en cache ; toute panne rend « juridique ».
+    # « llm » : classement par le modele du chat (LLM_PROVIDER), un appel de
+    # plus par question. L'ancienne valeur « gemini » y est ramenee.
+    # Le classement local (« local ») a ete retire.
+    INTENT_CLASSIFIER: Literal["groq", "llm"] = "groq"
+    # Le classement retarde chaque message du chat : au-dela, « juridique ».
+    GROQ_INTENTION_TIMEOUT_S: float = 3.0
 
     # ---- Reflexion du modele (Gemini 3) ----
     # La reflexion interne fait l'essentiel du temps d'attente. MESURE sur
@@ -407,6 +411,26 @@ class Settings(BaseSettings):
                 "bien par asyncpg que par psycopg2."
             )
         return v
+
+    @field_validator("INTENT_CLASSIFIER", mode="before")
+    @classmethod
+    def _classement_d_intention(cls, v):
+        """
+        « gemini » designait le classement par le modele du chat : c'est « llm ».
+        « local » est refuse avec la raison, plutot qu'avec l'erreur generique
+        de pydantic, illisible pour qui a garde un vieux .env.
+        """
+        if not isinstance(v, str):
+            return v
+        valeur = v.strip().lower()
+        if valeur == "gemini":
+            return "llm"
+        if valeur == "local":
+            raise ValueError(
+                "INTENT_CLASSIFIER=local n'existe plus : le classement local de "
+                "l'intention a ete retire. Utilisez groq (defaut) ou llm."
+            )
+        return valeur
 
     @field_validator("EMBEDDING_DIM")
     @classmethod

@@ -39,10 +39,10 @@ def test_les_cles_sont_factices(cle):
 async def test_un_appel_groq_reel_est_refuse():
     garde = _garde(groq_service)
 
-    # classify_intent_json avale toute erreur de Groq : l'echec de la garde,
+    # Le classement d'intention avale toute Exception : l'echec de la garde,
     # lui, n'en est pas une, et traverse.
     with pytest.raises(pytest.fail.Exception, match="groq_live"):
-        await GroqService(api_key="x").classify_intent_json("bonjour", "systeme")
+        await GroqService(api_key="x").completer_json(systeme="s", message="bonjour")
 
     assert garde.appels == ["POST https://api.groq.com/openai/v1/chat/completions"]
     garde.appels.clear()
