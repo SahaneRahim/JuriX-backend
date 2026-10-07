@@ -19,9 +19,16 @@ REGLE DE DECISION, ECRITE AVANT : on garde le 14b, sauf si le 8b egale la
 justesse des citations (a 2 points pres) sans ajouter plus de contenu non
 source. Le 8b reste le modele de secours dans tous les cas.
 
+VARIANTES. `--modeles` et `--consignes` font varier le modele et le prompt
+systeme du chat : « actuelles » (celui de la production) ou « renforcees »
+(des regles de fond en tete, pour un petit modele qui s'ecarte des extraits).
+Les comparaisons de regimes passent une fois par modele, avec leur prompt.
+
 Usage:
     python -m scripts.eval.comparer_mistral --dry-run      # contextes seuls, aucun appel
     python -m scripts.eval.comparer_mistral
+    python -m scripts.eval.comparer_mistral --modeles ministral-3b-2512 \
+        --consignes actuelles renforcees --label 3b
 """
 
 import argparse
@@ -49,7 +56,24 @@ from app.services.rag_service import ANSWER_MAX_TOKENS, RAGService
 
 JEU = RACINE / "tests" / "fixtures" / "eval" / "retrieval_eval_v1.json"
 SORTIES = RACINE / "data" / "eval_runs"
-MODELES = ("ministral-14b-latest", "ministral-8b-latest")
+MODELES = ("ministral-14b-2512", "ministral-8b-2512")
+
+# Regles de fond placees EN TETE du prompt systeme, pour la variante
+# « renforcees ». Un petit modele suit mal des consignes noyees dans la forme :
+# celles-ci disent d'abord d'ou viennent les faits, et rien d'autre.
+REGLES_DE_FOND = """RÈGLES DE FOND — elles passent avant toutes les autres.
+1. Ta seule source est le bloc « Documents juridiques pertinents » du message. Ce que tu sais par ailleurs du droit, camerounais ou d'un autre pays, ne compte pas.
+2. Chaque montant, délai, date, condition, sanction, autorité ou démarche que tu écris doit se lire dans un extrait. Sinon, ne l'écris pas : ni « en général », ni « habituellement », ni étape « à prévoir ».
+3. Repère d'abord le ou les extraits qui répondent, puis appuie chaque affirmation sur l'un d'eux, avec son numéro d'article.
+4. Si les extraits ne répondent qu'en partie, dis ce qu'ils disent, puis ce qu'ils ne disent pas. S'ils ne répondent pas, dis-le en une phrase.
+5. Ne cite que des numéros d'article qui figurent dans les extraits.
+
+"""
+
+
+def systeme_pour(consignes: str) -> str:
+    base = get_system_prompt("citoyen", "fr")
+    return REGLES_DE_FOND + base if consignes == "renforcees" else base
 
 COMPARAISONS = [
     ("permis de recherche minière", "permis d'exploitation minière"),
@@ -126,7 +150,8 @@ def citations(texte: str, numeros_du_contexte: set) -> Dict[str, Any]:
 
 async def evaluer(args) -> Dict[str, Any]:
     resultats: Dict[str, Any] = {"questions": [], "comparaisons": []}
-    systeme = get_system_prompt("citoyen", "fr")
+    variantes = [(modele, consignes) for modele in args.modeles for consignes in args.consignes]
+    etiquettes = [chr(ord("X") + i) if i < 3 else f"R{i}" for i in range(len(variantes))]
     hasard = random.Random(args.graine)
 
     async with AsyncSessionLocal() as session:
@@ -148,14 +173,16 @@ async def evaluer(args) -> Dict[str, Any]:
             }
             print(f"[{position}] {item['question'][:80]} ({len(chunks)} extraits)", flush=True)
             if not args.dry_run:
-                for modele in MODELES:
-                    reponse = await repondre(modele, prompt, systeme)
+                for modele, consignes in variantes:
+                    reponse = await repondre(modele, prompt, systeme_pour(consignes))
+                    reponse["consignes"] = consignes
+                    reponse["variante"] = f"{modele}|{consignes}"
                     reponse["citations"] = citations(reponse["texte"], contexte)
                     entree["reponses"].append(reponse)
-                    print(f"    {modele}: {reponse['duree_s']} s, fin={reponse['fin']}, "
+                    print(f"    {reponse['variante']}: {reponse['duree_s']} s, fin={reponse['fin']}, "
                           f"cites={len(reponse['citations']['cites'])}, "
                           f"absents={reponse['citations']['absents']}", flush=True)
-                entree["aveugle"] = hasard.sample(["X", "Y"], 2)
+                entree["aveugle"] = hasard.sample(etiquettes, len(etiquettes))
             resultats["questions"].append(entree)
 
         for sujet_a, sujet_b in COMPARAISONS[: args.comparaisons]:
@@ -168,7 +195,7 @@ async def evaluer(args) -> Dict[str, Any]:
             print(f"[comparaison] {sujet_a} / {sujet_b} : {len(chunks_a)} + {len(chunks_b)} extraits",
                   flush=True)
             if not args.dry_run and chunks_a and chunks_b:
-                for modele in MODELES:
+                for modele in args.modeles:
                     service.llm = MistralService(model_name=modele)
                     debut = time.monotonic()
                     try:
@@ -194,15 +221,24 @@ async def evaluer(args) -> Dict[str, Any]:
 
 
 def synthese(resultats: Dict[str, Any]) -> Dict[str, Any]:
+    """Par variante (modele et consignes) ; les comparaisons, par modele."""
     par_modele: Dict[str, Dict[str, Any]] = {}
-    for modele in MODELES:
-        reponses = [r for q in resultats["questions"] for r in q["reponses"] if r["modele"] == modele]
+    variantes = []
+    for q in resultats["questions"]:
+        for r in q["reponses"]:
+            cle = r.get("variante") or r["modele"]
+            if cle not in variantes:
+                variantes.append(cle)
+    for variante in variantes:
+        modele = variante.split("|")[0]
+        reponses = [r for q in resultats["questions"] for r in q["reponses"]
+                    if (r.get("variante") or r["modele"]) == variante]
         cites = sum(len(r["citations"]["cites"]) for r in reponses)
         presents = sum(len(r["citations"]["presents"]) for r in reponses)
         premiers = sorted(r["premier_morceau_s"] for r in reponses if r["premier_morceau_s"] is not None)
         durees = sorted(r["duree_s"] for r in reponses)
         comparaisons = [m for c in resultats["comparaisons"] for m in c["reponses"] if m["modele"] == modele]
-        par_modele[modele] = {
+        par_modele[variante] = {
             "reponses": len(reponses),
             "erreurs": sum(1 for r in reponses if r["erreur"]),
             "incompletes": sum(1 for r in reponses if r["fin"] not in (None, "STOP")),
@@ -213,16 +249,19 @@ def synthese(resultats: Dict[str, Any]) -> Dict[str, Any]:
             "jetons_sortie": sum(r["jetons_sortie"] or 0 for r in reponses),
             "comparaisons_json": sum(1 for m in comparaisons if m.get("json")),
             "comparaisons_7_sur_7": sum(1 for m in comparaisons if m.get("lignes_remplies") == 7),
+            # Une case remplie ne vaut que si ses citations tiennent : le 3b
+            # remplissait les 28 cases, avec 37 articles absents des extraits.
+            "comparaisons_citations_orphelines": sum(len(m.get("orphelines") or []) for m in comparaisons),
         }
     return par_modele
 
 
 def fichier_a_l_aveugle(resultats: Dict[str, Any], chemin: Path) -> None:
-    """Les deux reponses de chaque question sous X et Y, sans le nom du modele."""
+    """Les reponses de chaque question sous X, Y..., sans le nom du modele."""
     lignes = ["# Relecture a l'aveugle : ajouts non sources", "",
-              "Pour chaque question, compter dans X et dans Y les affirmations",
-              "qu'aucun extrait ne soutient. La correspondance X/Y -> modele est",
-              "dans le fichier JSON, champ `aveugle`, a ne lire qu'apres.", ""]
+              "Pour chaque question, compter dans chaque reponse les affirmations",
+              "qu'aucun extrait ne soutient. La correspondance etiquette -> modele",
+              "est dans le fichier JSON, champ `aveugle`, a ne lire qu'apres.", ""]
     for numero, question in enumerate(resultats["questions"], start=1):
         if not question["reponses"]:
             continue
@@ -240,6 +279,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parseur.add_argument("--questions", type=int, default=20)
     parseur.add_argument("--comparaisons", type=int, default=4)
     parseur.add_argument("--graine", type=int, default=7)
+    parseur.add_argument("--modeles", nargs="+", default=list(MODELES))
+    parseur.add_argument("--consignes", nargs="+", default=["actuelles"],
+                         choices=["actuelles", "renforcees"])
+    parseur.add_argument("--label", default="14b_8b")
     parseur.add_argument("--dry-run", action="store_true", help="Recherche seule, aucun appel a Mistral")
     args = parseur.parse_args(argv)
 
@@ -255,7 +298,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     resultats["synthese"] = synthese(resultats)
     horodatage = datetime.now().strftime("%Y%m%d_%H%M")
     SORTIES.mkdir(parents=True, exist_ok=True)
-    chemin = SORTIES / f"mistral_14b_8b_{horodatage}.json"
+    chemin = SORTIES / f"mistral_{args.label}_{horodatage}.json"
     chemin.write_text(json.dumps(resultats, ensure_ascii=False, indent=2), encoding="utf-8")
     fichier_a_l_aveugle(resultats, chemin.with_suffix(".aveugle.md"))
     print(json.dumps(resultats["synthese"], ensure_ascii=False, indent=2))
