@@ -1,258 +1,454 @@
 #!/usr/bin/env python3
 """
-Reclasse les lois existantes dans les 14 domaines canoniques via Groq / Qwen.
+Reclasse les lois dans les 14 domaines canoniques, par lots, en deux temps.
 
-Utilise le modèle Groq (qwen/qwen3.8-27b) de manière asynchrone concurrente
-pour reclassifier avec précision l'ensemble du corpus sans heuristiques regex.
+1. `classer` interroge Groq par lots et ECRIT LES VERDICTS dans un journal,
+   data/reclassement/verdicts.jsonl. Rien n'est ecrit en base. Une relance
+   saute les lois deja classees : une coupure ne coute que le lot en cours.
+   Quota epuise : arret propre (code 4), avec l'heure de reprise.
+2. `appliquer` lit le journal et ecrit categorie, confiance et suggestions.
+   `--dry-run` n'ecrit RIEN en base, mais produit le rapport, changements.csv
+   et a_revoir.csv : a relire avant d'appliquer pour de bon.
+
+POURQUOI DEUX TEMPS. Le palier gratuit de Groq (1 000 requetes et 200 000
+jetons par jour et par modele) ne permet pas de tout classer d'une traite, ni
+de recommencer pour corriger une erreur d'application. Le journal garde ce
+qui a coute du quota ; l'application, elle, se rejoue a volonte.
+
+POURQUOI PAS DE DEFAUT. L'ancienne version rangeait en Droit Administratif
+(confiance 0,10) toute loi dont le classement echouait — 89 sur 122 pendant
+un essai, a cause des 429. Ici, une loi sans verdict exploitable, ou sous le
+seuil de confiance, n'est pas appliquee : elle part dans a_revoir.csv.
+
+Codes de sortie : 0 ; 2 configuration (domaines absents de la table, journal
+vide) ; 3 panne de Groq, relancer ; 4 quota epuise, relancer a l'heure dite.
 
 Usage:
-    python scripts/maintenance/reclassify_domains.py --dry-run --limit 20 --explain
-    python scripts/maintenance/reclassify_domains.py --dry-run
-    python scripts/maintenance/reclassify_domains.py --apply --force
-    python scripts/maintenance/reclassify_domains.py --apply --force --concurrency 6
+    # 1. Titres seuls, 40 lois par requete (~56 requetes pour le corpus)
+    python scripts/maintenance/reclassify_domains.py classer --extrait 0 --lot 40
+    # 2. Les incertains, avec l'article premier, 15 par requete
+    python scripts/maintenance/reclassify_domains.py classer --incertains --extrait 500 --lot 15
+    # 3. Relire le rapport, changements.csv et a_revoir.csv
+    python scripts/maintenance/reclassify_domains.py appliquer --dry-run
+    # 4. Ecrire en base, categories existantes comprises
+    python scripts/maintenance/reclassify_domains.py appliquer --force
 """
 
 import argparse
-import asyncio
+import csv
+import json
 import logging
 import sys
 import time
 from collections import Counter
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+RACINE = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(RACINE))
 
-from sqlalchemy import select
+from sqlalchemy import text
+from sqlalchemy.orm import load_only
 
+from app.core.config import settings
 from app.core.database import SyncSessionLocal
 from app.models.law import Category, Law
 from app.services.category_resolver import load_domain_map
 from app.services.legal_domain_classifier import (
     CANONICAL_DOMAINS,
-    DomainResult,
+    VERSION_DES_CONSIGNES,
+    ClassementIndisponible,
+    DocumentAClasser,
+    LegalDomainClassifier,
+    extrait_pour_classement,
     get_legal_domain_classifier,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
-logger = logging.getLogger("reclassify")
+logger = logging.getLogger("reclassement")
+
+DOSSIER = RACINE / "data" / "reclassement"
+JOURNAL = DOSSIER / "verdicts.jsonl"
+
+SORTIE_CONFIGURATION = 2
+SORTIE_PANNE = 3
+SORTIE_QUOTA = 4
+
+# Une attente imposee plus courte est observee sur place ; au-dela, le script
+# s'arrete et dit quand reprendre.
+ATTENTE_SUR_PLACE_MAX_S = 600.0
+ESSAIS_PAR_LOT = 3
+LOIS_PAR_COMMIT = 200
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Reclasse les lois dans les domaines canoniques via Groq / Qwen.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="N'écrit rien, affiche la distribution avant/après (défaut)",
-    )
-    mode.add_argument(
-        "--apply",
-        action="store_true",
-        help="Écrit en base (lois sans catégorie, ou toutes avec --force)",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Avec --apply : réaffecte aussi les lois ayant déjà une catégorie",
-    )
-    parser.add_argument(
-        "--explain",
-        action="store_true",
-        help="Affiche le domaine et la justification pour chaque document",
-    )
-    parser.add_argument(
-        "--law-id",
-        type=int,
-        action="append",
-        dest="law_ids",
-        help="Ne traiter que cette loi (répétable)",
-    )
-    parser.add_argument(
-        "--domain",
-        action="append",
-        dest="domains",
-        help="Filtrer les résultats sur ce domaine cible",
-    )
-    parser.add_argument(
-        "--limit", type=int, default=None, help="Borne le nombre de lois lues"
-    )
-    parser.add_argument(
-        "--delay",
-        type=float,
-        default=1.5,
-        help="Délai en secondes entre requêtes Groq (défaut: 1.5s, évite les 429)",
-    )
-    return parser
+# ==================== JOURNAL ====================
 
 
-async def main_async(args) -> int:
-    apply_changes = args.apply
-    classifier = get_legal_domain_classifier()
-
-    with SyncSessionLocal() as session:
-        domain_map = load_domain_map(session)
-
-        missing = [d for d in CANONICAL_DOMAINS if d.lower() not in domain_map]
-        if missing:
-            logger.error("❌ Domaines absents de la table categories : %s", ", ".join(missing))
-            logger.error("   Lancez d'abord : alembic upgrade head")
-            return 2
-
-        id_to_name = {
-            row[1]: row[0]
-            for row in session.execute(
-                select(Category.name, Category.id)
-            ).all()
-        }
-
-        query = session.query(Law).order_by(Law.id)
-        if args.law_ids:
-            query = query.filter(Law.id.in_(args.law_ids))
-        if args.limit:
-            query = query.limit(args.limit)
-        laws = query.all()
-
-        total_laws = len(laws)
-        logger.info(f"📋 {total_laws} documents à classer via Groq / Qwen (délai: {args.delay}s)...")
-
-        t0 = time.time()
-        results_by_id = {}
-
-        for i, law in enumerate(laws, 1):
+def charger_verdicts(chemin: Path = JOURNAL) -> Dict[int, dict]:
+    """Le DERNIER verdict de chaque loi : une passe plus fine remplace la premiere."""
+    verdicts: Dict[int, dict] = {}
+    if not chemin.exists():
+        return verdicts
+    with chemin.open(encoding="utf-8") as journal:
+        for numero, ligne in enumerate(journal, start=1):
+            ligne = ligne.strip()
+            if not ligne:
+                continue
             try:
-                res = await classifier.classify_async(
-                    law.title or "",
-                    (law.content or "")[:1500],
-                    law.type or "",
-                )
-            except Exception as e:
-                logger.warning(f"❌ Erreur sur #{law.id} : {e}")
-                res = DomainResult(
-                    domain="Droit Administratif",
-                    confidence=0.10,
-                    rule=f"error:{e}",
-                    source="default",
-                )
-
-            results_by_id[law.id] = res
-
-            if args.explain:
-                marker = "→" if domain_map.get(res.domain.lower()) != law.category_id else " ="
-                logger.info(
-                    "  #%-5s %s %-45s [%.2f] %s",
-                    law.id,
-                    marker,
-                    res.domain[:45],
-                    res.confidence,
-                    (law.title or "")[:70],
-                )
-            elif i % 10 == 0 or i == total_laws:
-                elapsed = time.time() - t0
-                speed = i / elapsed if elapsed > 0 else 0
-                logger.info(f"  Progression: {i}/{total_laws} ({i/total_laws*100:.1f}%) - {speed:.1f} doc/s")
-
-            if args.delay > 0 and i < total_laws:
-                await asyncio.sleep(args.delay)
-
-        elapsed_total = time.time() - t0
-        logger.info(f"⚡ Classification terminée en {elapsed_total:.2f}s ({total_laws/elapsed_total:.1f} doc/s)\n")
-
-        before = Counter()
-        after = Counter()
-        rules = Counter()
-        moved = []
-        protected = []
-
-        for law in laws:
-            current_name = id_to_name.get(law.category_id, "(nulle)")
-            before[current_name] += 1
-
-            result = results_by_id.get(law.id)
-            if not result:
+                verdict = json.loads(ligne)
+            except json.JSONDecodeError:
+                # Une ligne tronquee par une coupure : les autres restent bonnes.
+                logger.warning("Ligne %d du journal illisible, ignoree", numero)
                 continue
+            verdicts[int(verdict["law_id"])] = verdict
+    return verdicts
 
-            if args.domains and result.domain not in args.domains:
-                after[current_name] += 1
-                continue
 
-            after[result.domain] += 1
-            rules[result.rule] += 1
+def _incertain(verdict: dict, seuil: float) -> bool:
+    return verdict.get("statut") != "ok" or float(verdict.get("confiance") or 0) < seuil
 
-            target_id = domain_map.get(result.domain.lower())
-            if not target_id:
-                logger.warning(f"⚠️ Domaine non résolu : {result.domain}")
-                continue
 
-            suggested = [
-                domain_map[name.lower()]
-                for name in [result.domain, *(d for d, _ in result.runners_up)]
-                if name.lower() in domain_map
-            ]
+# ==================== CLASSER ====================
 
-            changes = target_id != law.category_id
-            if changes:
-                if law.category_id is not None and not args.force:
-                    protected.append((law.id, current_name, result.domain))
-                else:
-                    moved.append((law.id, current_name, result.domain, law.title or ""))
 
-            if args.explain:
-                marker = "→" if changes else " ="
-                logger.info(
-                    "  #%-5s %s %-45s [%.2f] %s",
-                    law.id,
-                    marker,
-                    result.domain[:45],
-                    result.confidence,
-                    (law.title or "")[:70],
+def lois_a_classer(
+    session,
+    verdicts: Dict[int, dict],
+    *,
+    incertains: bool = False,
+    seuil: float = 0.6,
+    law_ids: Optional[Sequence[int]] = None,
+    limite: Optional[int] = None,
+) -> List[Law]:
+    """
+    Les lois publiees qui attendent un verdict.
+
+    Par defaut : celles sans verdict « ok » obtenu avec les consignes
+    actuelles. Avec `incertains` : celles dont le dernier verdict est « a
+    revoir » ou sous le seuil, a redemander avec un extrait.
+    """
+    # Sans le contenu : 2 226 textes integraux en memoire pour lire des titres.
+    # Il n'est charge, loi par loi, que pour l'extrait de repli (extrait_de).
+    requete = (
+        session.query(Law)
+        .options(load_only(Law.id, Law.title, Law.type, Law.status))
+        .filter(Law.status == "published")
+        .order_by(Law.id)
+    )
+    if law_ids:
+        requete = requete.filter(Law.id.in_(law_ids))
+    lois = []
+    for loi in requete:
+        verdict = verdicts.get(loi.id)
+        if incertains:
+            garder = verdict is not None and _incertain(verdict, seuil)
+        else:
+            garder = (
+                verdict is None
+                or verdict.get("statut") != "ok"
+                or verdict.get("consignes") != VERSION_DES_CONSIGNES
+            )
+        if garder:
+            lois.append(loi)
+            if limite and len(lois) >= limite:
+                break
+    return lois
+
+
+def extrait_de(session, loi: Law, longueur: int) -> str:
+    """Le premier chunk `article` ; a defaut, le texte prive de ses visas."""
+    if longueur <= 0:
+        return ""
+    premier = session.execute(
+        text(
+            'SELECT content FROM articles WHERE law_id = :id AND kind = \'article\' '
+            'ORDER BY "order" LIMIT 1'
+        ),
+        {"id": loi.id},
+    ).scalar()
+    return extrait_pour_classement(premier or loi.content, longueur)
+
+
+def _horodatage() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _heure_de_reprise(secondes: Optional[float]) -> str:
+    if secondes is None:
+        return "inconnue"
+    return (datetime.now() + timedelta(seconds=secondes)).strftime("%d/%m %H:%M")
+
+
+def classer(
+    session,
+    classifieur: LegalDomainClassifier,
+    *,
+    journal: Path = JOURNAL,
+    taille_lot: int = 40,
+    longueur_extrait: int = 0,
+    incertains: bool = False,
+    seuil: float = 0.6,
+    law_ids: Optional[Sequence[int]] = None,
+    limite: Optional[int] = None,
+    dormir: Callable[[float], None] = time.sleep,
+) -> int:
+    """Classe par lots et ajoute les verdicts au journal. Rend le code de sortie."""
+    lois = lois_a_classer(
+        session, charger_verdicts(journal),
+        incertains=incertains, seuil=seuil, law_ids=law_ids, limite=limite,
+    )
+    lots = [lois[i:i + taille_lot] for i in range(0, len(lois), taille_lot)]
+    logger.info(
+        "%d lois a classer, %d lots de %d au plus (modele %s, extrait %d)",
+        len(lois), len(lots), taille_lot, classifieur.modele, longueur_extrait,
+    )
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    jetons_total = requetes_total = 0
+    debut = time.time()
+
+    for numero, lot in enumerate(lots, start=1):
+        documents = [
+            DocumentAClasser(
+                titre=loi.title or "",
+                extrait=extrait_de(session, loi, longueur_extrait),
+                type_acte=loi.type or None,
+            )
+            for loi in lot
+        ]
+        for essai in range(1, ESSAIS_PAR_LOT + 1):
+            try:
+                resultat = classifieur.classer_lot(
+                    documents, attente_max=settings.GROQ_ATTENTE_MAX_429_S
                 )
+                break
+            except ClassementIndisponible as e:
+                if e.quota:
+                    logger.error(
+                        "⛔ Quota Groq epuise apres %d lots (%s). Reprise possible vers %s : "
+                        "relancer la meme commande, les lois deja classees seront sautees.",
+                        numero - 1, e.raison, _heure_de_reprise(e.retry_after),
+                    )
+                    return SORTIE_QUOTA
+                attente = e.retry_after
+                if essai == ESSAIS_PAR_LOT or attente is None or attente > ATTENTE_SUR_PLACE_MAX_S:
+                    logger.error("⛔ Groq indisponible (%s) : relancer plus tard", e.raison)
+                    return SORTIE_PANNE
+                logger.warning("Groq sature (%s) : nouvel essai dans %.0f s", e.raison, attente)
+                dormir(attente)
 
-            if apply_changes:
-                law.category_confidence = result.confidence
-                if suggested:
-                    law.suggested_categories = suggested
-                if law.category_id is None or args.force:
-                    law.category_id = target_id
-
-        if apply_changes:
-            session.commit()
-            logger.info("💾 Modifications enregistrées avec succès en base de données.")
-
-    # ==================== RAPPORT ====================
-    logger.info("\n" + "=" * 72)
-    logger.info("Lois lues : %d", len(laws))
-
-    logger.info("\nDistribution AVANT :")
-    for name, count in before.most_common():
-        logger.info("  %-55s %5d", name, count)
-
-    logger.info("\nDistribution APRÈS :")
-    for name, count in after.most_common():
-        logger.info("  %-55s %5d", name, count)
-
-    if moved:
-        logger.info("\nChangements prévus/effectués : %d", len(moved))
-        for lid, prev, new_dom, title in moved[:15]:
-            logger.info("  #%-5s %s  ->  %s  (%s)", lid, prev, new_dom, title[:50])
-        if len(moved) > 15:
-            logger.info("  ... et %d autres documents", len(moved) - 15)
-
-    if protected:
+        jetons_total += resultat.jetons
+        requetes_total += resultat.requetes
+        with journal.open("a", encoding="utf-8") as sortie:
+            for loi, verdict in zip(lot, resultat.verdicts):
+                ligne = {
+                    "law_id": loi.id,
+                    "titre": (loi.title or "")[:200],
+                    "statut": "ok" if verdict else "a_revoir",
+                    "domaine": verdict.domain if verdict else None,
+                    "secondaires": [nom for nom, _ in verdict.runners_up] if verdict else [],
+                    "confiance": verdict.confidence if verdict else None,
+                    "modele": resultat.modele,
+                    "consignes": VERSION_DES_CONSIGNES,
+                    "extrait": longueur_extrait,
+                    "lot": numero,
+                    "jetons_lot": resultat.jetons,
+                    "horodatage": _horodatage(),
+                }
+                sortie.write(json.dumps(ligne, ensure_ascii=False) + "\n")
+        a_revoir = sum(1 for v in resultat.verdicts if v is None)
         logger.info(
-            "\nDocuments protégés (gardent leur catégorie actuelle, utiliser --force pour écraser) : %d",
-            len(protected),
+            "Lot %d/%d : %d lois, %d a revoir, %d jetons, %d requete(s)",
+            numero, len(lots), len(lot), a_revoir, resultat.jetons, resultat.requetes,
         )
 
+    logger.info(
+        "✅ %d lots en %.0f s : %d requetes, %d jetons", len(lots), time.time() - debut,
+        requetes_total, jetons_total,
+    )
     return 0
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
-    return asyncio.run(main_async(args))
+# ==================== APPLIQUER ====================
+
+
+@dataclass
+class Bilan:
+    appliquees: int = 0
+    changees: int = 0
+    protegees: int = 0
+    a_revoir: int = 0
+    avant: Counter = field(default_factory=Counter)
+    apres: Counter = field(default_factory=Counter)
+
+
+def appliquer(
+    session,
+    verdicts: Dict[int, dict],
+    *,
+    dossier: Path = DOSSIER,
+    seuil: float = 0.6,
+    force: bool = False,
+    dry_run: bool = False,
+) -> Bilan:
+    """
+    Ecrit les verdicts « ok » au-dessus du seuil. Sans `force`, une loi qui a
+    deja une autre categorie la garde (choix d'un administrateur, peut-etre).
+    Ecrit changements.csv et a_revoir.csv dans tous les cas.
+    """
+    carte = load_domain_map(session)
+    noms = {identifiant: nom for nom, identifiant in session.query(Category.name, Category.id)}
+    bilan = Bilan()
+    changements, a_revoir = [], []
+    lois = (
+        session.query(Law)
+        .options(load_only(
+            Law.id, Law.reference, Law.title, Law.category_id,
+            Law.category_confidence, Law.suggested_categories,
+        ))
+        .filter(Law.id.in_(list(verdicts)))
+        .order_by(Law.id)
+        .all()
+    )
+
+    for position, loi in enumerate(lois, start=1):
+        verdict = verdicts[loi.id]
+        actuelle = noms.get(loi.category_id, "(aucune)")
+        bilan.avant[actuelle] += 1
+        cible = carte.get((verdict.get("domaine") or "").lower())
+
+        if _incertain(verdict, seuil) or cible is None:
+            bilan.a_revoir += 1
+            bilan.apres[actuelle] += 1
+            a_revoir.append([
+                loi.id, loi.reference, loi.title, actuelle, verdict.get("domaine") or "",
+                verdict.get("confiance") if verdict.get("confiance") is not None else "",
+                verdict.get("statut"),
+            ])
+            continue
+
+        if loi.category_id not in (None, cible) and not force:
+            bilan.protegees += 1
+            bilan.apres[actuelle] += 1
+            continue
+
+        bilan.appliquees += 1
+        bilan.apres[verdict["domaine"]] += 1
+        if loi.category_id != cible:
+            bilan.changees += 1
+            changements.append([
+                loi.id, loi.reference, loi.title, actuelle, verdict["domaine"], verdict["confiance"],
+            ])
+        if not dry_run:
+            secondaires = [carte[nom.lower()] for nom in verdict.get("secondaires") or []
+                           if nom.lower() in carte]
+            loi.category_id = cible
+            loi.category_confidence = float(verdict["confiance"])
+            loi.suggested_categories = [cible, *[s for s in secondaires if s != cible]]
+            if position % LOIS_PAR_COMMIT == 0:
+                session.commit()
+
+    if not dry_run:
+        session.commit()
+
+    dossier.mkdir(parents=True, exist_ok=True)
+    _ecrire_csv(
+        dossier / "changements.csv",
+        ["law_id", "reference", "titre", "avant", "apres", "confiance"], changements,
+    )
+    _ecrire_csv(
+        dossier / "a_revoir.csv",
+        ["law_id", "reference", "titre", "categorie_actuelle", "proposition", "confiance", "statut"],
+        a_revoir,
+    )
+    return bilan
+
+
+def _ecrire_csv(chemin: Path, entete: List[str], lignes: List[list]) -> None:
+    with chemin.open("w", encoding="utf-8", newline="") as sortie:
+        ecrivain = csv.writer(sortie)
+        ecrivain.writerow(entete)
+        ecrivain.writerows(lignes)
+
+
+def _rapport(bilan: Bilan, dossier: Path, dry_run: bool) -> None:
+    logger.info("%-55s %7s %7s", "Domaine", "avant", "apres")
+    for nom in [*CANONICAL_DOMAINS, "(aucune)"]:
+        if bilan.avant[nom] or bilan.apres[nom]:
+            logger.info("%-55s %7d %7d", nom[:55], bilan.avant[nom], bilan.apres[nom])
+    logger.info(
+        "%s : %d verdicts appliques dont %d changements de categorie, %d categories "
+        "existantes gardees (--force pour les remplacer), %d a revoir",
+        "SIMULATION, rien n'est ecrit" if dry_run else "Ecrit en base",
+        bilan.appliquees, bilan.changees, bilan.protegees, bilan.a_revoir,
+    )
+    logger.info("Relire : %s et %s", dossier / "changements.csv", dossier / "a_revoir.csv")
+    if bilan.changees and not dry_run:
+        logger.info(
+            "Les categories changees sont figees dans embed_text : redecouper et "
+            "revectoriser les %d lois de changements.csv.", bilan.changees,
+        )
+
+
+# ==================== LIGNE DE COMMANDE ====================
+
+
+def construire_parseur() -> argparse.ArgumentParser:
+    parseur = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parseur.add_argument("--journal", type=Path, default=JOURNAL)
+    parseur.add_argument("--seuil", type=float, default=0.6,
+                         help="Confiance minimale d'un verdict applique (defaut 0.6)")
+    actions = parseur.add_subparsers(dest="action", required=True)
+
+    p_classer = actions.add_parser("classer", help="Interroge Groq, ecrit le journal")
+    p_classer.add_argument("--lot", type=int, default=40, help="Lois par requete (defaut 40)")
+    p_classer.add_argument("--extrait", type=int, default=0,
+                           help="Caracteres d'extrait par loi, 0 = titre seul (defaut 0)")
+    p_classer.add_argument("--incertains", action="store_true",
+                           help="Ne redemander que les verdicts a revoir ou sous le seuil")
+    p_classer.add_argument("--law-id", type=int, action="append", dest="law_ids")
+    p_classer.add_argument("--limit", type=int, default=None)
+
+    p_appliquer = actions.add_parser("appliquer", help="Ecrit les verdicts en base")
+    p_appliquer.add_argument("--dry-run", action="store_true",
+                             help="N'ecrit rien en base ; produit le rapport et les CSV")
+    p_appliquer.add_argument("--force", action="store_true",
+                             help="Remplace aussi les categories deja posees")
+    p_appliquer.add_argument("--dossier", type=Path, default=DOSSIER)
+    return parseur
+
+
+def main(argv: Optional[Sequence[str]] = None, classifieur=None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    args = construire_parseur().parse_args(argv)
+
+    with SyncSessionLocal() as session:
+        manquants = [d for d in CANONICAL_DOMAINS if d.lower() not in load_domain_map(session)]
+        if manquants:
+            logger.error("❌ Domaines absents de la table categories : %s", ", ".join(manquants))
+            logger.error("   Appliquer d'abord les migrations (alembic upgrade head)")
+            return SORTIE_CONFIGURATION
+
+        if args.action == "classer":
+            return classer(
+                session, classifieur or get_legal_domain_classifier(),
+                journal=args.journal, taille_lot=args.lot, longueur_extrait=args.extrait,
+                incertains=args.incertains, seuil=args.seuil,
+                law_ids=args.law_ids, limite=args.limit,
+            )
+
+        verdicts = charger_verdicts(args.journal)
+        if not verdicts:
+            logger.error("❌ Journal vide (%s) : lancer d'abord `classer`", args.journal)
+            return SORTIE_CONFIGURATION
+        bilan = appliquer(
+            session, verdicts, dossier=args.dossier, seuil=args.seuil,
+            force=args.force, dry_run=args.dry_run,
+        )
+        _rapport(bilan, args.dossier, args.dry_run)
+        return 0
 
 
 if __name__ == "__main__":
