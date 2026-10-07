@@ -23,12 +23,13 @@ from datetime import date
 
 import pytest
 
+from app.core.config import settings
 from app.models.law import Article, Law
 from app.schemas.rag import RAGRequest
 from app.schemas.search import SearchRequest
 from app.services.embedding_service import EmbeddingService
 from app.services.language_detector import LanguageDetector
-from app.services.legal_domain_classifier import CANONICAL_DOMAINS, LegalDomainClassifier
+from app.services.legal_domain_classifier import CANONICAL_DOMAINS, CIVIL, LegalDomainClassifier
 from app.services.rag_service import RAGService
 from app.services.search_service import SearchService
 from app.utils.text_chunker import extract_articles
@@ -133,7 +134,7 @@ async def test_full_pipeline_integration(
         reference="LOI-2024-001-TEST",
         title="Code Civil Camerounais - Test Pipeline",
         type="Loi",
-        category_id=category_ids["Droit Civil"],
+        category_id=category_ids[CIVIL],
         language="fr",
         content=sample_legal_document,
         publication_date=date(2024, 1, 15),
@@ -251,10 +252,10 @@ async def test_pipeline_performance(sample_legal_document, async_db_session):
     )
     timings["classification"] = (time.time() - start) * 1000
     assert class_result.domain in CANONICAL_DOMAINS
-    # Le classement est une fonction pure sur des expressions regulieres : il
-    # doit couter des millisecondes, pas des secondes.
-    assert timings["classification"] < 200
-    print(f"✅ Classification: {timings['classification']:.0f}ms (target: <2000ms)")
+    # Le classement est un appel a Groq : borne par son delai, pas par des
+    # millisecondes comme du temps des expressions regulieres.
+    assert timings["classification"] < settings.GROQ_TIMEOUT_S * 1000
+    print(f"✅ Classification: {timings['classification']:.0f}ms")
 
     # Search (if available)
     try:

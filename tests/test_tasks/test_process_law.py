@@ -16,6 +16,12 @@ from sqlalchemy import select
 
 from app.models.law import Article, Law
 from app.services.embedding_service import EmbeddingService
+from app.services.legal_domain_classifier import (
+    AFFAIRES,
+    CANONICAL_DOMAINS,
+    FINANCES,
+    FONCTION_PUBLIQUE,
+)
 from app.tasks import process_law as pl
 
 
@@ -131,16 +137,17 @@ class TestFallbacks:
         assert result["language"] == "fr"
         assert 0.0 < result["confidence"] <= 1.0
 
-    def test_category_classification_always_returns_a_domain(self, monkeypatch):
-        """Le classifieur est une fonction pure : il rend toujours un domaine."""
+    def test_category_classification_always_returns_a_domain(self, monkeypatch, classeur):
+        """Le verdict du classifieur remonte tel quel, avec sa confiance."""
+        classeur(AFFAIRES)
         monkeypatch.setattr(
             pl, "SyncSessionLocal", _FakeSessionFactory({}), raising=True
         )
 
         result = pl._classify_category("Texte quelconque", "Contenu quelconque")
 
-        assert "category" in result
-        assert "confidence" in result
+        assert result["category"] == AFFAIRES
+        assert result["confidence"] == 0.9
 
 
 # ==================== INTEGRATION (base de test) ====================
@@ -222,7 +229,7 @@ class TestArticlePersistence:
         ingestion. Il est desormais transmis au decoupage.
         """
         pl._split_and_save_articles(
-            law_row.id, SAMPLE_TEXT, language="fr", category="Droit des Affaires"
+            law_row.id, SAMPLE_TEXT, language="fr", category=AFFAIRES
         )
 
         rows = (await db_session.execute(
@@ -230,7 +237,7 @@ class TestArticlePersistence:
         )).scalars().all()
 
         assert rows
-        assert all("Droit des Affaires" in a.embed_text for a in rows)
+        assert all(AFFAIRES in a.embed_text for a in rows)
 
     @pytest.mark.asyncio
     async def test_reprocessing_replaces_instead_of_duplicating(self, db_session, law_row):
@@ -370,9 +377,8 @@ class TestCategoryPersistence:
     etaient vides, alors que la classification avait bien eu lieu.
     """
 
-    def test_classifier_returns_the_category_id(self, monkeypatch):
-        from app.services.legal_domain_classifier import CANONICAL_DOMAINS
-
+    def test_classifier_returns_the_category_id(self, monkeypatch, classeur):
+        doublure = classeur(AFFAIRES, secondaires=[FINANCES])
         rows = {name.lower(): 1000 + offset for offset, name in enumerate(CANONICAL_DOMAINS)}
         monkeypatch.setattr(pl, "SyncSessionLocal", _FakeSessionFactory(rows), raising=True)
 
@@ -382,16 +388,20 @@ class TestCategoryPersistence:
             "registre du commerce au Cameroun.",
         )
 
-        assert result["category"] == "Droit des Affaires et OHADA"
-        assert result["category_id"] == rows["droit des affaires et ohada"]
+        assert doublure.titres == ["Décret portant approbation des statuts de la société SOCADEL"]
+        assert result["category"] == AFFAIRES
+        assert result["category_id"] == rows[AFFAIRES.lower()]
+        # Les suggestions sont des IDENTIFIANTS, domaine retenu en tete.
+        assert result["suggested"] == [rows[AFFAIRES.lower()], rows[FINANCES.lower()]]
         assert 0.0 <= result["confidence"] <= 1.0
         assert result["error"] is None
 
-    def test_missing_domain_leaves_the_id_null_and_reports_it(self, monkeypatch):
+    def test_missing_domain_leaves_the_id_null_and_reports_it(self, monkeypatch, classeur):
         """
         Sans ligne correspondante en base, mieux vaut aucune categorie qu'une
         fausse : c'est l'invention d'un identifiant qui a produit le bug.
         """
+        classeur(FINANCES)
         monkeypatch.setattr(
             pl, "SyncSessionLocal", _FakeSessionFactory({}), raising=True
         )
@@ -400,18 +410,17 @@ class TestCategoryPersistence:
             "Loi portant Code Général des Impôts", "texte fiscal sur l'impôt"
         )
 
-        assert result["category"] == "Finances Publiques et Fiscalité"
+        assert result["category"] == FINANCES
         assert result["category_id"] is None
         assert result["suggested"] == []
         assert "absent de la table categories" in result["error"]
 
-    def test_resolves_the_id_by_name_never_by_position(self, monkeypatch):
+    def test_resolves_the_id_by_name_never_by_position(self, monkeypatch, classeur):
         """
         La table est semee dans l'ordre INVERSE : tout code qui resoudrait un
         domaine par sa position designerait le mauvais identifiant.
         """
-        from app.services.legal_domain_classifier import CANONICAL_DOMAINS
-
+        classeur(FONCTION_PUBLIQUE)
         rows = {
             name.lower(): 1000 + offset
             for offset, name in enumerate(reversed(CANONICAL_DOMAINS))
@@ -424,8 +433,33 @@ class TestCategoryPersistence:
             "Décret portant nomination d'un Inspecteur Général", ""
         )
 
-        assert result["category"] == "Fonction Publique"
-        assert result["category_id"] == rows["fonction publique"]
+        assert result["category"] == FONCTION_PUBLIQUE
+        assert result["category_id"] == rows[FONCTION_PUBLIQUE.lower()]
+
+    def test_classement_indisponible_laisse_la_categorie_nulle(self, monkeypatch):
+        """
+        L'ancien classifieur rendait « Droit Administratif » pendant un 429 :
+        la loi semblait classee, et personne ne la reprenait.
+        """
+        from app.services import legal_domain_classifier
+        from app.services.legal_domain_classifier import ClassementIndisponible
+
+        class _EnPanne:
+            def classify(self, *args, **kwargs):
+                raise ClassementIndisponible("quota Groq", retry_after=600, quota=True)
+
+        monkeypatch.setattr(
+            legal_domain_classifier, "get_legal_domain_classifier", lambda: _EnPanne()
+        )
+
+        result = pl._classify_category("Loi de finances 2024", "texte budgetaire")
+
+        assert result["category"] is None
+        assert result["category_id"] is None
+        assert result["confidence"] is None
+        assert result["suggested"] == []
+        assert "quota Groq" in result["error"]
+        assert "reclassify_domains.py" in result["error"]
 
     @pytest.mark.asyncio
     async def test_metadata_update_writes_the_category(self, db_session, law_row):
@@ -437,14 +471,14 @@ class TestCategoryPersistence:
         # precisement la forme du bug d'origine, et cassait des que la fixture
         # cessait d'attribuer les identifiants par position.
         target = (await db_session.execute(
-            select(Category.id).where(Category.name == "Droit des Affaires et OHADA")
+            select(Category.id).where(Category.name == AFFAIRES)
         )).scalar_one()
 
         pl._update_law_metadata(
             law_row.id,
             language="fr",
             language_confidence=0.9,
-            category="Droit des Affaires et OHADA",
+            category=AFFAIRES,
             category_confidence=0.8,
             category_id=target,
         )
@@ -457,6 +491,54 @@ class TestCategoryPersistence:
         assert refreshed.category_id == target
         assert refreshed.category_confidence == pytest.approx(0.8)
         assert refreshed.status == "published"
+
+
+class TestPipelineSansClassement:
+    """
+    Le pipeline publie une loi meme sans categorie, et le dit dans
+    processing_error. Les etapes lourdes sont doublees : ce qui est verifie,
+    c'est ce qui part vers _update_law_metadata.
+    """
+
+    @pytest.fixture
+    def etapes(self, monkeypatch):
+        ecrit = {}
+        monkeypatch.setattr(pl, "_detect_language", lambda text: {"language": "fr", "confidence": 0.9})
+        monkeypatch.setattr(pl, "_split_and_save_articles", lambda *a, **k: 4)
+        monkeypatch.setattr(pl, "_generate_article_embeddings", lambda law_id: 0)
+        monkeypatch.setattr(pl, "_update_law_metadata", lambda law_id, **k: ecrit.update(k))
+        return ecrit
+
+    def test_les_deux_anomalies_sont_gardees(self, monkeypatch, etapes):
+        """L'erreur des embeddings ecrasait celle du classement."""
+        monkeypatch.setattr(pl, "_classify_category", lambda *a: {
+            **pl._SANS_CLASSEMENT, "error": "Classement indisponible (quota Groq)",
+        })
+
+        pl._run_analysis_pipeline(1, Law(title="Loi", type="loi"), "x" * 60, file_errors=["page 3 illisible"])
+
+        erreurs = etapes["processing_error"].split(" | ")
+        assert erreurs[0] == "page 3 illisible"
+        assert erreurs[1] == "Classement indisponible (quota Groq)"
+        assert erreurs[2].startswith("Aucun embedding genere pour 4 articles")
+        assert etapes["category_id"] is None
+        assert etapes["category_confidence"] is None
+
+    def test_classer_false_n_appelle_pas_le_classement(self, monkeypatch, etapes):
+        def _interdit(*args):
+            raise AssertionError("le classement devait etre differe")
+
+        monkeypatch.setattr(pl, "_classify_category", _interdit)
+        monkeypatch.setattr(pl, "_generate_article_embeddings", lambda law_id: 4)
+
+        resultat = pl._run_analysis_pipeline(
+            1, Law(title="Loi", type="loi"), "x" * 60, classer=False
+        )
+
+        assert resultat["category"] is None
+        assert etapes["category"] is None
+        # Differer le classement n'est pas une anomalie.
+        assert etapes["processing_error"] is None
 
 
 class TestChunkRefinement:

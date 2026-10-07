@@ -25,9 +25,13 @@ Usage:
     python scripts/ingest_corpus.py --doc-id 291 9866
     python scripts/ingest_corpus.py --limite 20      # pilote
     python scripts/ingest_corpus.py --dry-run        # combien, sans rien ecrire
+    python scripts/ingest_corpus.py --sans-classement
+        # ingestion de masse : categories faites ensuite, par lots, par
+        # scripts/maintenance/reclassify_domains.py
 """
 
 import argparse
+import functools
 import logging
 import os
 import re
@@ -438,6 +442,15 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--doc-id", nargs="+", help="Limite a ces documents")
     parser.add_argument("--limite", type=int, help="Nombre maximal de documents (pilote)")
     parser.add_argument("--force", action="store_true", help="Retraite aussi les lois publiees")
+    parser.add_argument(
+        "--sans-classement",
+        action="store_true",
+        help=(
+            "Ne classe pas les lois une par une : la categorie reste a faire, par "
+            "lots, avec scripts/maintenance/reclassify_domains.py (une requete "
+            "pour 40 lois au lieu de 40)"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
@@ -461,8 +474,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     stockage = get_upload_service().storage_path
     stockage.mkdir(parents=True, exist_ok=True)
+    traiter = (
+        functools.partial(process_law_sync, classer=False)
+        if args.sans_classement else process_law_sync
+    )
     try:
-        bilan = indexer(documents, extracteur, stockage, force=args.force, corpus=corpus)
+        bilan = indexer(
+            documents, extracteur, stockage, force=args.force, corpus=corpus, traiter=traiter
+        )
     except PanneDeBase as exc:
         logger.error("%s — relancer la meme commande une fois la base revenue", exc)
         return 3

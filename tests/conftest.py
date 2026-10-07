@@ -118,6 +118,19 @@ _DB_FIXTURES = {
 # disponible, ou la cle de _PG_HINTS qui decrit ce qui manque.
 _pg_probleme: str | None = None
 
+# Cles des API externes, remplacees par une cle factice pendant toute la suite.
+CLE_FACTICE = "test-key-not-a-real-credential"
+_CLES_API = ("GEMINI_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY")
+_CLES_REELLES: dict = {}
+
+# Marqueur d'un test qui appelle le vrai service : nom du service, module qui
+# porte son `transport_http`, et cle sans laquelle le test est ignore.
+_MARQUEURS_API_REELLE = {"groq_live": "Groq", "mistral_live": "Mistral"}
+_MODULES_GARDES = {
+    "groq_live": ("app.services.groq_service", "GROQ_API_KEY"),
+    "mistral_live": ("app.services.mistral_service", "MISTRAL_API_KEY"),
+}
+
 
 def _check_pg() -> str:
     """
@@ -168,20 +181,31 @@ def pytest_configure(config):
         "markers",
         "gemma: execute le vrai modele EmbeddingGemma local (onnxruntime et fichiers requis)",
     )
+    for marqueur, service in _MARQUEURS_API_REELLE.items():
+        config.addinivalue_line(
+            "markers",
+            f"{marqueur}: appelle le vrai {service} (quota consomme) ; "
+            f"ignore sauf avec -m {marqueur}",
+        )
 
-    # Cle factice IMPOSEE, et pas seulement quand aucune n'est configuree.
+    # Cles factices IMPOSEES, et pas seulement quand aucune n'est configuree.
     #
     # L'ancienne regle ne posait la cle factice que si la variable etait vide.
     # Or une vraie cle vit dans .env : tout test qui atteignait le vrai service
     # d'embeddings — ComparisonService construit un SearchService reel —
     # appelait donc l'API Gemini PAYANTE, et pouvait meme passer. Une suite de
-    # tests ne doit jamais rien couter.
+    # tests ne doit jamais rien couter. Groq et Mistral suivent la meme regle :
+    # le quota gratuit de Groq (200 000 jetons par jour) ne supporte pas une
+    # suite complete, qui l'epuisait et finissait en 429.
     #
-    # JURIX_E2E=1 garde la vraie cle, pour un essai de bout en bout delibere.
+    # Les vraies cles sont mises de cote pour la fixture `api_reelle`.
+    # JURIX_E2E=1 les garde, pour un essai de bout en bout delibere.
     from app.core.config import settings
 
     if os.environ.get("JURIX_E2E") != "1":
-        settings.GEMINI_API_KEY = "test-key-not-a-real-credential"
+        for nom in _CLES_API:
+            _CLES_REELLES[nom] = getattr(settings, nom)
+            setattr(settings, nom, CLE_FACTICE)
 
 
 def pytest_collection_modifyitems(config, items):
@@ -194,8 +218,17 @@ def pytest_collection_modifyitems(config, items):
     dupliquer dans 21 fichiers ne ferait que créer une source de divergence.
     """
     probleme = None
+    expression = config.getoption("markexpr") or ""
 
     for item in items:
+        # Un appel reel consomme un quota : il se demande explicitement, par
+        # `-m groq_live` ou `-m mistral_live`, jamais par un `pytest` nu.
+        for marqueur in _MARQUEURS_API_REELLE:
+            if item.get_closest_marker(marqueur) and marqueur not in expression:
+                item.add_marker(pytest.mark.skip(
+                    reason=f"appel reel : lancez `pytest -m {marqueur}` pour l'executer"
+                ))
+
         needs_db = bool(_DB_FIXTURES & set(getattr(item, "fixturenames", ())))
         if not needs_db:
             continue
@@ -354,6 +387,185 @@ def _doubler_le_service_d_embeddings(request):
         yield
     finally:
         search_service._embedding_service_instance, search_service._singletons_initialized = avant
+
+
+# ==================== DOUBLURE DU CLASSEMENT DES LOIS ====================
+
+
+class _ClasseurFixe:
+    """
+    Doublure du classifieur de domaine : rend le verdict qu'on lui donne.
+
+    Le pipeline classe chaque loi par Groq, que la garde reseau interdit. Les
+    tests du pipeline portent sur ce qu'il FAIT du verdict — identifiant
+    resolu par le nom, domaine absent signale — et non sur le classement,
+    couvert par test_legal_domain_classifier.py.
+    """
+
+    def __init__(self, domaine, secondaires=()):
+        self.domaine = domaine
+        self.secondaires = tuple(secondaires)
+        self.titres = []
+
+    def classify(self, title, content="", doc_type=None):
+        from app.services.legal_domain_classifier import DomainResult
+
+        self.titres.append(title)
+        return DomainResult(
+            domain=self.domaine,
+            confidence=0.9,
+            rule="doublure",
+            source="groq",
+            runners_up=tuple((d, 0.7) for d in self.secondaires),
+        )
+
+
+@pytest.fixture
+def classeur(monkeypatch):
+    """
+    `classeur(domaine, secondaires=())` pose un classifieur qui rend ce
+    verdict, et le rend pour inspection. Le pipeline le relit a chaque loi.
+    """
+    from app.services import legal_domain_classifier
+
+    def _poser(domaine, secondaires=()):
+        doublure = _ClasseurFixe(domaine, secondaires)
+        monkeypatch.setattr(
+            legal_domain_classifier, "get_legal_domain_classifier", lambda: doublure
+        )
+        return doublure
+
+    return _poser
+
+
+# ==================== GARDE RESEAU : GROQ ET MISTRAL ====================
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Garde le rapport de chaque phase sur l'item : la garde reseau le relit."""
+    rapport = yield
+    setattr(item, f"_rapport_{rapport.when}", rapport)
+    return rapport
+
+
+class _AppelsInterdits:
+    """
+    Transport httpx qui refuse tout appel : la garde posee par defaut.
+
+    La cle factice ne suffit pas. Un appel avec une fausse cle part quand meme
+    sur le reseau et revient en 401 ; le classement d'intention, qui avale
+    toute erreur, retombe alors sur « juridique », et le test passe sans rien
+    prouver — en dependant du reseau.
+    """
+
+    def __init__(self, marqueur: str):
+        import httpx
+
+        self.marqueur = marqueur
+        self.appels: list = []
+        self.transport = httpx.MockTransport(self._refuser)
+
+    def _refuser(self, requete):
+        self.appels.append(f"{requete.method} {requete.url}")
+        pytest.fail(self.message(), pytrace=False)
+
+    def message(self) -> str:
+        return (
+            f"Appel reel pendant un test : {', '.join(self.appels)}. Doublez le "
+            f"service (son `transport_http`), ou marquez le test {self.marqueur}."
+        )
+
+
+def _vider_les_singletons_llm():
+    """Un singleton construit avec une cle la garde : il faut le reconstruire."""
+    from app.services.gemini_service import get_gemini_service
+    from app.services.groq_service import get_groq_service
+    from app.services.mistral_service import get_mistral_service
+
+    for fabrique in (get_gemini_service, get_groq_service, get_mistral_service):
+        fabrique.cache_clear()
+
+
+@pytest.fixture
+def api_reelle():
+    """
+    Remet les vraies cles du .env, pour un test qui appelle le vrai service.
+
+    Demandee d'office par les tests marques `groq_live` ou `mistral_live`. Les
+    cles factices et des singletons neufs sont remis en sortie.
+    """
+    from app.core.config import settings
+
+    factices = {nom: getattr(settings, nom) for nom in _CLES_API}
+    for nom, valeur in _CLES_REELLES.items():
+        setattr(settings, nom, valeur)
+    _vider_les_singletons_llm()
+    try:
+        yield
+    finally:
+        for nom, valeur in factices.items():
+            setattr(settings, nom, valeur)
+        _vider_les_singletons_llm()
+
+
+@pytest.fixture(autouse=True)
+def _garde_reseau_llm(request):
+    """
+    Aucun appel reel a Groq ni a Mistral, sauf demande explicite.
+
+    Chaque service lit son `transport_http` a chaque appel : la garde y est
+    posee pour la duree du test, puis l'etat d'avant est remis. Un test marque
+    `groq_live` (ou `mistral_live`) leve la garde de CE service seulement, et
+    recoit les vraies cles.
+
+    Un appel refuse fait echouer le test sur-le-champ. S'il a ete avale (un
+    `except BaseException`, une tache jamais attendue), le demontage le
+    signale quand meme.
+
+    JURIX_E2E=1 ne pose aucune garde : c'est l'essai de bout en bout delibere,
+    vraies cles comprises (voir pytest_configure).
+    """
+    import importlib
+
+    from app.core.config import settings
+
+    if os.environ.get("JURIX_E2E") == "1":
+        yield
+        return
+
+    gardes = []
+    precedents = []
+    cles_requises = []
+    for marqueur, (nom_module, cle) in _MODULES_GARDES.items():
+        module = importlib.import_module(nom_module)
+        precedents.append((module, module.transport_http))
+        if request.node.get_closest_marker(marqueur):
+            cles_requises.append(cle)
+            continue
+        garde = _AppelsInterdits(marqueur)
+        module.transport_http = garde.transport
+        gardes.append(garde)
+
+    if cles_requises:
+        request.getfixturevalue("api_reelle")
+        absentes = [cle for cle in cles_requises if not getattr(settings, cle)]
+        if absentes:
+            for module, transport in precedents:
+                module.transport_http = transport
+            pytest.skip(f"{', '.join(absentes)} absente du .env : appel reel impossible")
+
+    try:
+        yield
+    finally:
+        for module, transport in precedents:
+            module.transport_http = transport
+
+    rapport = getattr(request.node, "_rapport_call", None)
+    deja_en_echec = rapport is not None and rapport.failed
+    for garde in gardes:
+        if garde.appels and not deja_en_echec:
+            pytest.fail(garde.message(), pytrace=False)
 
 
 @pytest.fixture(scope="session")

@@ -127,7 +127,10 @@ async def _update_fts_vectors_async(db: AsyncSession, law_id: int) -> None:
 
 
 def _run_sync_pipeline(
-    law_id: int, file_id: str = None, extraction_cache_seulement: bool = False
+    law_id: int,
+    file_id: str = None,
+    extraction_cache_seulement: bool = False,
+    classer: bool = True,
 ) -> Dict[str, Any]:
     """
     Exécute le pipeline de traitement de façon synchrone.
@@ -137,6 +140,8 @@ def _run_sync_pipeline(
         file_id: UUID du fichier uploadé (optionnel)
         extraction_cache_seulement: ne relire que l'extraction deja faite (voir
             _extract_pdf_text), sans jamais convertir
+        classer: False laisse la categorie a faire par le reclassement par lots
+            (scripts/maintenance/reclassify_domains.py)
 
     Returns:
         Dict de résultats
@@ -171,12 +176,16 @@ def _run_sync_pipeline(
             logger.info(f"📝 Extracted title: {extracted_title}")
 
     # 5. Pipeline d'analyse
-    result = _run_analysis_pipeline(law_id, law, text, extracted_title, errors)
+    result = _run_analysis_pipeline(
+        law_id, law, text, extracted_title, errors, classer=classer
+    )
     result["errors"] = errors
     return result
 
 
-def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None, file_errors=None):
+def _run_analysis_pipeline(
+    law_id: int, law, text: str, extracted_title=None, file_errors=None, classer: bool = True
+):
     """
     Exécute le pipeline complet: langue → catégorie → articles → embeddings → metadata.
     """
@@ -188,15 +197,21 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None, fi
     logger.info(f"🌍 Language: {language_result['language']} ({language_result['confidence']:.2%})")
 
     # Catégorie
-    category_result = _classify_category(
-        extracted_title or getattr(law, "title", "") or "",
-        text,
-        getattr(law, "type", None),
-    )
-    logger.info(
-        f"📂 Category: {category_result['category']} "
-        f"({category_result['confidence']:.2%}, regle {category_result['rule']})"
-    )
+    if classer:
+        category_result = _classify_category(
+            extracted_title or getattr(law, "title", "") or "",
+            text,
+            getattr(law, "type", None),
+        )
+    else:
+        category_result = _SANS_CLASSEMENT
+    if category_result["category"]:
+        logger.info(
+            f"📂 Category: {category_result['category']} "
+            f"({category_result['confidence']:.2%}, regle {category_result['rule']})"
+        )
+    else:
+        logger.info("📂 Category: aucune (%s)", category_result["error"] or "classement differe")
 
     # Articles. La langue et le domaine calcules ci-dessus partent avec le
     # decoupage : ils etaient relus en base, ou ils ne sont ecrits qu'a la fin
@@ -218,7 +233,11 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None, fi
     # introuvable par la recherche semantique. Le pipeline n'echoue pas pour
     # autant — la recherche plein texte fonctionne — mais l'anomalie est
     # tracee sur la ligne au lieu de disparaitre dans les journaux.
-    embeddings_error = category_result.get("error")
+    #
+    # Variable PROPRE, et non celle de la categorie reutilisee : l'erreur des
+    # embeddings ecrasait celle du classement, et une loi sans categorie ni
+    # vecteur ne signalait que l'absence de vecteur.
+    embeddings_error = None
     # articles_count compte TOUS les chunks, embeddings_count seulement les
     # vectorisables : un document entierement fait de visas et de formules
     # d'execution n'a legitimement aucun vecteur.
@@ -232,7 +251,9 @@ def _run_analysis_pipeline(law_id: int, law, text: str, extracted_title=None, fi
     # Les pages que l'extraction n'a pas pu lire restaient dans les journaux :
     # le document passait pour complet. Elles rejoignent processing_error,
     # visible et interrogeable par l'administrateur.
-    anomalies = [e for e in [*(file_errors or []), embeddings_error] if e]
+    anomalies = [
+        e for e in [*(file_errors or []), category_result.get("error"), embeddings_error] if e
+    ]
 
     # Metadata
     _update_law_metadata(
@@ -422,6 +443,18 @@ def _detect_language(text: str) -> Dict[str, Any]:
         return {"language": "en", "confidence": 0.75}
 
 
+# Le verdict d'une loi qui n'a pas ete classee : categorie inchangee (NULL a
+# la premiere ingestion), et rien d'invente.
+_SANS_CLASSEMENT: Dict[str, Any] = {
+    "category": None,
+    "category_id": None,
+    "confidence": None,
+    "rule": None,
+    "suggested": [],
+    "error": None,
+}
+
+
 def _classify_category(title: str, text: str, doc_type: str = None) -> Dict[str, Any]:
     """
     Determine le domaine juridique du document et resout son identifiant.
@@ -437,9 +470,25 @@ def _classify_category(title: str, text: str, doc_type: str = None) -> Dict[str,
     quelle dans une cle etrangere.
     """
     from app.services.category_resolver import load_domain_map
-    from app.services.legal_domain_classifier import get_legal_domain_classifier
+    from app.services.legal_domain_classifier import (
+        ClassementIndisponible,
+        get_legal_domain_classifier,
+    )
 
-    result = get_legal_domain_classifier().classify(title or "", text or "", doc_type)
+    try:
+        result = get_legal_domain_classifier().classify(title or "", text or "", doc_type)
+    except ClassementIndisponible as e:
+        # La loi est publiee SANS categorie, et le dit. L'ancien classifieur
+        # inventait ici « Droit Administratif » : la loi semblait classee, et
+        # personne ne la reprenait.
+        logger.warning("⚠️ Classement indisponible : %s", e.raison)
+        return {
+            **_SANS_CLASSEMENT,
+            "error": (
+                f"Classement indisponible ({e.raison[:200]}) : relancer "
+                "scripts/maintenance/reclassify_domains.py"
+            ),
+        }
 
     with SyncSessionLocal() as session:
         domain_map = load_domain_map(session)
@@ -483,7 +532,10 @@ def _split_and_save_articles(
     Args:
         language: langue detectee ; sinon celle de la ligne. Elle decide du
             role de « Section N » (article en anglais, subdivision en francais).
-        category: domaine juridique calcule ; sinon celui de la ligne.
+        category: domaine juridique calcule, retenu si la ligne n'en a pas.
+            Celle de la ligne l'emporte : c'est elle que _update_law_metadata
+            garde (le choix de l'administrateur a l'upload), et embed_text
+            doit annoncer la categorie que la loi affiche.
 
     Returns:
         Nombre d'articles extraits et sauvegardés
@@ -514,7 +566,7 @@ def _split_and_save_articles(
                 title=(law.title if law else "") or "",
                 doc_type=(law.type if law else None),
                 date=law.publication_date.isoformat() if law and law.publication_date else None,
-                category=category or (law.category.name if law and law.category else None),
+                category=(law.category.name if law and law.category else None) or category,
                 language=langue,
             )
 
@@ -696,7 +748,10 @@ def _update_law_metadata(
             law.language = language
             law.detected_language = language
             law.language_confidence = language_confidence
-            law.category_confidence = category_confidence
+            # Sans classement, la confiance d'avant reste : None n'est pas un
+            # verdict.
+            if category_confidence is not None:
+                law.category_confidence = category_confidence
             # La proposition de la machine est TOUJOURS enregistree, meme
             # quand elle ne s'applique pas : la colonne etait declaree partout
             # et ecrite nulle part depuis le debut du projet.
@@ -814,7 +869,10 @@ delete_from_meilisearch = delete_from_search_index
 # ==================== LEGACY SYNC ENTRY POINT ====================
 
 def process_law_sync(
-    law_id: int, file_id: str = None, extraction_cache_seulement: bool = False
+    law_id: int,
+    file_id: str = None,
+    extraction_cache_seulement: bool = False,
+    classer: bool = True,
 ) -> Dict[str, Any]:
     """
     Version synchrone du pipeline, celle de l'ingestion par script.
@@ -824,6 +882,7 @@ def process_law_sync(
         law_id: ID de la loi
         file_id: UUID du fichier uploadé
         extraction_cache_seulement: voir _extract_pdf_text
+        classer: voir _run_sync_pipeline
 
     Returns:
         Dict avec status et résultats
@@ -834,7 +893,7 @@ def process_law_sync(
     logger.info(f"🔄 Starting synchronous processing for law {law_id}, file {file_id}")
 
     try:
-        result = _run_sync_pipeline(law_id, file_id, extraction_cache_seulement)
+        result = _run_sync_pipeline(law_id, file_id, extraction_cache_seulement, classer)
     except Exception as e:
         # Sans ce marquage, une loi en echec restait 'processing' : ni publiee,
         # ni signalee, et une relance de l'ingestion la sautait comme deja

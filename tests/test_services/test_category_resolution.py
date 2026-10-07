@@ -82,6 +82,10 @@ class TestPipelineWritesTheRightCategory:
     """
     Le test decisif : faire tourner le classement puis lire le NOM par jointure.
     Jamais l'entier.
+
+    Le verdict vient d'une doublure (le vrai modele est verifie, en une
+    requete, par test_legal_domain_classifier.py -m groq_live) : ce qui est
+    teste ici est le chemin du verdict jusqu'a la cle etrangere.
     """
 
     CASES = [
@@ -96,10 +100,11 @@ class TestPipelineWritesTheRightCategory:
 
     @pytest.mark.parametrize("title,expected", CASES)
     def test_law_joins_to_the_expected_category_name(
-        self, scrambled_categories, title, expected
+        self, scrambled_categories, classeur, title, expected
     ):
         from app.tasks.process_law import _classify_category
 
+        classeur(expected)
         law = Law(reference=f"REF-{abs(hash(title)) % 100000}", title=title, type="loi",
                   content="Contenu du document.", language="fr", status="published")
         scrambled_categories.add(law)

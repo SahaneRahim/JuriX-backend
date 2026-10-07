@@ -28,10 +28,17 @@ from app.services.docling_extraction import (
     DoclingPdfExtractor,
     sha256_fichier,
 )
+from app.services.legal_domain_classifier import ADMINISTRATIF
 from scripts import extraire_corpus, ingest_corpus
 from scripts.extraire_corpus import Document, superviser
 
 # ==================== DOUBLURES ====================
+
+
+@pytest.fixture(autouse=True)
+def _classement_double(classeur):
+    """Le pipeline classe chaque loi par Groq, que la garde reseau interdit."""
+    classeur(ADMINISTRATIF)
 
 
 class _Statut:

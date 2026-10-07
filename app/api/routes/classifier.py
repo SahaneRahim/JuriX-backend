@@ -11,8 +11,13 @@ de la base. Deux listes de categories concurrentes servies par la meme API,
 c'etait la garantie qu'un client se fie a la mauvaise. Le front n'appelait pas
 cet endpoint.
 
+`/classify` est RESERVE AUX ADMINISTRATEURS. Chaque appel coute une requete
+Groq sur le quota du classement des lois (1 000 par jour) : publique, la route
+permettait a n'importe qui de le vider, et de bloquer l'ingestion.
+
 Usage:
     curl -X POST http://localhost:8000/api/v1/classifier/classify \
+        -H "Authorization: Bearer <jeton administrateur>" \
         -H "Content-Type: application/json" \
         -d '{"title": "Loi portant Code Minier", "text": "..."}'
 """
@@ -26,10 +31,13 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import get_current_admin_user
 from app.core.database import get_db
 from app.models.law import Category
+from app.models.user import User
 from app.services.legal_domain_classifier import (
     CANONICAL_DOMAINS,
+    ClassementIndisponible,
     LegalDomainClassifier,
     get_legal_domain_classifier,
 )
@@ -56,7 +64,7 @@ class ClassifyDocumentRequest(BaseModel):
     text: str = Field(
         default="",
         max_length=200_000,
-        description="Texte integral, utilise si le titre ne tranche pas",
+        description="Texte integral ; seul un extrait (l'article premier) est envoye au modele",
     )
     doc_type: Optional[str] = Field(
         default=None, max_length=50, description="loi, decret, arrete..."
@@ -80,8 +88,8 @@ class ClassifyDocumentResponse(BaseModel):
         description="Identifiant resolu depuis la table categories, nul si le domaine y manque",
     )
     confidence: float = Field(..., ge=0.0, le=1.0)
-    rule: str = Field(..., description="Regle qui a decide, pour diagnostic")
-    source: str = Field(..., description="title, content ou doctype-default")
+    rule: str = Field(..., description="Modele qui a decide, pour diagnostic")
+    source: str = Field(..., description="Toujours groq")
     runners_up: List[Dict[str, Any]] = Field(default_factory=list)
     processing_time_ms: float
 
@@ -97,14 +105,18 @@ class ClassifyDocumentResponse(BaseModel):
     description=(
         "Rend UN domaine parmi les 14 domaines canoniques, plus l'identifiant "
         "de la ligne correspondante dans `categories`, resolu PAR LE NOM. "
-        "Le titre decide en priorite ; le contenu n'est consulte que s'il ne "
-        "tranche pas. Aucun appel reseau."
+        "Classement par Groq (une requete) : reserve aux administrateurs, et "
+        "503 avec Retry-After quand le modele ne peut pas repondre."
     ),
+    responses={
+        503: {"description": "Classement indisponible (quota ou panne de Groq)"},
+    },
 )
 async def classify_document(
     request: ClassifyDocumentRequest,
     db: AsyncSession = Depends(get_db),
     classifier: LegalDomainClassifier = Depends(get_legal_domain_classifier),
+    current_admin: User = Depends(get_current_admin_user),
 ) -> ClassifyDocumentResponse:
     """Classe un document et resout son identifiant de categorie."""
     if not request.has_signal():
@@ -115,12 +127,18 @@ async def classify_document(
 
     start = time.perf_counter()
     try:
-        result = classifier.classify(request.title, request.text, request.doc_type)
-    except Exception as exc:  # pragma: no cover - le classifieur est pur
-        logger.exception("Classification impossible")
+        # await : l'appel synchrone bloquait la boucle d'evenements, donc
+        # toutes les autres requetes, le temps de l'appel a Groq.
+        result = await classifier.classify_async(request.title, request.text, request.doc_type)
+    except ClassementIndisponible as exc:
+        logger.warning("Classement indisponible : %s", exc.raison)
+        entetes = {}
+        if exc.retry_after is not None:
+            entetes["Retry-After"] = str(max(1, int(exc.retry_after + 0.999)))
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur de classification: {exc}",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Classement indisponible pour le moment, réessayez plus tard.",
+            headers=entetes or None,
         ) from exc
 
     rows = (await db.execute(select(Category.name, Category.id))).all()

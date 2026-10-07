@@ -21,6 +21,11 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
+
+# Transport HTTP de tous les appels sortants. None : le reseau. Les tests y
+# posent un httpx.MockTransport (doublure, ou garde qui interdit tout appel
+# reel). Lu a CHAQUE appel, il s'applique aussi au singleton deja construit.
+transport_http: Optional[Any] = None
 OVERLOAD_MAX_ATTEMPTS = 3
 OVERLOAD_BASE_DELAY_S = 1.5
 
@@ -120,7 +125,7 @@ FORBIDDEN:
 
         for attempt in range(1, OVERLOAD_MAX_ATTEMPTS + 1):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with httpx.AsyncClient(timeout=self.timeout, transport=transport_http) as client:
                     resp = await client.post(
                         MISTRAL_API_URL, headers=self._headers(), json=payload
                     )
@@ -202,7 +207,7 @@ FORBIDDEN:
         produced = 0
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, transport=transport_http) as client:
                 async with client.stream(
                     "POST", MISTRAL_API_URL, headers=self._headers(), json=payload
                 ) as response:

@@ -40,8 +40,30 @@ class Settings(BaseSettings):
 
     # Groq (LPU pour Routage / Système 1 ultra-rapide < 100 ms)
     GROQ_API_KEY: str = ""
+    # Modele du classement d'intention (chaque message du chat).
     GROQ_MODEL: str = "qwen/qwen3.8-27b"
+    # Modele du classement des lois (pipeline, reclassement). Distinct de celui
+    # du chat : chez Groq, les quotas sont PAR MODELE, et un reclassement du
+    # corpus ne doit pas vider celui des utilisateurs. gpt-oss-120b est en
+    # production ; qwen3.8-27b n'est qu'en « Preview ».
+    GROQ_MODEL_CLASSEMENT: str = "openai/gpt-oss-120b"
     GROQ_TIMEOUT_S: float = 10.0
+    # Plafonds du palier gratuit, PAR MODELE (verifies le 07/10/2026 dans les
+    # en-tetes x-ratelimit-* et la documentation). Le limiteur fait attendre
+    # avant d'envoyer plutot que de collectionner les 429.
+    GROQ_REQUETES_PAR_MINUTE: int = 30
+    # Departs autorises d'affilee avant que l'espacement (2 s a 30/min)
+    # s'impose : deux messages simultanes ne doivent pas attendre l'un l'autre.
+    GROQ_RAFALE: int = 5
+    GROQ_JETONS_PAR_MINUTE: int = 8_000
+    GROQ_JETONS_ENTREE_PAR_MINUTE: int = 7_000
+    GROQ_REQUETES_PAR_JOUR: int = 1_000
+    # Absent des en-tetes : le depassement ne se voit qu'au message du 429.
+    GROQ_JETONS_PAR_JOUR: int = 200_000
+    # Au-dela de cette attente imposee par un 429, c'est un quota epuise, pas
+    # une saturation : l'appel echoue (GroqQuotaError) et plus aucun n'est
+    # envoye au modele avant l'echeance.
+    GROQ_ATTENTE_MAX_429_S: float = 120.0
 
     # Gemini API (optionnel désormais)
     GEMINI_API_KEY: str = ""
