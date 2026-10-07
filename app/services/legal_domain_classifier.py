@@ -13,7 +13,7 @@ Author: JuriX Team
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple
 
 from app.services.text_features import fold_accents
 

@@ -7,26 +7,16 @@ Usage:
     pytest tests/test_services/test_legal_domain_classifier.py -v
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from app.services.legal_domain_classifier import (
-    ADMINISTRATIF,
-    AFFAIRES,
     CANONICAL_DOMAINS,
-    CIVIL,
-    CONSTITUTIONNEL,
     EDUCATION,
-    ENVIRONNEMENT,
-    FAMILLE,
     FINANCES,
-    FONCIER,
     FONCTION_PUBLIQUE,
-    INTERNATIONAL,
-    PENAL,
     SANTE,
-    TRAVAIL,
     LegalDomainClassifier,
     get_legal_domain_classifier,
 )

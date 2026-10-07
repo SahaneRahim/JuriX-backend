@@ -51,17 +51,11 @@ from app.schemas.comparison import (
 )
 from app.schemas.search import ChunkResult, SearchFilters, SearchRequest
 from app.services.article_reference import normalize_number
-from app.services.gemini_service import (
-    GeminiOverloadedError,
-    GeminiQuotaError,
-    GeminiServiceError,
-    get_gemini_service,
-)
-from app.services.mistral_service import (
-    MistralOverloadedError,
-    MistralQuotaError,
-    MistralServiceError,
-    get_mistral_service,
+from app.services.llm import (
+    ERREURS_LLM,
+    ERREURS_QUOTA,
+    ERREURS_SATURATION,
+    get_llm_service,
 )
 from app.services.prompts import (
     COMPARE_TASK_TEMPLATES,
@@ -178,7 +172,7 @@ class ComparisonService:
     """
     Compare deux sujets a partir du corpus.
 
-    Le LLM est un PARAMETRE, pas un appel a get_gemini_service() : les tests
+    Le LLM est un PARAMETRE, pas un appel a get_llm_service() : les tests
     injectent une doublure. Meme regle que reranker.py et explanation_service.
     """
 
@@ -187,10 +181,8 @@ class ComparisonService:
         self.search_service = SearchService(db)
         if llm is not None:
             self.llm = llm
-        elif settings.LLM_PROVIDER == "mistral":
-            self.llm = get_mistral_service()
         else:
-            self.llm = get_gemini_service()
+            self.llm = get_llm_service()
 
     async def compare(
         self,
@@ -327,11 +319,11 @@ class ComparisonService:
                 response_mime_type="application/json",
                 response_schema=_schema_de_sortie(axes),
             )
-        except (GeminiQuotaError, MistralQuotaError) as e:
+        except ERREURS_QUOTA as e:
             raise ComparisonQuotaError(str(e)) from e
-        except (GeminiOverloadedError, MistralOverloadedError) as e:
+        except ERREURS_SATURATION as e:
             raise ComparisonOverloadedError(str(e)) from e
-        except (GeminiServiceError, MistralServiceError) as e:
+        except ERREURS_LLM as e:
             raise ComparisonError(str(e)) from e
 
         texte = (reponse or {}).get("response", "")

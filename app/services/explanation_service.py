@@ -14,7 +14,7 @@ ou la base en compte 230 pour le meme document. Le numero seul suffit donc dans
 le cas nominal, mais pas toujours.
 
   1. Par la BASE, avec `article_reference.normalize_number` des deux cotes.
-     Autoritaire : le texte envoye a Gemini vient de la base, jamais du client.
+     Autoritaire : le texte envoye au modele vient de la base, jamais du client.
   2. A defaut, par l'EXTRAIT fourni par la page — mais seulement apres avoir
      verifie qu'il provient bien du document demande.
 
@@ -41,17 +41,11 @@ from app.models.law import Law
 from app.schemas.law import ArticleExplanationResponse
 from app.schemas.search import ChunkResult
 from app.services.article_reference import normalize_number
-from app.services.gemini_service import (
-    GeminiOverloadedError,
-    GeminiQuotaError,
-    GeminiServiceError,
-    get_gemini_service,
-)
-from app.services.mistral_service import (
-    MistralOverloadedError,
-    MistralQuotaError,
-    MistralServiceError,
-    get_mistral_service,
+from app.services.llm import (
+    ERREURS_LLM,
+    ERREURS_QUOTA,
+    ERREURS_SATURATION,
+    get_llm_service,
 )
 from app.services.prompts import (
     CONTEXT_TEMPLATE,
@@ -129,7 +123,7 @@ class ExplanationService:
     """
     Explique un article a partir de son texte et de son document parent.
 
-    Le LLM est un PARAMETRE et non un appel a get_gemini_service() : un test
+    Le LLM est un PARAMETRE et non un appel a get_llm_service() : un test
     injecte une doublure. C'est la regle deja posee par reranker.py — la suivre
     ici evite d'avoir a patcher le SDK pour tester quoi que ce soit.
     """
@@ -138,10 +132,8 @@ class ExplanationService:
         self.db = db
         if llm is not None:
             self.llm = llm
-        elif settings.LLM_PROVIDER == "mistral":
-            self.llm = get_mistral_service()
         else:
-            self.llm = get_gemini_service()
+            self.llm = get_llm_service()
 
     async def explain(
         self,
@@ -155,7 +147,7 @@ class ExplanationService:
 
         Raises:
             ArticleNotFoundError: loi absente, ou article irresolu
-            ExplanationQuotaError: quota Gemini epuise
+            ExplanationQuotaError: quota du fournisseur epuise
             ExplanationOverloadedError: service de generation sature
             ExplanationError: tout autre echec de generation
         """
@@ -352,9 +344,9 @@ class ExplanationService:
         """
         Appelle le modele et traduit ses echecs.
 
-        L'ordre des blocs except n'est pas arbitraire : GeminiOverloadedError
-        est une sous-classe de GeminiServiceError, donc le cas general vient en
-        dernier.
+        L'ordre des blocs except n'est pas arbitraire : les erreurs de quota
+        et de saturation derivent de l'erreur generique de leur fournisseur,
+        donc le cas general vient en dernier.
         """
         try:
             reponse = await self.llm.generate(
@@ -363,11 +355,11 @@ class ExplanationService:
                 temperature=EXPLANATION_TEMPERATURE,
                 max_tokens=EXPLANATION_MAX_TOKENS,
             )
-        except (GeminiQuotaError, MistralQuotaError) as e:
+        except ERREURS_QUOTA as e:
             raise ExplanationQuotaError(str(e)) from e
-        except (GeminiOverloadedError, MistralOverloadedError) as e:
+        except ERREURS_SATURATION as e:
             raise ExplanationOverloadedError(str(e)) from e
-        except (GeminiServiceError, MistralServiceError) as e:
+        except ERREURS_LLM as e:
             raise ExplanationError(str(e)) from e
 
         texte = (reponse or {}).get("response", "")

@@ -5,7 +5,7 @@ Orchestrates the complete RAG pipeline:
 1. Document retrieval (SearchService)
 2. Conversation history loading
 3. Prompt construction (persona-adapted)
-4. Answer generation (GeminiService) - TODO: Implement
+4. Answer generation (service retenu par LLM_PROVIDER, voir app/services/llm.py)
 5. Citation extraction
 6. Persistence (Database)
 """
@@ -29,22 +29,16 @@ from app.core.config import settings
 from app.models.conversation import Conversation, Message
 from app.schemas.rag import Citation, RAGRequest, RAGResponse, RAGStreamChunk
 from app.schemas.search import ChunkResult, SearchFilters, SearchRequest
-from app.services.gemini_service import (
-    GeminiOverloadedError,
-    GeminiQuotaError,
-    GeminiServiceError,
-    get_gemini_service,
-)
-from app.services.mistral_service import (
-    MistralOverloadedError,
-    MistralQuotaError,
-    MistralServiceError,
-    get_mistral_service,
-)
 from app.services.intent_classifier import (
     INTENT_JURIDIQUE,
     IntentResult,
     classify_intent,
+)
+from app.services.llm import (
+    ERREURS_LLM,
+    ERREURS_QUOTA,
+    ERREURS_SATURATION,
+    get_llm_service,
 )
 from app.services.postgres_search_service import escape_like
 from app.services.prompts import (
@@ -113,6 +107,13 @@ MENTION_REPONSE_TRONQUEE = (
 # premiere phrase, exactement comme ci-dessus. Un plafond serre ne rendrait pas
 # une reponse courte, il rendrait une reponse VIDE.
 CONVERSATION_MAX_TOKENS = 2048
+
+# Rendu quand aucun service de generation n'est branche (cle absente). Le
+# message ne nomme plus Gemini : le fournisseur depend de LLM_PROVIDER.
+MESSAGE_LLM_ABSENT = (
+    "Service de génération non configuré : renseignez la clé du fournisseur "
+    "choisi par LLM_PROVIDER dans .env."
+)
 
 # Une reponse conversationnelle est certaine ET sans source : les deux vont
 # ensemble. C'est deja le choix de la sortie anticipee « article absent »
@@ -216,7 +217,7 @@ class RAGService:
     1. Document retrieval (SearchService)
     2. Conversation history loading
     3. Prompt construction (persona-adapted)
-    4. Answer generation (GeminiService) - TODO
+    4. Answer generation (service retenu par LLM_PROVIDER)
     5. Citation extraction
     6. Persistence (Database)
 
@@ -283,10 +284,7 @@ class RAGService:
         """
         self.db = db
         self.user_id = user_id
-        if settings.LLM_PROVIDER == "mistral":
-            self.llm = get_mistral_service()
-        else:
-            self.llm = get_gemini_service()
+        self.llm = get_llm_service()
         self.search_service = SearchService(db)
 
     async def ask(self, request: RAGRequest) -> RAGResponse:
@@ -368,13 +366,13 @@ class RAGService:
             # d'appartenance est retraduit en RAGServiceError, donc rendu en
             # 500 par la route au lieu du 404 qui ne revele rien.
             raise
-        except (GeminiQuotaError, MistralQuotaError) as e:
+        except ERREURS_QUOTA as e:
             logger.warning(f"⚠️ Quota de generation epuise: {e}")
             raise RAGQuotaError(str(e)) from e
-        except (GeminiOverloadedError, MistralOverloadedError) as e:
+        except ERREURS_SATURATION as e:
             logger.warning(f"⚠️ Generation saturee: {e}")
             raise RAGOverloadedError(str(e)) from e
-        except (GeminiServiceError, MistralServiceError) as e:
+        except ERREURS_LLM as e:
             logger.error(f"❌ Erreur de generation: {e}")
             raise RAGServiceError(f"Erreur de génération: {e}") from e
         except Exception as e:
@@ -451,7 +449,7 @@ class RAGService:
         system_prompt = get_system_prompt(request.persona, request.language)
 
         if self.llm is None:
-            raise RAGServiceError("LLM service not configured. Please set up Gemini API.")
+            raise RAGServiceError(MESSAGE_LLM_ABSENT)
 
         # 1000 jetons ne suffisent pas a un modele a raisonnement : la
         # reflexion consomme le budget avant la reponse, et ce qui remonte est
@@ -517,7 +515,7 @@ class RAGService:
         generation_start = time.time()
 
         if self.llm is None:
-            raise RAGServiceError("LLM service not configured. Please set up Gemini API.")
+            raise RAGServiceError(MESSAGE_LLM_ABSENT)
 
         system_prompt = get_conversational_prompt(intention.intent, request.language)
         prompt = (
@@ -675,11 +673,10 @@ class RAGService:
             # utilise par le chemin non-streaming (ligne ~240).
             system_prompt = get_system_prompt(request.persona, request.language)
 
-            # TODO: Implement Gemini streaming
             if self.llm is None:
                 yield RAGStreamChunk(
                     chunk="", done=True,
-                    error="LLM service not configured. Please set up Gemini API.",
+                    error=MESSAGE_LLM_ABSENT,
                 ).model_dump_json(exclude_none=True)
                 return
 
@@ -733,8 +730,8 @@ class RAGService:
         except Exception as e:
             logger.error(f"❌ Streaming error: {e}")
             code = (
-                "quota" if isinstance(e, (GeminiQuotaError, MistralQuotaError))
-                else "overloaded" if isinstance(e, (GeminiOverloadedError, MistralOverloadedError))
+                "quota" if isinstance(e, ERREURS_QUOTA)
+                else "overloaded" if isinstance(e, ERREURS_SATURATION)
                 else "server"
             )
             yield RAGStreamChunk(

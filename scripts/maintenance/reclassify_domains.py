@@ -23,6 +23,8 @@ from typing import List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from sqlalchemy import select
+
 from app.core.database import SyncSessionLocal
 from app.models.law import Category, Law
 from app.services.category_resolver import load_domain_map
@@ -103,7 +105,7 @@ async def main_async(args) -> int:
         id_to_name = {
             row[1]: row[0]
             for row in session.execute(
-                __import__("sqlalchemy").select(Category.name, Category.id)
+                select(Category.name, Category.id)
             ).all()
         }
 

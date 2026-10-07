@@ -18,8 +18,6 @@ Usage:
 import pytest
 from sqlalchemy import text
 
-from app.models.user import User
-
 
 @pytest.mark.asyncio
 async def test_index_unique_sur_token_hash(db_session):

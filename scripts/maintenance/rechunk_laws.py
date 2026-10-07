@@ -36,6 +36,8 @@ from typing import List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from sqlalchemy import text
+
 from app.core.database import SyncSessionLocal
 from app.models.law import Article, Law
 from app.utils.chunk_refiner import normalize_for_chunking
@@ -151,7 +153,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     with SyncSessionLocal() as session:
         remaining = session.query(Article).filter(Article.kind.is_(None)).count()
         real_laws = session.execute(
-            __import__("sqlalchemy").text(
+            text(
                 "SELECT count(DISTINCT law_id) FROM articles WHERE number ~ '^[0-9]'"
             )
         ).scalar_one()

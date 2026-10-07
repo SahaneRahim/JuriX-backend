@@ -34,6 +34,7 @@ Usage:
     pytest tests/test_api/test_password_reset_routes.py -v
 """
 
+import datetime
 import hashlib
 import re
 
@@ -149,7 +150,7 @@ class TestCloisonnementDesUsages:
                 user_id=user_id,
                 purpose=VERIFICATION_ADRESSE,  # <-- le mauvais usage
                 token_hash=hachage(jeton),
-                expires_at=maintenant_naif() + __import__("datetime").timedelta(hours=1),
+                expires_at=maintenant_naif() + datetime.timedelta(hours=1),
                 created_at=maintenant_naif(),
             )
         )
@@ -302,8 +303,6 @@ class TestCycleDeVieDuJeton:
 
     @pytest.mark.asyncio
     async def test_jeton_expire_refuse(self, client, db_session, envoi):
-        import datetime
-
         donnees = await _inscrire(client)
         jeton = nouveau_jeton()
         db_session.add(
@@ -329,8 +328,6 @@ class TestCycleDeVieDuJeton:
         Un lien plus ancien encore valide serait une seconde porte ouverte
         pendant trente minutes — y compris pour qui aurait intercepte le premier.
         """
-        import datetime
-
         donnees = await _inscrire(client)
         vieux = nouveau_jeton()
         db_session.add(
@@ -446,8 +443,6 @@ class TestEtranglement:
         self, client, db_session, envoi
     ):
         """Le quota Brevo est un plafond dur : un seul compte ne doit pas l'epuiser."""
-        import datetime
-
         await _inscrire(client)
         envoi.reset()
 

@@ -67,8 +67,6 @@ async def test_secret_key_par_defaut_refuse_le_demarrage_hors_developpement():
     clé publiée dans le dépôt : n'importe qui pourrait forger un jeton
     d'administration.
     """
-    from contextlib import asynccontextmanager
-
     from app.core.config import settings
     from app.main import _DEV_SECRET_KEY, lifespan
 
