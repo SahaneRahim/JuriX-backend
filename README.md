@@ -50,8 +50,12 @@ docker exec jurix-pg psql -U jurix -d jurix_dev -c "CREATE DATABASE jurix_test"
 
 ```bash
 python3.11 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt          # production
-pip install -r requirements-dev.txt      # + outils de test
+pip install -r requirements.txt -c constraints.txt   # production, aux versions de l'image
+pip install -r requirements-dev.txt                  # + outils de test
+
+# L'image Docker installe EXACTEMENT les versions de constraints.txt. Après un
+# changement de dépendances (requirements.txt ou venv), régénérer puis commiter :
+bash scripts/figer_versions.sh
 
 cp .env.example .env                     # puis renseigner les valeurs
 

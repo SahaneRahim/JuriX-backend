@@ -31,32 +31,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy dependency file first (for Docker layer caching)
-COPY requirements.txt ./
+COPY requirements.txt constraints.txt ./
 
-# Upgrade pip and install dependencies
+# constraints.txt fige chaque version sur celle du venv de developpement, ou la
+# suite de tests passe (scripts/figer_versions.sh). Sans lui, l'image prenait
+# les dernieres versions du jour de sa construction, jamais testees ensemble :
+# SQLAlchemy 2.1 l'a fait planter au demarrage.
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt -c constraints.txt
+
+# Utilisateur sans privileges, et modele fastText de detection de langue
+# (126 Mo), AVANT la copie du code : cette couche reste alors en cache d'une
+# mise a jour a l'autre. Placee apres, chaque modification du code
+# retelechargeait le modele, puis le chown le recopiait dans une couche de
+# plus ; et un telechargement rate donnait, sans erreur, une image sans
+# detection de langue. Un echec fait desormais echouer la construction :
+# `docker compose up --build` s'arrete, et l'ancienne version continue de
+# tourner.
+RUN useradd -m -u 1000 -s /bin/bash jurix && \
+    mkdir -p /app/models/fasttext /app/logs /app/data && \
+    wget -q https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin \
+         -O /app/models/fasttext/lid.176.bin && \
+    chown -R jurix:jurix /app
 
 # Copie du code applicatif.
 # Ce que ce COPY embarque est filtre par .dockerignore : sans lui, le fichier
 # .env — donc les cles d'API — se retrouvait dans une couche de l'image, lisible
-# par quiconque peut la telecharger.
-COPY . .
-
-# Create required directories
-RUN mkdir -p /app/models/fasttext /app/logs /app/data
-
-# Download fastText language identification model
-RUN if [ ! -f /app/models/fasttext/lid.176.bin ]; then \
-        echo "Downloading fastText model..." && \
-        wget -q https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin \
-             -O /app/models/fasttext/lid.176.bin || \
-        echo "fastText model download failed - will skip language detection"; \
-    fi
-
-# Non-root user for security
-RUN useradd -m -u 1000 -s /bin/bash jurix && \
-    chown -R jurix:jurix /app
+# par quiconque peut la telecharger. --chown evite un `chown -R` apres coup,
+# qui recopiait tout /app dans une nouvelle couche.
+COPY --chown=jurix:jurix . .
 
 USER jurix
 

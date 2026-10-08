@@ -11,7 +11,10 @@ pydantic[email]>=2.5.0,<3.0.0
 pydantic-settings>=2.1.0,<3.0.0
 
 # ── Database ──────────────────────────────────────────────────────────────────
-sqlalchemy>=2.0.23,<3.0.0
+# [asyncio] fournit greenlet, requis par sqlalchemy.ext.asyncio (toute l'API, et
+# alembic/env.py). SQLAlchemy 2.1 ne l'installe plus de lui-meme : l'image
+# construite avec 2.1 plantait au demarrage, des la migration.
+sqlalchemy[asyncio]>=2.0.23,<3.0.0
 alembic>=1.12.1,<2.0.0
 psycopg2-binary>=2.9.9,<3.0.0
 asyncpg>=0.29.0,<1.0.0
