@@ -26,6 +26,15 @@ if [ "$(valeur SECRET_KEY | tr -d '\n' | wc -c)" -lt 32 ]; then
     echo "SECRET_KEY trop courte : openssl rand -hex 32"
     exit 1
 fi
+# La politique de l'API (app/schemas/user.py), verifiee ici AVANT la
+# construction de l'image : refuse a l'etape 6 seulement, le mot de passe
+# faisait echouer un deploiement de vingt minutes. create_admin.py reste juge.
+mdp=$(valeur ADMIN_PASSWORD)
+if [ -n "$mdp" ] && ! { [ "${#mdp}" -ge 8 ] && [ "${#mdp}" -le 100 ] \
+        && [[ $mdp =~ [[:upper:]] ]] && [[ $mdp =~ [[:lower:]] ]] && [[ $mdp =~ [[:digit:]] ]]; }; then
+    echo "ADMIN_PASSWORD refuse : 8 a 100 caracteres, dont une majuscule, une minuscule et un chiffre"
+    exit 1
+fi
 
 echo "== 2. La base, seule d'abord"
 docker compose up -d db
@@ -41,7 +50,13 @@ echo "== 3. Restauration initiale, seulement si la base n'a AUCUNE loi"
 # Le nombre de lois, et non l'existence de la table : l'API cree le schema
 # (vide) a chaque demarrage, et un premier demarrage avant la restauration la
 # faisait sauter pour toujours, sans un mot.
-lois=$(requete "SELECT CASE WHEN to_regclass('public.laws') IS NULL THEN 0 ELSE (SELECT count(*) FROM laws) END")
+# Deux requetes, et non un CASE : PostgreSQL resout `laws` a l'analyse, meme
+# dans la branche non prise, et sur une base neuve la requete echouait, ce qui
+# arretait le script avant toute restauration.
+lois=0
+if [ "$(requete "SELECT to_regclass('public.laws') IS NOT NULL")" = "t" ]; then
+    lois=$(requete "SELECT count(*) FROM laws")
+fi
 if [ "$lois" = "0" ] && [ -f sauvegardes/initial.dump ]; then
     echo "Base sans loi : restauration de sauvegardes/initial.dump dans une base neuve"
     docker compose stop api caddy >/dev/null 2>&1 || true
@@ -65,6 +80,9 @@ docker compose up -d --build
 # Caddy ne relit pas sa configuration tout seul.
 docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile </dev/null >/dev/null 2>&1 \
     || docker compose restart caddy
+# L'image remplacee reste sur le disque, sans nom : une de plus a chaque mise a
+# jour. Seules celles de JuriX sont visees.
+docker image prune -f --filter label=com.docker.compose.project=jurix >/dev/null
 
 echo "== 5. Attente de l'API (chargement du modele, migrations)"
 prete=0

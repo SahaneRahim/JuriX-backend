@@ -30,6 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
+from pydantic import ValidationError
 from sqlalchemy import select
 
 load_dotenv()
@@ -77,8 +78,12 @@ async def main() -> int:
             password=password,
             role=args.role,
         )
-    except Exception as e:
-        print(f"❌ Données invalides : {e}", file=sys.stderr)
+    except ValidationError as e:
+        # Jamais str(e) : pydantic y recopie la valeur refusee, donc le mot de
+        # passe, en clair dans le terminal et dans la sortie du deploiement.
+        for erreur in e.errors(include_input=False, include_url=False):
+            champ = ".".join(str(partie) for partie in erreur["loc"])
+            print(f"❌ Données invalides, {champ} : {erreur['msg']}", file=sys.stderr)
         return 1
 
     try:

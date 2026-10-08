@@ -57,6 +57,11 @@ services:
       DATABASE_URL: postgresql+asyncpg://jurix:${POSTGRES_PASSWORD}@db:5432/jurix
       PGSSLMODE: disable
       GEMMA_MODEL_DIR: /app/modeles/embeddinggemma-300m-onnx
+      # uvicorn croit les en-tetes X-Forwarded-* de Caddy. Sans cela, il se
+      # croyait en HTTP : ses redirections (barre oblique finale) partaient
+      # vers http://, que le navigateur bloque depuis une page HTTPS. Sans
+      # danger : aucun port de l'API n'est publie, seul Caddy la joint.
+      FORWARDED_ALLOW_IPS: "*"
     volumes:
       # Le modele n'est pas dans l'image (500 Mo) : monte en lecture seule.
       - ./modeles/embeddinggemma-300m-onnx:/app/modeles/embeddinggemma-300m-onnx:ro
