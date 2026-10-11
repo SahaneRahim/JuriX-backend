@@ -16,6 +16,7 @@ from scripts.eval.comparer_mistral import (
     REGLES_DE_FOND,
     TEMOIN,
     _parseur,
+    appels_au_pire,
     appels_prevus,
     citations,
     distinction,
@@ -105,7 +106,7 @@ def test_le_temoin_rejoue_la_premiere_variante():
 
 
 def test_le_budget_refuse_avant_tout_appel(capsys):
-    """8 questions x 2 modeles x 5 profils = 80 appels, au-dela des 48 : rien ne part."""
+    """8 questions x 2 modeles x 5 profils = 80 taches, 160 appels au pire : rien ne part."""
     code = main([
         "--questions", "8", "--comparaisons", "0", "--modeles", "a", "b",
         "--personas", "citoyen", "avocat", "entrepreneur", "étudiant", "citoyen",
@@ -114,6 +115,49 @@ def test_le_budget_refuse_avant_tout_appel(capsys):
     assert code == 2
     assert "Budget depasse" in capsys.readouterr().out
     assert appels_prevus(8, 10, 0, 2) == 80
+
+
+def test_le_budget_compte_le_pire_cas():
+    """Une reponse coupee demande une suite, une grille illisible est redemandee."""
+    assert appels_au_pire(20, 2, 4, 2) == 2 * appels_prevus(20, 2, 4, 2) == 96
+
+
+def test_un_nombre_negatif_est_refuse():
+    """`--comparaisons -1` retranchait un appel au budget et lancait trois comparaisons."""
+    with pytest.raises(SystemExit):
+        _parseur().parse_args(["--comparaisons", "-1"])
+
+
+def test_le_reclassement_par_le_modele_est_coupe(monkeypatch):
+    """Il ajouterait un appel par question, hors budget, et dans --dry-run."""
+    from scripts.eval import comparer_mistral
+
+    monkeypatch.setattr(comparer_mistral.settings, "RERANK_LLM_ENABLED", True)
+    monkeypatch.setattr(comparer_mistral, "evaluer", _sans_appel)
+
+    assert main(["--dry-run", "--questions", "1", "--comparaisons", "0"]) == 0
+    assert comparer_mistral.settings.RERANK_LLM_ENABLED is False
+
+
+async def _sans_appel(args):
+    return {"questions": [], "comparaisons": []}
+
+
+def test_la_relecture_a_l_aveugle_ne_trahit_pas_le_profil_par_sa_position(tmp_path):
+    from scripts.eval.comparer_mistral import fichier_a_l_aveugle
+
+    resultats = {"questions": [{
+        "question": "q", "extraits": [],
+        "aveugle": ["Z", "X", "Y"],
+        "reponses": [{"texte": "citoyen"}, {"texte": "avocat"}, {"texte": "temoin"}],
+    }]}
+    chemin = tmp_path / "a.md"
+
+    fichier_a_l_aveugle(resultats, chemin)
+
+    texte = chemin.read_text(encoding="utf-8")
+    # Dans l'ordre des etiquettes X, Y, Z : avocat, temoin, citoyen.
+    assert texte.index("avocat") < texte.index("temoin") < texte.index("citoyen")
 
 
 def test_un_profil_sans_prompt_n_est_pas_mesure(monkeypatch, capsys):
@@ -131,6 +175,10 @@ def test_un_profil_sans_prompt_n_est_pas_mesure(monkeypatch, capsys):
 
 def test_forme_relue_distingue_ce_que_le_chat_sait_relire():
     assert forme_relue("Selon l'article 33 du Code Minier, alinéa 2.") == {"vus": 1, "relus": 1}
+    assert forme_relue("Selon l'article 94 septies du Code général des impôts.") == {"vus": 1, "relus": 1}
+    assert forme_relue(
+        "Selon l'article 5 du Code Minier et l'article 6 du Code Minier."
+    ) == {"vus": 2, "relus": 2}
     assert forme_relue("Voir art. 33.") == {"vus": 1, "relus": 0}
     assert forme_relue("Aucune citation.") == {"vus": 0, "relus": 0}
 
@@ -143,9 +191,21 @@ def test_traits_d_une_reponse():
     assert t["mots"] > 5
 
 
+@pytest.mark.parametrize("texte", [
+    "Il vaut mieux vous adresser à un avocat.",
+    "Consultez l'avocat de votre choix.",
+    "You should consult an attorney.",
+])
+def test_les_renvois_vers_un_avocat_sont_reconnus(texte):
+    assert traits(texte)["renvoi_avocat"]
+
+
 def test_similarite_bornes():
     assert similarite("un deux trois quatre", "un deux trois quatre") == 1.0
     assert similarite("un deux trois", "quatre cinq six") == 0.0
+    # Moins de trois mots : pas de trigramme, mais deux textes differents.
+    assert similarite("a b", "c d") == 0.0
+    assert similarite("a b", "a b") == 1.0
 
 
 def test_distinction_profils_divergents_temoin_proche():
@@ -161,3 +221,14 @@ def test_distinction_profils_divergents_temoin_proche():
 
     assert bilan["temoin"] == 1.0
     assert bilan["entre_profils"] < bilan["temoin"]
+
+
+def test_distinction_ne_compare_que_des_profils_de_meme_modele():
+    """14b|citoyen contre 8b|citoyen mesure le modele, pas le profil."""
+    texte = "la loi prevoit une sanction penale pour ce fait precis selon le code"
+    resultats = {"questions": [{"reponses": [
+        {"variante": "14b|actuelles|citoyen", "texte": texte, "erreur": None},
+        {"variante": "8b|actuelles|citoyen", "texte": "tout autre chose ici et maintenant", "erreur": None},
+    ]}]}
+
+    assert distinction(resultats)["questions"] == 0

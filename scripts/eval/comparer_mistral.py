@@ -12,8 +12,10 @@ PROTOCOLE, FIXE AVANT LA MESURE :
   dans les extraits ; pour les comparaisons, JSON lisible et lignes remplies ;
 - les reponses sont ecrites ANONYMISEES (X et Y, tires au sort par question)
   dans un fichier de relecture a l'aveugle des ajouts non sources ;
-- budget : 48 appels au plus (24 taches, 2 modeles). Le bras facultatif
-  (temperature 0,3 contre 0,7) n'est pas lance : il depasserait ce budget.
+- budget : 48 taches (24 questions ou comparaisons, 2 modeles), soit 96
+  appels au pire : une reponse coupee demande une suite, une grille illisible
+  est redemandee. Le bras facultatif (temperature 0,3 contre 0,7) n'est pas
+  lance : il depasserait ce budget.
 
 REGLE DE DECISION, ECRITE AVANT : on garde le 14b, sauf si le 8b egale la
 justesse des citations (a 2 points pres) sans ajouter plus de contenu non
@@ -28,7 +30,7 @@ PROFILS (--personas). Meme protocole, un seul modele : chaque question est
 posee sous chaque profil, avec le MEME contexte. --temoin rejoue le premier
 profil une seconde fois : l'ecart entre deux tirages du meme prompt, a
 temperature 0,7, est le plancher de bruit auquel comparer l'ecart entre
-profils. --budget borne le nombre d'appels AVANT le premier.
+profils. --budget borne le nombre d'appels, au pire cas, AVANT le premier.
 
 REGLE DE DECISION DES PROFILS, ECRITE AVANT LA MESURE. Les nouveaux prompts
 sont gardes si, sur la mesure APRES :
@@ -121,11 +123,13 @@ COMPARAISONS = [
 
 # « article 32 », « articles 40.1 et 41 », « art. 1er », « l'article premier ».
 _CITATION = re.compile(
-    r"\bart(?:icle)?s?\.?\s+((?:\d+(?:[.-]\d+)*(?:\s*(?:er|bis|ter))?|premier)"
+    r"\bart(?:icle)?s?\.?\s+((?:\d+(?:[.-]\d+)*(?:\s*(?:er|bis|ter|quater|septies))?|premier)"
     r"(?:\s*(?:,|et|à)\s*\d+(?:[.-]\d+)*)*)",
     re.IGNORECASE,
 )
-_NUMERO = re.compile(r"\d+(?:[.-]\d+)*(?:\s*(?:er|bis|ter))?|premier", re.IGNORECASE)
+# Memes suffixes que CITATION_REGEX : « 94 septies » lu par le chat et compte
+# ici « 94 » faisait passer une citation lue pour illisible.
+_NUMERO = re.compile(r"\d+(?:[.-]\d+)*(?:\s*(?:er|bis|ter|quater|septies))?|premier", re.IGNORECASE)
 
 
 def numeros_cites(texte: str) -> List[str]:
@@ -192,8 +196,9 @@ def citations(texte: str, numeros_du_contexte: set) -> Dict[str, Any]:
 # avant le numero) reste illisible.
 _CITATION_CHAT = re.compile(RAGService.CITATION_REGEX, re.IGNORECASE)
 _RENVOI_AVOCAT = re.compile(
-    r"consult(?:ez|er|e)\s+(?:un|une|votre)\s+(?:avocat|juriste|professionnel du droit)"
-    r"|faire appel à un avocat|consult(?:ing)?\s+a\s+lawyer",
+    r"consult(?:ez|er|e)\s+(?:un|une|votre|l['’]\s*)\s*(?:avocat|juriste|professionnel du droit)"
+    r"|(?:faire appel|vous adresser|s['’]adresser)\s+à\s+un\s+avocat"
+    r"|consult(?:ing)?\s+(?:a|an|your)\s+(?:lawyer|attorney|legal professional)",
     re.IGNORECASE,
 )
 _JURISPRUDENCE = re.compile(r"jurisprudence|case[- ]law", re.IGNORECASE)
@@ -234,7 +239,10 @@ def similarite(a: str, b: str) -> float:
     """Jaccard sur les trigrammes de mots : 1 pour deux textes identiques."""
     ta, tb = _trigrammes(a), _trigrammes(b)
     if not ta and not tb:
-        return 1.0
+        # Moins de trois mots de part et d'autre : identiques ou non, sans plus.
+        # Rendre 1 faisait de « a b » et « c d » deux textes identiques.
+        mots = lambda t: re.findall(r"\w+", (t or "").lower())  # noqa: E731
+        return 1.0 if mots(a) == mots(b) else 0.0
     return len(ta & tb) / len(ta | tb)
 
 
@@ -249,8 +257,14 @@ def distinction(resultats: Dict[str, Any]) -> Dict[str, Any]:
         textes = {r["variante"]: r["texte"] for r in question["reponses"]
                   if r.get("variante") and not r.get("erreur")}
         profils = [cle for cle in textes if not cle.endswith(TEMOIN)]
+        # Seules les variantes de meme modele et memes consignes different par
+        # le PROFIL : comparer 14b|citoyen a 8b|citoyen mesurait le modele.
+        def reglage(cle: str) -> str:
+            return cle.rsplit("|", 1)[0]
+
         paires = [similarite(textes[a], textes[b])
-                  for i, a in enumerate(profils) for b in profils[i + 1:]]
+                  for i, a in enumerate(profils) for b in profils[i + 1:]
+                  if reglage(a) == reglage(b)]
         if paires:
             entre.append(statistics.median(paires))
         for cle in textes:
@@ -274,6 +288,15 @@ def variantes_de(args) -> List[tuple]:
 
 def appels_prevus(n_questions: int, n_variantes: int, n_comparaisons: int, n_modeles: int) -> int:
     return n_questions * n_variantes + n_comparaisons * n_modeles
+
+
+def appels_au_pire(n_questions: int, n_variantes: int, n_comparaisons: int, n_modeles: int) -> int:
+    """
+    Le budget porte sur le PIRE cas : une reponse coupee demande une suite
+    (mistral_service), une grille illisible est redemandee (comparison_service).
+    Chaque tache peut donc couter deux appels.
+    """
+    return 2 * appels_prevus(n_questions, n_variantes, n_comparaisons, n_modeles)
 
 
 def questions_de(args) -> List[dict]:
@@ -430,7 +453,11 @@ def fichier_a_l_aveugle(resultats: Dict[str, Any], chemin: Path) -> None:
         lignes += [f"## {numero}. {question['question']}", "", "### Extraits", ""]
         for extrait in question["extraits"]:
             lignes.append(f"- {extrait['loi']} art. {extrait['numero']} : {extrait['texte']}")
-        for etiquette, reponse in zip(question["aveugle"], question["reponses"]):
+        # Dans l'ordre des etiquettes, tirees au hasard par question : dans
+        # l'ordre des variantes, la position trahissait le profil (citoyen
+        # toujours premier, temoin toujours dernier).
+        for etiquette, reponse in sorted(zip(question["aveugle"], question["reponses"]),
+                                         key=lambda paire: paire[0]):
             lignes += ["", f"### Reponse {etiquette}", "", reponse["texte"] or f"(erreur : {reponse['erreur']})"]
         lignes.append("")
     chemin.write_text("\n".join(lignes), encoding="utf-8")
@@ -443,10 +470,18 @@ def _profil(valeur: str) -> str:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def _positif(valeur: str) -> int:
+    nombre = int(valeur)
+    if nombre < 0:
+        # `--comparaisons -1` retranchait un appel au budget et en lancait trois.
+        raise argparse.ArgumentTypeError("doit etre positif ou nul")
+    return nombre
+
+
 def _parseur() -> argparse.ArgumentParser:
     parseur = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parseur.add_argument("--questions", type=int, default=20)
-    parseur.add_argument("--comparaisons", type=int, default=4)
+    parseur.add_argument("--questions", type=_positif, default=20)
+    parseur.add_argument("--comparaisons", type=_positif, default=4)
     parseur.add_argument("--graine", type=int, default=7)
     parseur.add_argument("--modeles", nargs="+", default=list(MODELES))
     parseur.add_argument("--consignes", nargs="+", default=["actuelles"],
@@ -455,8 +490,8 @@ def _parseur() -> argparse.ArgumentParser:
                          help="Profils compares, alias acceptes (etudiant, general)")
     parseur.add_argument("--temoin", action="store_true",
                          help="Rejoue le premier profil : plancher de bruit")
-    parseur.add_argument("--budget", type=int, default=48,
-                         help="Nombre maximal d'appels ; au-dela, rien n'est lance")
+    parseur.add_argument("--budget", type=int, default=96,
+                         help="Nombre maximal d'appels, au pire cas ; au-dela, rien n'est lance")
     parseur.add_argument("--questions-libres", nargs="+", default=None,
                          help="Remplace le jeu relu ; avec --dry-run, valide des suggestions")
     parseur.add_argument("--langue", default="fr", choices=["fr", "en"],
@@ -476,10 +511,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     n_questions = len(questions_de(args))
-    prevus = appels_prevus(n_questions, len(variantes_de(args)),
-                           min(args.comparaisons, len(COMPARAISONS)), len(args.modeles))
-    print(f"Appels prevus : {prevus} (budget {args.budget})")
-    if not args.dry_run and prevus > args.budget:
+    taches = (n_questions, len(variantes_de(args)),
+              min(args.comparaisons, len(COMPARAISONS)), len(args.modeles))
+    prevus, au_pire = appels_prevus(*taches), appels_au_pire(*taches)
+    print(f"Appels prevus : {prevus}, au pire {au_pire} (budget {args.budget})")
+    if not args.dry_run and au_pire > args.budget:
         print("Budget depasse : rien n'est lance. Reduire --questions, --personas ou --modeles.")
         return 2
     if not args.dry_run and not settings.MISTRAL_API_KEY:
@@ -487,6 +523,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
     # Chaque reponse doit venir du modele mesure : pas de bascule.
     settings.MISTRAL_MODEL_SECOURS = ""
+    # Le reclassement par le modele ajouterait un appel par question, hors
+    # budget, et en ferait un dans --dry-run, qui promet de n'en faire aucun.
+    settings.RERANK_LLM_ENABLED = False
 
     resultats = asyncio.run(evaluer(args))
     if args.dry_run:
