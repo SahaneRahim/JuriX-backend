@@ -142,30 +142,62 @@ class TestAuthorization:
 
         C'est ce test qui rattrapera le prochain endpoint ajouté sans garde.
         """
-        from fastapi.routing import APIRoute
-
         from app.main import app
 
         prefixes = ("/api/v1/admin/", "/api/v1/ocr/")
-        exempt = {"/api/v1/admin/health"}
+        # Sondes de sante, publiques par conception.
+        exempt = {"/api/v1/admin/health", "/api/v1/ocr/health"}
+        # Hors des prefixes : les questions et les avis des utilisateurs.
+        reservees = {
+            "/api/v1/personas/{persona}/questions",
+            "/api/v1/personas/feedback/{message_id}",
+        }
+        # Une garde d'ADMINISTRATEUR : `get_current_user` laisserait passer
+        # n'importe quel compte, `get_current_user_optional` tout le monde.
+        gardes = {"get_current_admin_user", "get_current_superadmin_user"}
 
-        unguarded = []
+        vues, unguarded = set(), []
         for route in _iter_routes(app):
-            if not isinstance(route, APIRoute):
+            dependant = getattr(route, "dependant", None)
+            path = getattr(route, "path", "")
+            if dependant is None or path in exempt:
                 continue
-            if route.path in exempt or not route.path.startswith(prefixes):
+            if not (path.startswith(prefixes) or path in reservees):
                 continue
-            names = {d.name for d in route.dependant.dependencies}
-            if not any("current" in (n or "") for n in names):
-                unguarded.append(f"{sorted(route.methods)} {route.path}")
+            vues.add(path)
+            if not gardes & _appels(dependant):
+                unguarded.append(f"{sorted(route.methods)} {path}")
 
         assert not unguarded, f"routes sans garde : {unguarded}"
+        # Le filet ne doit plus jamais etre vide : depuis FastAPI 0.141, les
+        # routeurs inclus n'ont plus d'attribut `routes`, et ce test passait
+        # sans avoir verifie une seule route.
+        assert reservees <= vues, f"routes reservees introuvables : {reservees - vues}"
+        assert any(p.startswith("/api/v1/admin/") for p in vues)
 
 
 def _iter_routes(app):
-    """Parcourt les routes, y compris celles imbriquées dans les routeurs inclus."""
+    """
+    Parcourt les routes, y compris celles des routeurs inclus.
+
+    Depuis FastAPI 0.141, `app.routes` contient des `_IncludedRouter` sans
+    attribut `routes` : leurs routes, avec le prefixe et les dependances du
+    routeur, sont dans `effective_candidates()`.
+    """
     stack = list(app.routes)
     while stack:
         route = stack.pop()
         yield route
+        if hasattr(route, "effective_candidates"):
+            stack.extend(route.effective_candidates())
         stack.extend(getattr(route, "routes", []) or [])
+
+
+def _appels(dependant) -> set:
+    """Noms des fonctions de toutes les dependances, sous-dependances comprises."""
+    pile, noms = list(dependant.dependencies), set()
+    while pile:
+        d = pile.pop()
+        noms.add(getattr(d.call, "__name__", ""))
+        pile.extend(d.dependencies)
+    return noms
