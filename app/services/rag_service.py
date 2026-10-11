@@ -1007,10 +1007,9 @@ class RAGService:
                 # quitter. Le controle d'appartenance passe AVANT : la
                 # conversation d'autrui reste refusee, quel que soit le profil.
                 if conversation.persona != persona:
-                    logger.info(
-                        "🔀 Conversation %s en profil %s, demandee en %s : nouvelle conversation",
-                        session_id, conversation.persona, persona,
-                    )
+                    # Sans les profils : la ligne voisine relie la conversation
+                    # au compte, et un profil est une donnee personnelle.
+                    logger.info("🔀 Conversation %s : profil change, nouvelle conversation", session_id)
                     session_id = None
                 else:
                     # ADOPTION : une conversation anonyme reprise par un compte
