@@ -424,6 +424,17 @@ bougé depuis la génération font **échouer** la mesure plutôt que produire d
 chiffres faux. Avec 60 questions, l'erreur type est d'environ 6 points : un
 écart de 2 points entre deux configurations n'est pas un résultat.
 
+Le chat lui-même (modèle, prompt, profil) se mesure avec `comparer_mistral`.
+Son protocole et sa règle de décision sont écrits dans sa docstring, avant
+toute mesure. `--budget` refuse de lancer plus d'appels que prévu.
+
+```bash
+python -m scripts.eval.comparer_mistral --modeles ministral-14b-2512 --questions 8 \
+    --personas citoyen avocat entrepreneur etudiant --temoin --comparaisons 0 --label personas
+# Une suggestion du chat a-t-elle une réponse dans le corpus ? Aucun appel au modèle :
+python -m scripts.eval.comparer_mistral --dry-run --questions-libres "Quel est le rôle du Conseil constitutionnel ?"
+```
+
 ## Tests
 
 La suite tourne sur un **vrai PostgreSQL** — le cœur du produit est du SQL
