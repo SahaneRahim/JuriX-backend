@@ -186,9 +186,11 @@ def citations(texte: str, numeros_du_contexte: set) -> Dict[str, Any]:
 
 
 # Les citations que le chat sait relire : ce sont elles qui deviennent les
-# sources affichees sous la reponse. « art. 33 » ou « l'article 33 alinéa 2 du
-# Code Minier » sont vus par numeros_cites, mais pas relus par le chat.
-_CITATION_CHAT = re.compile(RAGService.CITATION_REGEX)
+# sources affichees sous la reponse. Meme drapeau que _extract_citations
+# (IGNORECASE) : sans lui, « l'article 3 du décret n°2015/405 » comptait pour
+# illisible alors que le chat le relit. « Code Minier, art. 33 » (le texte
+# avant le numero) reste illisible.
+_CITATION_CHAT = re.compile(RAGService.CITATION_REGEX, re.IGNORECASE)
 _RENVOI_AVOCAT = re.compile(
     r"consult(?:ez|er|e)\s+(?:un|une|votre)\s+(?:avocat|juriste|professionnel du droit)"
     r"|faire appel à un avocat|consult(?:ing)?\s+a\s+lawyer",

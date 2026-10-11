@@ -914,6 +914,28 @@ class TestCitationsMultilingues:
 
         assert citations == []
 
+    @pytest.mark.parametrize("reponse", [
+        "Les dirigeants sont responsables (art. 161 du Code OHADA).",
+        "Selon l'article 161, alinéa 2, du Code OHADA, les dirigeants repondent.",
+        "Selon l'article 161 alinéa 2 du Code OHADA, les dirigeants repondent.",
+        "Directors are liable (Art. 161 of the OHADA Code).",
+    ])
+    def test_abreviation_et_alinea_reconnus(self, rag_service, mock_search_results, reponse):
+        """
+        Mesure du 2026-10-11 : « (art. 15 du Décret…) » et « l'article 5,
+        alinéa 1, du Décret… » faisaient l'essentiel des citations illisibles
+        de l'avocat. Illisibles, elles ne devenaient pas des sources.
+        """
+        mock_search_results[0].law_title = "Code OHADA"
+
+        citations = rag_service._extract_citations(reponse, mock_search_results)
+
+        assert [c.article_id for c in citations] == [161]
+
+    def test_un_mot_en_art_n_est_pas_une_citation(self, rag_service, mock_search_results):
+        """\\b devant « art. » : « départ. 161 » ne cite rien."""
+        assert rag_service._extract_citations("Le départ. 161 du train.", mock_search_results) == []
+
 
 class TestFluxAligneSurAsk:
     """

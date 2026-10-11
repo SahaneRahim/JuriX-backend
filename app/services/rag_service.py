@@ -233,8 +233,16 @@ class RAGService:
     # en francais juridique, n'etait JAMAIS reconnue — les reponses du chatbot
     # sortaient donc sans aucune source.
     CITATION_REGEX = (
-        r"[Aa]rticle\s+"
+        # « art. » : les prompts l'interdisent, le modele l'ecrit quand meme,
+        # surtout entre parentheses (« (art. 15 du Décret N°2019/143) ») —
+        # mesure du 2026-10-11, un tiers des citations illisibles de l'avocat.
+        # Illisibles, elles ne devenaient pas des sources. \b : « départ. 12 »
+        # n'est pas une citation.
+        r"\b[Aa]rt(?:icle|\.)\s*"
         r"([LRD]\s*)?(\d+(?:[-.]\d+)*(?:\s*(?:er|bis|ter|quater|septies))?)"
+        # Un alinea glisse entre le numero et le texte : « l'article 5, alinéa 1,
+        # du Décret N°2021/743 ». Lu puis ignore : la source est l'article.
+        r"(?:,?\s+(?:alin[ée]a|al\.|paragraph)\s*\d+,?)?"
         # `of the` / `of` : sans eux, AUCUNE reponse anglaise n'a jamais produit
         # une seule citation extraite. « According to Article 161 of the OHADA
         # Code » echouait sur la contrainte de majuscule du groupe suivant, qui
