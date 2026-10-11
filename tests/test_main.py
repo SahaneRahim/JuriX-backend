@@ -136,3 +136,33 @@ async def test_le_demarrage_precharge_le_modele_d_embeddings(monkeypatch):
 
     async with main.lifespan(app):
         assert appels == ["prechargement"]
+
+
+def test_les_journaux_de_l_application_sortent_en_info():
+    """
+    Sans gestionnaire, les logger.info de l'application etaient perdus : le
+    journal de chaque appel Mistral/Groq n'apparaissait nulle part.
+    """
+    import logging
+
+    import app.services.mistral_service as mistral
+
+    assert mistral.logger.getEffectiveLevel() == logging.INFO
+    assert logging.getLogger("app").handlers
+
+
+def test_le_jeton_d_un_websocket_est_masque_dans_le_journal_d_uvicorn():
+    """uvicorn journalise l'URL entiere du WebSocket, jeton d'administration compris."""
+    import logging
+
+    from app.main import _MasqueJetonDansURL
+
+    enregistrement = logging.LogRecord(
+        "uvicorn.error", logging.INFO, __file__, 1, '%s - "WebSocket %s" [accepted]',
+        ("1.2.3.4:5", "/api/v1/batch-upload/ws/abc?token=eyJ.secret.sig&x=1"), None,
+    )
+
+    assert _MasqueJetonDansURL().filter(enregistrement)
+    message = enregistrement.getMessage()
+    assert "secret" not in message
+    assert "token=***&x=1" in message

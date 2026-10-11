@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
@@ -29,6 +30,40 @@ from app.core.database import close_db
 from app.services.search_service import precharger_les_embeddings
 
 logger = logging.getLogger(__name__)
+
+# Les journaux de l'application partaient au niveau INFO vers des loggers sans
+# gestionnaire : uvicorn ne configure que les siens, et Python ne laisse passer
+# que WARNING par defaut. Le journal d'un appel Mistral ou Groq (raison de fin,
+# jetons, duree) n'apparaissait donc nulle part, ni en developpement ni dans
+# `docker compose logs api`. propagate reste vrai : la capture de pytest
+# continue de les voir.
+_journal_app = logging.getLogger("app")
+if not _journal_app.handlers:
+    _sortie = logging.StreamHandler()
+    _sortie.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    _journal_app.addHandler(_sortie)
+    _journal_app.setLevel(logging.INFO)
+
+
+class _MasqueJetonDansURL(logging.Filter):
+    """
+    uvicorn journalise chaque WebSocket avec son URL entiere
+    (« "WebSocket /api/v1/batch-upload/ws/...?token=..." [accepted] »), par son
+    journal d'erreurs que --no-access-log ne coupe pas. Le jeton
+    d'administration finissait en clair dans `docker compose logs api`.
+    """
+
+    _JETON = re.compile(r"(token=)[^&\s\"]+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                self._JETON.sub(r"\1***", a) if isinstance(a, str) else a for a in record.args
+            )
+        return True
+
+
+logging.getLogger("uvicorn.error").addFilter(_MasqueJetonDansURL())
 
 # Valeur de repli declaree dans config.py. Si elle survit hors developpement,
 # les JWT seraient signes avec une clé publiée dans le dépôt.
