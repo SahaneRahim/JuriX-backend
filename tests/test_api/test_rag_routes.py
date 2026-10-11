@@ -140,6 +140,30 @@ class TestAskEndpoint:
 
         assert response.status_code == 422  # Validation error
 
+    @pytest.mark.parametrize("corps, attendu", [
+        ({}, "general"),
+        ({"persona": None}, "general"),
+        ({"persona": ""}, "general"),
+        ({"persona": "Etudiant"}, "étudiant"),
+        ({"persona": "avocat"}, "avocat"),
+    ])
+    @patch('app.api.routes.rag.RAGService')
+    def test_le_profil_recu_par_le_service(
+        self, mock_rag_service_class, sync_client, mock_rag_response, corps, attendu
+    ):
+        """Absent, null ou vide : le profil general, et non plus « citoyen »."""
+        mock_service = AsyncMock()
+        mock_service.ask = AsyncMock(return_value=mock_rag_response)
+        mock_rag_service_class.return_value = mock_service
+
+        response = sync_client.post(
+            "/api/v1/rag/ask",
+            json={"question": "Quelle est la responsabilité des dirigeants?", "language": "fr", **corps},
+        )
+
+        assert response.status_code == 200
+        assert mock_service.ask.await_args.args[0].persona == attendu
+
     def test_ask_invalid_language(self, sync_client):
         """Test ask with invalid language."""
         response = sync_client.post(

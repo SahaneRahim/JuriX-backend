@@ -9,6 +9,8 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.core.personas import PROFIL_GENERAL, normaliser_profil
+
 
 class RAGRequest(BaseModel):
     """Request schema for RAG ask endpoint."""
@@ -20,9 +22,13 @@ class RAGRequest(BaseModel):
         description="User question",
         examples=["Quelle est la responsabilité des dirigeants de société?"]
     )
+    # Absent, null ou vide : le profil general, celui d'un utilisateur qui n'a
+    # pas dit qui il est. Il valait « citoyen », si bien qu'un refus de
+    # repondre et un citoyen etaient indiscernables, dans la reponse comme dans
+    # les statistiques.
     persona: str = Field(
-        "citoyen",
-        description="User persona (citoyen/avocat/entrepreneur/étudiant)"
+        PROFIL_GENERAL,
+        description="Profil : citoyen, avocat, entrepreneur, étudiant, ou general (absent)",
     )
     language: str = Field(
         "fr",
@@ -48,13 +54,14 @@ class RAGRequest(BaseModel):
         description="Number of results to retrieve"
     )
 
-    @field_validator("persona")
+    @field_validator("persona", mode="before")
     @classmethod
-    def validate_persona(cls, v: str) -> str:
-        allowed = {"citoyen", "avocat", "entrepreneur", "étudiant"}
-        if v not in allowed:
-            raise ValueError(f"Persona must be one of: {', '.join(allowed)}")
-        return v
+    def validate_persona(cls, v: object) -> str:
+        """
+        Forme canonique : « Etudiant » et la forme NFD donnent « étudiant »,
+        null et '' donnent le profil general. Une valeur inconnue : 422.
+        """
+        return normaliser_profil(v)
 
     @field_validator("language")
     @classmethod
@@ -114,7 +121,7 @@ class RAGResponse(BaseModel):
     retrieval_time_ms: int = Field(..., description="Time for document retrieval")
     generation_time_ms: int = Field(..., description="Time for answer generation")
     total_time_ms: int = Field(..., description="Total processing time")
-    persona: str = Field(..., description="Persona used for response")
+    persona: str = Field(..., description="Profil effectif de la reponse, general compris")
     # Defaut OBLIGATOIRE, pas une commodite : `RAGResponse` est construite sans
     # ce champ a plusieurs endroits (sortie anticipee « article absent »,
     # `_handle_no_results`, doublures de tests). Un champ requis les casserait.
@@ -164,6 +171,13 @@ class RAGStreamChunk(BaseModel):
     session_id: Optional[str] = Field(
         None,
         description="Session ID (only in final chunk)"
+    )
+    # Le profil effectif de la conversation. Il peut differer de celui demande
+    # sur une conversation existante : un changement de profil en ouvre une
+    # nouvelle, avec un autre session_id.
+    persona: Optional[str] = Field(
+        None,
+        description="Profil de la conversation (only in final chunk)"
     )
     intent: Optional[str] = Field(
         None,

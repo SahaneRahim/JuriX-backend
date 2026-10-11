@@ -691,7 +691,8 @@ class TestRoutageIntention:
         await rag_service.ask(sample_rag_request)
 
         systeme = rag_service.llm.generate.await_args.kwargs["system"]
-        assert systeme == get_conversational_prompt("smalltalk", "fr")
+        # La requete est en citoyen : le prompt porte sa ligne d'audience.
+        assert systeme == get_conversational_prompt("smalltalk", "fr", "citoyen")
         assert systeme != get_system_prompt("citoyen", "fr")
 
     @pytest.mark.asyncio
@@ -1095,3 +1096,118 @@ class TestFluxAligneSurAsk:
 
         assert evenements[-1]["done"] is True
         assert evenements[-1]["error_code"] == "quota"
+
+
+# ==================== UN PROFIL PAR CONVERSATION ====================
+
+class TestUnProfilParConversation:
+    """
+    Le profil choisi pilote la reponse, et une conversation garde le sien :
+    un autre profil en ouvre une nouvelle, l'ancienne n'est pas touchee.
+    """
+
+    @staticmethod
+    def _existante(mock_db_session, persona="citoyen", user_id=None):
+        existante = Conversation(
+            id=7, session_id="sid-ancienne", persona=persona, language="fr", user_id=user_id
+        )
+        trouvee = MagicMock()
+        trouvee.unique.return_value.scalar_one_or_none.return_value = existante
+        messages = MagicMock()
+        messages.scalars.return_value.all.return_value = []
+        mock_db_session.execute.side_effect = [trouvee, messages]
+        return existante
+
+    @pytest.mark.asyncio
+    async def test_meme_profil_la_conversation_continue(self, rag_service, mock_db_session):
+        existante = self._existante(mock_db_session, "citoyen")
+
+        conversation, _ = await rag_service._load_or_create_conversation("sid-ancienne", "citoyen", "fr")
+
+        assert conversation is existante
+        mock_db_session.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_autre_profil_ouvre_une_nouvelle_conversation(self, rag_service, mock_db_session):
+        rag_service.user_id = 5
+        existante = self._existante(mock_db_session, "citoyen")
+
+        conversation, historique = await rag_service._load_or_create_conversation(
+            "sid-ancienne", "avocat", "fr"
+        )
+
+        assert conversation is not existante
+        assert conversation.persona == "avocat"
+        assert conversation.session_id != "sid-ancienne"
+        assert historique == []
+        # L'ancienne n'est ni modifiee ni adoptee par le compte.
+        assert existante.persona == "citoyen"
+        assert existante.user_id is None
+        mock_db_session.add.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_la_conversation_d_autrui_reste_refusee(self, rag_service, mock_db_session):
+        """L'appartenance passe AVANT le changement de profil : 404, pas de conversation neuve."""
+        from app.services.rag_service import ConversationInterdite
+
+        rag_service.user_id = 1
+        self._existante(mock_db_session, "citoyen", user_id=2)
+
+        with pytest.raises(ConversationInterdite):
+            await rag_service._load_or_create_conversation("sid-ancienne", "avocat", "fr")
+        mock_db_session.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_le_profil_atteint_le_prompt_et_le_dernier_evenement(
+        self, rag_service, sample_rag_request, mock_search_results, mock_db_session
+    ):
+        TestFluxAligneSurAsk._preparer(rag_service, mock_db_session, mock_search_results, ["Réponse."])
+        requete = sample_rag_request.model_copy(update={"persona": "avocat"})
+
+        evenements = await TestFluxAligneSurAsk._evenements(rag_service, requete)
+
+        systeme = rag_service.llm.generate_stream.call_args.kwargs["system"]
+        assert systeme == get_system_prompt("avocat", "fr")
+        assert evenements[-1]["persona"] == "avocat"
+        # Le profil n'est porte que par l'evenement final.
+        assert all("persona" not in e for e in evenements[:-1])
+
+    @pytest.mark.asyncio
+    async def test_sans_profil_le_profil_general(
+        self, rag_service, mock_search_results, mock_db_session
+    ):
+        TestFluxAligneSurAsk._preparer(rag_service, mock_db_session, mock_search_results, ["Réponse."])
+        requete = RAGRequest(question="Quelle est la responsabilité des dirigeants ?", language="fr")
+
+        evenements = await TestFluxAligneSurAsk._evenements(rag_service, requete)
+
+        assert requete.persona == "general"
+        assert rag_service.llm.generate_stream.call_args.kwargs["system"] == get_system_prompt(
+            "general", "fr"
+        )
+        assert evenements[-1]["persona"] == "general"
+
+    @pytest.mark.asyncio
+    async def test_sans_resultat_une_seule_conversation_et_le_conseil_du_profil(
+        self, rag_service, mock_db_session
+    ):
+        """
+        `_handle_no_results` rechargeait la conversation : sans session_id, il
+        en creait une deuxieme, vide. Et il conseillait a un avocat de
+        consulter un avocat.
+        """
+        rag_service.search_service.search.return_value = MagicMock(
+            results=[], chunks=[], search_time_ms=1
+        )
+        rag_service._fallback_search = AsyncMock(return_value=[])
+        mock_db_session.execute.return_value = MagicMock(
+            scalar_one_or_none=MagicMock(return_value=None)
+        )
+        requete = RAGRequest(question="Une question sans réponse ici ?", persona="avocat", language="fr")
+
+        reponse = await rag_service.ask(requete)
+
+        ajoutees = [c.args[0] for c in mock_db_session.add.call_args_list]
+        assert sum(isinstance(objet, Conversation) for objet in ajoutees) == 1
+        assert "Consultez un avocat" not in reponse.answer
+        assert reponse.persona == "avocat"

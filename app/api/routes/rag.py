@@ -229,8 +229,13 @@ async def ask_stream(request: RAGRequest, rag_service: RAGService = Depends(get_
     Each event is JSON:
     ```json
     {"chunk": "text fragment", "done": false}
-    {"chunk": "", "done": true, "sources": [...], "confidence": 0.85}
+    {"chunk": "", "done": true, "sources": [...], "confidence": 0.85,
+     "session_id": "...", "persona": "avocat"}
     ```
+
+    `persona` (dernier evenement) est le profil effectif de la conversation.
+    Un profil different de celui d'une conversation existante en ouvre une
+    nouvelle : `session_id` change alors.
 
     **Example Usage (JavaScript):**
     ```javascript

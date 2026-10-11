@@ -19,9 +19,9 @@ est 'étudiant' en NFC (U+00E9), celle que fige la contrainte de la migration
 import unicodedata
 from typing import Dict, Tuple
 
-# Les profils proposes a l'utilisateur, dans l'ordre d'affichage. L'accent est
-# ecrit en echappement : la forme NFC ne depend ainsi d'aucun editeur.
-PERSONAS: Tuple[str, ...] = ("citoyen", "avocat", "entrepreneur", "étudiant")
+# Les profils proposes a l'utilisateur. L'accent est ecrit en echappement : la
+# forme NFC ne depend ainsi d'aucun editeur ni d'aucun copier-coller.
+PERSONAS: Tuple[str, ...] = ("citoyen", "avocat", "entrepreneur", "\u00e9tudiant")
 
 # La valeur enregistree quand l'utilisateur n'a pas repondu (« Ne pas
 # repondre »). Sans accent, expres : pas de piege NFC/NFD. Ce n'est pas un

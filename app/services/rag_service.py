@@ -47,11 +47,11 @@ from app.services.llm import (  # noqa: F401 - mentions reexportees pour les tes
 from app.services.postgres_search_service import escape_like
 from app.services.prompts import (
     CONTEXT_TEMPLATE,
-    NO_RESULTS_MESSAGE,
     build_context_string,
     format_conversation_history,
     get_conversational_prompt,
     get_system_prompt,
+    message_sans_resultat,
 )
 from app.services.reranker import rerank_with_llm
 from app.services.search_service import SearchService
@@ -358,7 +358,7 @@ class RAGService:
                 search_results = await self._fallback_search(request.question, history)
             if not search_results:
                 logger.warning("⚠️ No results found")
-                return await self._handle_no_results(request, retrieval_time_ms)
+                return await self._handle_no_results(request, conversation, retrieval_time_ms)
 
             # 4. Generate answer, extract citations, save
             return await self._generate_and_save_response(
@@ -520,7 +520,9 @@ class RAGService:
         if self.llm is None:
             raise RAGServiceError(MESSAGE_LLM_ABSENT)
 
-        system_prompt = get_conversational_prompt(intention.intent, request.language)
+        system_prompt = get_conversational_prompt(
+            intention.intent, request.language, request.persona
+        )
         prompt = (
             format_conversation_history(history)
             + "\n\nMessage de l'utilisateur :\n"
@@ -596,11 +598,9 @@ class RAGService:
                 request.language
             )
 
-            # Meme aiguillage que `ask`. Le front n'emprunte pas ce chemin
-            # aujourd'hui, mais `POST /rag/ask/stream` est une route publique et
-            # documentee : l'y laisser non route, c'est y laisser le bug intact
-            # derriere une URL que le schema OpenAPI expose. Ce depot a deja paye
-            # une divergence entre les deux portes d'entree du meme service.
+            # Meme aiguillage que `ask`. C'est le chemin du front (le chat
+            # lit la reponse en flux) : une divergence entre les deux portes
+            # d'entree du meme service, ce depot l'a deja payee.
             if request.law_id:
                 intention = IntentResult(INTENT_JURIDIQUE, 1.0, "court-circuit-law-id")
             else:
@@ -620,6 +620,7 @@ class RAGService:
                     chunk=reponse.answer, done=True, sources=[],
                     confidence=reponse.confidence,
                     session_id=reponse.session_id,
+                    persona=conversation.persona,
                     intent=reponse.intent,
                 ).model_dump_json(exclude_none=True)
                 return
@@ -638,6 +639,7 @@ class RAGService:
                     chunk=early_response.answer, done=True, sources=[],
                     confidence=early_response.confidence,
                     session_id=early_response.session_id,
+                    persona=conversation.persona,
                     intent=INTENT_JURIDIQUE,
                 ).model_dump_json(exclude_none=True)
                 return
@@ -648,16 +650,18 @@ class RAGService:
             if not search_results:
                 # Enregistre, comme `_handle_no_results` le fait sur `ask` : ce
                 # tour disparaissait de l'historique.
+                sans_resultat = message_sans_resultat(request.language, request.persona)
                 await self._save_interaction(
                     conversation=conversation, question=request.question,
-                    answer=NO_RESULTS_MESSAGE[request.language], citations=[],
+                    answer=sans_resultat, citations=[],
                     confidence=0.0, retrieval_time_ms=retrieval_time_ms,
                     generation_time_ms=0,
                 )
                 yield RAGStreamChunk(
-                    chunk=NO_RESULTS_MESSAGE[request.language],
+                    chunk=sans_resultat,
                     done=True, sources=[], confidence=0.0,
                     session_id=conversation.session_id,
+                    persona=conversation.persona,
                     intent=INTENT_JURIDIQUE,
                 ).model_dump_json(exclude_none=True)
                 return
@@ -729,6 +733,7 @@ class RAGService:
             yield RAGStreamChunk(
                 chunk="", done=True, sources=citations,
                 confidence=confidence, session_id=conversation.session_id,
+                persona=conversation.persona,
                 intent=INTENT_JURIDIQUE,
             ).model_dump_json(exclude_none=True)
 
@@ -986,29 +991,44 @@ class RAGService:
                     )
                     raise ConversationInterdite(session_id)
 
-                # ADOPTION : une conversation anonyme reprise par un compte lui
-                # est rattachee. C'est ce qui permet de discuter sans compte,
-                # puis de s'inscrire en gardant le fil.
-                if conversation.user_id is None and self.user_id is not None:
-                    conversation.user_id = self.user_id
+                # UN PROFIL PAR CONVERSATION. Un autre profil que celui de la
+                # conversation en ouvre une NOUVELLE (nouveau session_id,
+                # historique vide), et l'ancienne n'est pas touchee. Ni 409 : le
+                # front ne garde que le session_id, et un profil change entre
+                # deux visites ferait echouer la premiere question. Ni ignorer :
+                # on repondrait avec un profil que l'utilisateur vient de
+                # quitter. Le controle d'appartenance passe AVANT : la
+                # conversation d'autrui reste refusee, quel que soit le profil.
+                if conversation.persona != persona:
                     logger.info(
-                        "🔗 Conversation %s rattachee au compte %s",
-                        session_id,
-                        self.user_id,
+                        "🔀 Conversation %s en profil %s, demandee en %s : nouvelle conversation",
+                        session_id, conversation.persona, persona,
                     )
+                    session_id = None
+                else:
+                    # ADOPTION : une conversation anonyme reprise par un compte
+                    # lui est rattachee. C'est ce qui permet de discuter sans
+                    # compte, puis de s'inscrire en gardant le fil.
+                    if conversation.user_id is None and self.user_id is not None:
+                        conversation.user_id = self.user_id
+                        logger.info(
+                            "🔗 Conversation %s rattachee au compte %s",
+                            session_id,
+                            self.user_id,
+                        )
 
-                # Get last N messages
-                msg_stmt = (
-                    select(Message)
-                    .where(Message.conversation_id == conversation.id)
-                    .order_by(desc(Message.created_at))
-                    .limit(self.MAX_HISTORY_MESSAGES)
-                )
-                msg_result = await self.db.execute(msg_stmt)
-                messages = list(msg_result.scalars().all())
+                    # Get last N messages
+                    msg_stmt = (
+                        select(Message)
+                        .where(Message.conversation_id == conversation.id)
+                        .order_by(desc(Message.created_at))
+                        .limit(self.MAX_HISTORY_MESSAGES)
+                    )
+                    msg_result = await self.db.execute(msg_stmt)
+                    messages = list(msg_result.scalars().all())
 
-                logger.info(f"📖 Loaded conversation: {len(messages)} messages")
-                return conversation, list(reversed(messages))
+                    logger.info(f"📖 Loaded conversation: {len(messages)} messages")
+                    return conversation, list(reversed(messages))
 
         # Create new conversation
         conversation = Conversation(
@@ -1533,16 +1553,17 @@ class RAGService:
     async def _handle_no_results(
         self,
         request: RAGRequest,
+        conversation: Conversation,
         retrieval_time_ms: int
     ) -> RAGResponse:
-        """Handle case when no documents found."""
-        conversation, _ = await self._load_or_create_conversation(
-            request.session_id,
-            request.persona,
-            request.language
-        )
+        """
+        Handle case when no documents found.
 
-        no_results_answer = NO_RESULTS_MESSAGE[request.language]
+        Recoit la conversation deja chargee par `ask`. Elle la rechargeait :
+        sans session_id, ce second appel creait une DEUXIEME conversation, et
+        laissait la premiere vide.
+        """
+        no_results_answer = message_sans_resultat(request.language, request.persona)
 
         await self._save_interaction(
             conversation,

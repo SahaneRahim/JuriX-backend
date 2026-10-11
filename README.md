@@ -251,6 +251,26 @@ Le chat reste utilisable **sans compte**. Une conversation anonyme reprise par
 un compte connecté lui est rattachée : on peut discuter, puis s'inscrire en
 gardant le fil.
 
+### Profils (personas)
+
+La liste unique est dans `app/core/personas.py` : `citoyen`, `avocat`,
+`entrepreneur`, `étudiant`, plus `general` pour qui n'a pas dit qui il est.
+
+- `persona` absent, `null` ou vide vaut `general`. Avant, il valait `citoyen`,
+  et un refus de répondre ne se distinguait pas d'un citoyen. La casse et les
+  accents sont tolérés (`etudiant` désigne l'étudiant).
+- Le profil choisit le prompt de la réponse juridique, le registre des
+  réponses conversationnelles (salutations, questions sur JuriX, hors-sujet)
+  et les conseils du message « aucun résultat ».
+- **Une conversation garde un seul profil.** Un `session_id` existant envoyé
+  avec un autre profil ouvre une nouvelle conversation (nouveau `session_id`,
+  historique vide) ; l'ancienne n'est pas touchée. Le contrôle d'appartenance
+  passe avant.
+- Le dernier événement du flux (`/rag/ask/stream`) porte `persona`, le profil
+  effectif de la conversation.
+- Le serveur ne remplace jamais un profil absent par celui du compte : un
+  « Ne pas répondre » vaut pour la visite.
+
 ## Chaîne d'ingestion
 
 ```
