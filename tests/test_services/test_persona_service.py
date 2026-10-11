@@ -562,3 +562,81 @@ class TestHealthCheck:
         assert len(health["personas"]) == 4
         assert "citoyen" in health["personas"]
         assert "timestamp" in health
+
+
+class TestCompteursExacts:
+    """
+    Les compteurs par conversation, tels qu'un vrai tour de chat les ecrit.
+
+    Ils retardaient d'un echange sur toute conversation reprise : la
+    collection de messages, deja chargee par _load_or_create_conversation,
+    etait relue perimee (expire_on_commit=False).
+    """
+
+    @pytest.mark.asyncio
+    async def test_une_conversation_reprise_compte_tous_ses_echanges(self, db_session: AsyncSession):
+        from sqlalchemy import select
+
+        from app.services.rag_service import RAGService
+
+        conv = Conversation(session_id="compteurs-reprise", persona="citoyen", language="fr")
+        db_session.add(conv)
+        await db_session.flush()
+        db_session.add_all([
+            Message(conversation_id=conv.id, role="user", content="Q1"),
+            Message(conversation_id=conv.id, role="assistant", content="R1", confidence=0.8),
+        ])
+        await db_session.commit()
+
+        rag = RAGService(db_session)
+        reprise, _ = await rag._load_or_create_conversation("compteurs-reprise", "citoyen", "fr")
+        await rag._save_interaction(
+            conversation=reprise, question="Q2", answer="R2", citations=[],
+            confidence=0.6, retrieval_time_ms=10, generation_time_ms=20,
+        )
+
+        interaction = (await db_session.execute(
+            select(PersonaInteraction).where(PersonaInteraction.conversation_id == conv.id)
+        )).scalar_one()
+        assert interaction.question_count == 2
+        assert interaction.answer_count == 2
+        assert interaction.avg_confidence == pytest.approx(0.7)
+
+    @pytest.mark.asyncio
+    async def test_la_liste_des_profils_est_bien_ecrite(self, db_session: AsyncSession):
+        """Modifiee en place, la liste JSON n'etait jamais ecrite en base."""
+        from sqlalchemy import select
+
+        conv = Conversation(session_id="compteurs-profils", persona="citoyen", language="fr")
+        db_session.add(conv)
+        await db_session.flush()
+        db_session.add(Message(conversation_id=conv.id, role="user", content="Q"))
+        await db_session.commit()
+        service = PersonaService(db_session)
+        # Lu AVANT expire_all : apres, y acceder relance un chargement paresseux
+        # synchrone, donc un MissingGreenlet.
+        conv_id = conv.id
+
+        await service.update_interaction_metrics(conv_id, "citoyen", "fr")
+        await service.update_interaction_metrics(conv_id, "avocat", "fr")
+        db_session.expire_all()
+
+        interaction = (await db_session.execute(
+            select(PersonaInteraction).where(PersonaInteraction.conversation_id == conv_id)
+        )).scalar_one()
+        assert interaction.personas_used == ["citoyen", "avocat"]
+        assert interaction.persona_switches == 1
+
+    @pytest.mark.asyncio
+    async def test_la_repartition_compte_le_profil_general(self, db_session: AsyncSession):
+        db_session.add_all([
+            Conversation(session_id="rep-citoyen", persona="citoyen", language="fr"),
+            Conversation(session_id="rep-general", persona="general", language="fr"),
+        ])
+        await db_session.commit()
+
+        repartition = await PersonaService(db_session).get_persona_usage_breakdown()
+
+        assert repartition["citoyen"] == 50.0
+        assert repartition["general"] == 50.0
+        assert sum(repartition.values()) == pytest.approx(100.0)

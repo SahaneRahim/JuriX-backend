@@ -194,8 +194,10 @@ class TestGetUsageBreakdownAPI:
         assert response.status_code == 200
         data = response.json()
         assert "percentages" in data
-        assert len(data["percentages"]) == 4
+        # Les 4 profils et « general », la part de ceux qui n'ont pas repondu.
+        assert len(data["percentages"]) == 5
         assert "citoyen" in data["percentages"]
+        assert "general" in data["percentages"]
         assert all(isinstance(v, float) for v in data["percentages"].values())
 
 

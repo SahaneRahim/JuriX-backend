@@ -21,7 +21,7 @@ from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.personas import PERSONAS
+from app.core.personas import PERSONAS, PROFILS
 from app.models.conversation import (
     Conversation,
     Message,
@@ -340,13 +340,16 @@ class PersonaService:
         result = await self.db.execute(stmt)
         counts = dict(result.all())
 
+        # PROFILS, et non les 4 personas : la part de « general » est celle des
+        # visiteurs qui n'ont pas dit qui ils sont. Sans elle, les pourcentages
+        # ne totalisaient pas 100.
         total = sum(counts.values())
         if total == 0:
             logger.debug("📊 No usage data found")
-            return {p: 0.0 for p in self.VALID_PERSONAS}
+            return {p: 0.0 for p in PROFILS}
 
         breakdown = {}
-        for persona in self.VALID_PERSONAS:
+        for persona in PROFILS:
             count = counts.get(persona, 0)
             percentage = (count / total) * 100
             breakdown[persona] = round(percentage, 2)
@@ -554,44 +557,50 @@ class PersonaService:
         assert isinstance(conversation_id, int) and conversation_id > 0, "Conversation ID must be a positive integer"
         assert isinstance(persona, str) and len(persona) > 0, "Persona must be a non-empty string"
 
-        # Check if interaction record exists
+        # L'existence de la conversation d'abord, avec retour anticipe.
+        existe = (await self.db.execute(
+            select(Conversation.id).where(Conversation.id == conversation_id)
+        )).scalar_one_or_none()
+        if existe is None:
+            logger.warning(f"❌ Conversation {conversation_id} not found")
+            return
+
         stmt = select(PersonaInteraction).where(
             PersonaInteraction.conversation_id == conversation_id
         )
         result = await self.db.execute(stmt)
         interaction = result.scalar_one_or_none()
 
-        # Get conversation with messages
-        conv_stmt = select(Conversation).where(
-            Conversation.id == conversation_id
-        ).options(selectinload(Conversation.messages))
-        conv_result = await self.db.execute(conv_stmt)
-        conversation = conv_result.scalar_one_or_none()
+        # Compteurs CALCULES EN SQL. Ils l'etaient sur Conversation.messages,
+        # charge par selectinload : la session ne perime rien au commit
+        # (expire_on_commit=False), et _load_or_create_conversation avait deja
+        # charge cette collection AVANT l'ajout des messages du tour. Chaque
+        # conversation reprise comptait donc un echange de retard (conversation
+        # 1 de jurix_dev : 3 questions reelles, 2 comptees). En SQL, rien de
+        # perime, et le contenu des messages n'est plus charge.
+        assistant = Message.role == "assistant"
+        question_count, answer_count, confiance, total_response_time = (await self.db.execute(
+            select(
+                func.count().filter(Message.role == "user"),
+                func.count().filter(assistant),
+                func.avg(Message.confidence).filter(assistant),
+                func.coalesce(
+                    func.sum(
+                        func.coalesce(Message.retrieval_time_ms, 0)
+                        + func.coalesce(Message.generation_time_ms, 0)
+                    ).filter(assistant),
+                    0,
+                ),
+            ).where(Message.conversation_id == conversation_id)
+        )).one()
+        avg_confidence = float(confiance) if confiance is not None else 0.0
+        total_response_time = int(total_response_time)
 
-        if not conversation:
-            logger.warning(f"❌ Conversation {conversation_id} not found")
-            return
-
-        # Calculate metrics
-        user_messages = [m for m in conversation.messages if m.role == 'user']
-        assistant_messages = [m for m in conversation.messages if m.role == 'assistant']
-
-        question_count = len(user_messages)
-        answer_count = len(assistant_messages)
-
-        confidences = [m.confidence for m in assistant_messages if m.confidence is not None]
-        avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
-
-        response_times = [
-            (m.retrieval_time_ms or 0) + (m.generation_time_ms or 0)
-            for m in assistant_messages
-        ]
-        total_response_time = sum(response_times)
-
-        # Track persona switches
-        personas_used = [persona] if not interaction else interaction.personas_used or [persona]
+        # Une liste NEUVE : modifiee en place, une colonne JSON simple ne voit
+        # pas le changement, et l'ajout n'etait jamais ecrit.
+        personas_used = list(interaction.personas_used or []) if interaction else []
         if persona not in personas_used:
-            personas_used.append(persona)
+            personas_used = personas_used + [persona]
         persona_switches = len(personas_used) - 1
 
         if interaction:
