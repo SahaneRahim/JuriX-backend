@@ -240,9 +240,12 @@ class RAGService:
         # n'est pas une citation.
         r"\b[Aa]rt(?:icle|\.)\s*"
         r"([LRD]\s*)?(\d+(?:[-.]\d+)*(?:\s*(?:er|bis|ter|quater|septies))?)"
+        # Paragraphe a l'anglaise, colle au numero : « Article 33(2) of… ».
+        r"(?:\(\d+\))?"
         # Un alinea glisse entre le numero et le texte : « l'article 5, alinéa 1,
-        # du Décret N°2021/743 ». Lu puis ignore : la source est l'article.
-        r"(?:,?\s+(?:alin[ée]a|al\.|paragraph)\s*\d+,?)?"
+        # du Décret N°2021/743 », « alinéa 1er », « alinéa premier »,
+        # « paragraphe 2 ». Lu puis ignore : la source est l'article.
+        r"(?:,?\s+(?:alin[ée]a|al\.|paragraphe?)\s*(?:\d+(?:\s*er)?|premier),?)?"
         # `of the` / `of` : sans eux, AUCUNE reponse anglaise n'a jamais produit
         # une seule citation extraite. « According to Article 161 of the OHADA
         # Code » echouait sur la contrainte de majuscule du groupe suivant, qui
@@ -250,7 +253,11 @@ class RAGService:
         # jusqu'ici venaient donc du repli `_create_sources_from_results`,
         # c'est-a-dire n'etaient pas des citations mais des devinettes.
         r"\s+(?:du\s+|de\s+la\s+|de\s+l['’]\s*|des\s+|de\s+|of\s+the\s+|of\s+)?"
-        r"([A-ZÀ-Ý][^,\.]+)"
+        # Le texte cite s'arrete a la ponctuation, a une parenthese, et avant
+        # la citation suivante : les prompts demandent « l'article 5 du Code
+        # Minier et l'article 6 du Code Minier », et ce groupe avalait la
+        # seconde, qui ne devenait jamais une source.
+        r"([A-ZÀ-Ý](?:(?!\s+(?:et|ou|and|or)\s+(?:l['’]\s*)?art(?:icle|\.))[^,\.;()])+)"
     )
     
     # Mots vides deplaces dans app/services/text_features.py : le re-ranking en
@@ -1320,35 +1327,49 @@ class RAGService:
             law_mention = match.group(3).strip().lower()
             wanted = _normalize_article_number(match.group(2))
 
-            for chunk in chunks:
-                if chunk.number and _normalize_article_number(chunk.number) != wanted:
-                    continue
-
-                # Le nom cite doit correspondre a la loi du chunk. Conserve
-                # comme depart quand plusieurs lois exposent le meme numero.
-                mentions_law = (
+            def cite_la_loi(chunk: ChunkResult) -> bool:
+                return (
                     law_mention in (chunk.law_title or "").lower()
                     or law_mention in (chunk.reference or "").lower()
                 )
-                if not mentions_law and chunk.number is None:
-                    continue
 
-                key = (chunk.law_id, wanted)
-                if key in seen:
-                    break
+            meme_numero = [
+                c for c in chunks
+                if c.number and _normalize_article_number(c.number) == wanted
+            ]
+            # La loi citee departage les articles de meme numero. Le premier
+            # chunk portant le numero l'emportait quelle que soit sa loi :
+            # « l'article 5 du Code Minier » devenait l'article 5 d'un decret
+            # place avant lui dans le contexte. Le numero seul ne sert plus que
+            # si la loi citee n'est reconnue nulle part (le modele l'a nommee
+            # autrement) : jamais l'article d'une AUTRE loi presente.
+            chunk = (
+                next((c for c in meme_numero if cite_la_loi(c)), None)
+                or next((c for c in chunks if not c.number and cite_la_loi(c)), None)
+                or (
+                    meme_numero[0]
+                    if meme_numero and not any(cite_la_loi(c) for c in chunks)
+                    else None
+                )
+            )
+            if chunk is None:
+                continue
 
-                excerpt = (chunk.content or chunk.excerpt or "")[:300]
-                citations.append(Citation(
-                    law_id=chunk.law_id,
-                    law_reference=chunk.reference,
-                    law_title=chunk.law_title,
-                    article_number=_citable_article_number(chunk.number) or article_num,
-                    article_id=chunk.article_id,
-                    excerpt=excerpt or "Voir document complet pour détails",
-                    relevance_score=chunk.relevance_score,
-                ))
-                seen.add(key)
-                break
+            key = (chunk.law_id, wanted)
+            if key in seen:
+                continue
+
+            excerpt = (chunk.content or chunk.excerpt or "")[:300]
+            citations.append(Citation(
+                law_id=chunk.law_id,
+                law_reference=chunk.reference,
+                law_title=chunk.law_title,
+                article_number=_citable_article_number(chunk.number) or article_num,
+                article_id=chunk.article_id,
+                excerpt=excerpt or "Voir document complet pour détails",
+                relevance_score=chunk.relevance_score,
+            ))
+            seen.add(key)
 
         logger.info(f"📎 Extracted {len(citations)} citations")
         return citations

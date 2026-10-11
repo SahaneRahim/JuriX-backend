@@ -937,6 +937,68 @@ class TestCitationsMultilingues:
         """\\b devant « art. » : « départ. 161 » ne cite rien."""
         assert rag_service._extract_citations("Le départ. 161 du train.", mock_search_results) == []
 
+    @pytest.mark.parametrize("reponse", [
+        "Selon l'article 161 du Code OHADA et l'article 5 du Code des sociétés, ils repondent.",
+        "Ils repondent (l'article 161 du Code OHADA) et l'article 5 du Code des sociétés le precise.",
+        "Directors are liable under Article 161 of the Code OHADA and Article 5 of the Code des sociétés.",
+    ])
+    def test_deux_citations_dans_la_meme_phrase(self, rag_service, mock_search_results, reponse):
+        """
+        La forme que les prompts demandent pour plusieurs articles. Le texte
+        cite de la premiere avalait la seconde, qui ne devenait pas une source.
+        """
+        citations = rag_service._extract_citations(reponse, mock_search_results)
+
+        assert [c.article_id for c in citations] == [161, 5]
+
+    @pytest.mark.parametrize("reponse", [
+        "Selon l'article 161, alinéa 1er, du Code OHADA, ils repondent.",
+        "Selon l'article 161, alinéa premier, du Code OHADA, ils repondent.",
+        "Selon l'article 161, paragraphe 2, du Code OHADA, ils repondent.",
+        "Directors are liable under Article 161(2) of the Code OHADA.",
+    ])
+    def test_alinea_ordinal_et_paragraphe(self, rag_service, mock_search_results, reponse):
+        """« alinéa 1er » est la forme usuelle : elle rendait toute la citation illisible."""
+        assert [c.article_id for c in rag_service._extract_citations(reponse, mock_search_results)] == [161]
+
+    def test_la_loi_citee_departage_les_articles_de_meme_numero(
+        self, rag_service, mock_search_results
+    ):
+        """
+        Deux lois exposent un article 5 : la citation va a celle qu'elle nomme,
+        pas au premier chunk qui porte le numero.
+        """
+        decret = mock_search_results[1].model_copy(update={
+            "article_id": 501, "law_id": 9, "law_title": "Décret N°2019/143",
+            "reference": "DEC-2019-143",
+        })
+        chunks = [decret, *mock_search_results]
+
+        citations = rag_service._extract_citations(
+            "Selon l'article 5 du Code des sociétés, ils sont loyaux.", chunks
+        )
+
+        assert [c.article_id for c in citations] == [5]
+
+    def test_jamais_l_article_d_une_autre_loi_presente(self, rag_service, mock_search_results):
+        """
+        Le Code OHADA est dans le contexte, mais pas son article 5 : l'article 5
+        d'une autre loi n'est pas une source de cette citation.
+        """
+        citations = rag_service._extract_citations(
+            "Selon l'article 5 du Code OHADA, ils sont loyaux.", mock_search_results
+        )
+
+        assert citations == []
+
+    def test_loi_nommee_autrement_le_numero_suffit(self, rag_service, mock_search_results):
+        """Repli conserve : la loi citee n'est reconnue nulle part dans le contexte."""
+        citations = rag_service._extract_citations(
+            "Selon l'article 5 de l'Acte uniforme, ils sont loyaux.", mock_search_results
+        )
+
+        assert [c.article_id for c in citations] == [5]
+
 
 class TestFluxAligneSurAsk:
     """
