@@ -778,6 +778,21 @@ class TestCaching:
         rows = await db_session.execute(sa_text("SELECT count(*) FROM query_cache"))
         assert rows.scalar() == 0
 
+    def test_the_mode_is_part_of_the_key(self):
+        """
+        Sans le mode dans la cle, une recherche « text » et une recherche
+        « hybrid » de la meme requete se servaient l'une l'autre pendant tout le
+        TTL : la page (text) et le chat (hybrid) se renvoyaient leurs resultats.
+        """
+        from app.services.postgres_search_service import _make_cache_key
+
+        cles = {
+            _make_cache_key("peine de mort", None, 20, 0, mode)
+            for mode in ("text", "semantic", "hybrid")
+        }
+
+        assert len(cles) == 3
+
 
 # ============================================================================
 # Test Edge Cases

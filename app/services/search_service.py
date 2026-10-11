@@ -277,7 +277,8 @@ class SearchService:
         # Check PostgreSQL cache
         if self.use_cache:
             cache_key = _make_cache_key(
-                request.query, request.filters, request.limit, request.offset
+                request.query, request.filters, request.limit, request.offset,
+                request.mode,
             )
             # Le cache est une optimisation, pas une dependance : si query_cache
             # est absente ou injoignable, on doit degrader, pas renvoyer 500.

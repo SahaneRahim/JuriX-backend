@@ -32,6 +32,7 @@ from app.schemas.search import SearchRequest
 from app.services.legal_domain_classifier import AFFAIRES
 from app.services.postgres_search_service import (
     MAX_CHUNKS_PER_LAW,
+    mots_significatifs,
     search_articles_pg,
 )
 from app.services.search_service import SearchService
@@ -193,6 +194,83 @@ class TestTypoTolerance:
 
         assert results[0].law_id in TITLE_LAWS
         assert results[0].relevance_score >= max(r.relevance_score for r in results)
+
+
+class TestMotsSignificatifs:
+    """La passe floue compare chaque mot qui designe quelque chose, et eux seuls."""
+
+    @pytest.mark.parametrize("requete, attendus", [
+        ("peine de mort au cameroun", ["peine", "mort"]),
+        ("Loi portant Code Minier du Cameroun", ["code", "minier"]),
+        ("nominaton", ["nominaton"]),
+        ("Fonction Publique : statut général", ["fonction", "publique", "statut", "general"]),
+        ("code code minier", ["code", "minier"]),
+        ("de la République du Cameroun", []),
+        ("", []),
+    ])
+    def test_mots_retenus(self, requete, attendus):
+        assert mots_significatifs(requete) == attendus
+
+
+# Loi 300 : titre en « ... de Base au Cameroun », sans rapport avec la requete.
+# Loi 301 : les articles parlent de la peine de mort.
+DECRET_DE_PRET, CODE_PENAL = 300, 301
+
+
+@pytest.fixture
+async def peine_corpus(db_session, category_ids):
+    from sqlalchemy import text as sql_text
+
+    db_session.add_all([
+        Law(
+            id=DECRET_DE_PRET, reference="PRC-10703",
+            # Titre reel du corpus : word_similarity avec la requete entiere,
+            # 0,516, au-dessus du seuil de 0,5.
+            title=("Décret N°2026/176 du 4 mai 2026 ratifiant l'Accord de Prêt pour le "
+                   "financement du Projet d'Appui à l'Education de Base au Cameroun (PAEBC)"),
+            content="Est ratifié l'Accord de Prêt conclu entre la République du Cameroun et la Banque.",
+            type="décret", language="fr", status="published",
+            category_id=category_ids["Fonction Publique"], publication_date=date(2026, 5, 4),
+        ),
+        Law(
+            id=CODE_PENAL, reference="LOI-2016-007",
+            title="Loi N° 2016/007 du 12 juillet 2016 portant Code Pénal",
+            content="Au Cameroun, la peine de mort est exécutée par les armes.",
+            type="loi", language="fr", status="published",
+            category_id=category_ids[AFFAIRES], publication_date=date(2016, 7, 12),
+        ),
+    ])
+    await db_session.flush()
+    db_session.add(Article(
+        law_id=CODE_PENAL, number="22", order=1, kind="article", embed=True,
+        content="Au Cameroun, la peine de mort est exécutée par les armes ou par pendaison.",
+    ))
+    await db_session.commit()
+    await db_session.execute(sql_text(REINDEX_LAWS_SQL))
+    await db_session.execute(sql_text(REINDEX_ARTICLES_SQL))
+    await db_session.commit()
+
+
+class TestPhraseRequest:
+    @pytest.mark.asyncio
+    async def test_common_words_do_not_make_a_title_match(self, service, peine_corpus):
+        """
+        Requete reelle. Comparee d'un bloc, elle passait le seuil sur « de »,
+        « au » et « cameroun » : le decret de pret sortait PREMIER, comme
+        correspondance de titre, devant le Code penal.
+        """
+        results = await service.text_search("peine de mort au cameroun", limit=20)
+
+        assert results, "aucun resultat"
+        assert results[0].law_id == CODE_PENAL
+        assert DECRET_DE_PRET not in {r.law_id for r in results}
+
+    @pytest.mark.asyncio
+    async def test_a_typo_in_a_phrase_is_still_caught(self, service, peine_corpus):
+        """Mot par mot, la tolerance aux fautes reste : « penal » mal ecrit."""
+        results = await service.text_search("code penall", limit=20)
+
+        assert results and results[0].law_id == CODE_PENAL
 
 
 class TestPerLawCap:

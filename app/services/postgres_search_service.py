@@ -25,6 +25,8 @@ Version: 3.0.0 (PostgreSQL native)
 import hashlib
 import json
 import logging
+import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -67,11 +69,18 @@ MAX_CHUNKS_PER_LAW = 3
 CACHE_SCHEMA_VERSION = "v4"
 
 
-def _make_cache_key(query: str, filters: Optional[SearchFilters], limit: int, offset: int) -> str:
-    """Génère une clé de cache SHA-256 déterministe."""
+def _make_cache_key(
+    query: str, filters: Optional[SearchFilters], limit: int, offset: int, mode: str
+) -> str:
+    """
+    Génère une clé de cache SHA-256 déterministe.
+
+    Le mode en fait partie : sans lui, une recherche « text » et une recherche
+    « hybrid » de la meme requete se servaient l'une l'autre pendant tout le TTL.
+    """
     filters_dict = filters.model_dump() if filters else {}
     raw = (
-        f"{CACHE_SCHEMA_VERSION}|{query}|"
+        f"{CACHE_SCHEMA_VERSION}|{mode}|{query}|"
         f"{json.dumps(filters_dict, sort_keys=True)}|{limit}|{offset}"
     )
     return hashlib.sha256(raw.encode()).hexdigest()[:64]
@@ -697,6 +706,34 @@ def _rows_to_chunks(rows: Sequence[Any], source: str) -> List[ChunkResult]:
     return chunks
 
 
+# Mots ignores par la passe floue sur les titres : les mots vides, et ceux que
+# presque tous les titres du corpus contiennent. Ils ne designent aucun texte.
+MOTS_SANS_POIDS_TITRE = frozenset({
+    "les", "des", "aux", "une", "par", "pour", "sur", "dans", "avec", "sans",
+    "que", "qui", "quoi", "est", "sont", "son", "ses", "leur", "leurs", "entre",
+    "cameroun", "camerounais", "camerounaise", "republique",
+    "loi", "lois", "decret", "decrets", "ordonnance", "arrete", "portant",
+    "relatif", "relative", "the", "and", "law",
+})
+
+
+def mots_significatifs(query: str) -> List[str]:
+    """
+    Les mots de la requete qui doivent se retrouver dans un titre : sans
+    accents, en minuscules, d'au moins trois caracteres, hors
+    MOTS_SANS_POIDS_TITRE, sans doublon.
+    """
+    sans_accents = "".join(
+        c for c in unicodedata.normalize("NFD", query.lower())
+        if unicodedata.category(c) != "Mn"
+    )
+    mots: List[str] = []
+    for mot in re.findall(r"[a-z0-9]+", sans_accents):
+        if len(mot) >= 3 and mot not in MOTS_SANS_POIDS_TITRE and mot not in mots:
+            mots.append(mot)
+    return mots
+
+
 async def search_titles_trgm_pg(
     db: AsyncSession,
     query: str,
@@ -722,8 +759,29 @@ async def search_titles_trgm_pg(
     `apply_trigram_threshold`) : l'operateur `%>` filtre sur le reglage de
     session, si bien qu'un predicat `word_similarity(...) >= 0.5` ajoute ici
     serait du code mort — rien sous le defaut de 0,6 ne lui parviendrait.
+
+    MOT PAR MOT, ET NON LA REQUETE ENTIERE. Comparee d'un bloc, une requete de
+    plusieurs mots passait le seuil sur ses mots les plus banals : dans
+    « peine de mort au cameroun », « de », « au » et « cameroun » font plus de
+    la moitie des trigrammes, et tout titre en « ... de ... au Cameroun »
+    sortait a 0,516 — des decrets de pret, classes en tete comme
+    correspondances de titre, devant les 11 articles du Code penal sur la
+    peine de mort. Chaque mot significatif (`mots_significatifs`) doit
+    desormais se retrouver, meme mal orthographie, dans le titre. Sans mot
+    significatif, la passe ne rend rien. La reference, elle, garde la
+    comparaison d'un bloc : c'est un identifiant, pas une phrase.
     """
+    mots = mots_significatifs(query)
+    if not mots:
+        return []
     params: Dict[str, Any] = {"query": query, "limit": limit}
+    for i, mot in enumerate(mots):
+        params[f"mot_{i}"] = mot
+    titre = "immutable_unaccent(l.title)"
+    chaque_mot = " AND ".join(f"{titre} %> :mot_{i}" for i in range(len(mots)))
+    similarite_titre = " + ".join(
+        f"word_similarity(:mot_{i}, {titre})" for i in range(len(mots))
+    )
     where_extra = _law_filter_clauses(filters, params)
 
     sql = text(f"""
@@ -745,13 +803,13 @@ async def search_titles_trgm_pg(
             c.name            AS category_name,
             TRUE              AS title_match,
             GREATEST(
-                word_similarity(immutable_unaccent(:query), immutable_unaccent(l.title)),
+                ({similarite_titre}) / {len(mots)},
                 word_similarity(immutable_unaccent(:query), immutable_unaccent(l.reference))
             ) AS rank
         FROM laws l
         LEFT JOIN categories c ON c.id = l.category_id
         WHERE (
-            immutable_unaccent(l.title) %> immutable_unaccent(:query)
+            ({chaque_mot})
             OR immutable_unaccent(l.reference) %> immutable_unaccent(:query)
         )
         {where_extra}
