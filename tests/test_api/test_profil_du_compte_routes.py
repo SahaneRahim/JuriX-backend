@@ -11,7 +11,7 @@ Usage:
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.models.user import User
 
@@ -24,12 +24,22 @@ async def test_sans_jeton_401(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_le_profil_est_enregistre_puis_relu(client: AsyncClient, auth_headers):
+async def test_le_profil_est_enregistre_puis_relu(
+    client: AsyncClient, auth_headers, test_user, pg_engine
+):
     r = await client.patch(ME, json={"persona": "avocat"}, headers=auth_headers)
 
     assert r.status_code == 200
     assert r.json()["persona"] == "avocat"
     assert (await client.get(ME, headers=auth_headers)).json()["persona"] == "avocat"
+    # Relu par une AUTRE connexion : le client partage sa session avec la
+    # route, et y verrait une modification jamais validee. Seul un commit rend
+    # le profil visible d'ici, comme depuis l'appareil suivant.
+    async with pg_engine.connect() as conn:
+        enregistre = (await conn.execute(
+            text("SELECT persona FROM users WHERE id = :id"), {"id": test_user.id}
+        )).scalar_one()
+    assert enregistre == "avocat"
 
 
 @pytest.mark.asyncio

@@ -42,7 +42,8 @@ def upgrade() -> None:
     valeurs = ", ".join(f"'{profil}'" for profil in PROFILS_DU_COMPTE)
     op.execute(
         "DO $$ BEGIN "
-        "IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_users_persona_connu') THEN "
+        "IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_users_persona_connu' "
+        "AND conrelid = 'users'::regclass) THEN "
         "ALTER TABLE users ADD CONSTRAINT ck_users_persona_connu "
         f"CHECK (persona IS NULL OR persona IN ({valeurs})); "
         "END IF; END $$"
