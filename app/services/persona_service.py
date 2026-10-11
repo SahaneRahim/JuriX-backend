@@ -21,7 +21,7 @@ from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.personas import PERSONAS, PROFILS
+from app.core.personas import PERSONAS, PROFIL_GENERAL, PROFILS, normaliser_profil
 from app.models.conversation import (
     Conversation,
     Message,
@@ -168,7 +168,7 @@ class PersonaService:
         Raises:
             InvalidPersonaError: If persona is invalid
         """
-        await self.validate_persona(persona)
+        persona = await self.validate_persona(persona)
 
         info = self.PERSONA_INFO[persona].copy()
         info["name"] = persona
@@ -192,25 +192,29 @@ class PersonaService:
         logger.debug(f"📋 Listed {len(personas)} personas")
         return personas
 
-    async def validate_persona(self, persona: str) -> bool:
+    async def validate_persona(self, persona: str, general: bool = False) -> str:
         """
-        Validate that persona is one of the 4 supported types.
+        Valide un profil et rend sa forme canonique.
 
-        Args:
-            persona: Persona name to validate
-
-        Returns:
-            True if valid
+        Memes alias que le chat (casse, accents, NFD) : « etudiant » donnait
+        400 ici alors que le chat l'accepte. `general=True` admet aussi le
+        profil general, la ou il a des donnees (statistiques, avis, questions) :
+        c'est le profil des conversations sans profil choisi, le defaut du chat.
 
         Raises:
-            InvalidPersonaError: If persona is not valid
+            InvalidPersonaError: profil inconnu, ou `general` sans `general=True`
         """
-        if persona not in self.VALID_PERSONAS:
+        try:
+            canonique = normaliser_profil(persona)
+        except ValueError:
+            canonique = None
+        if canonique is None or (canonique == PROFIL_GENERAL and not general):
+            admis = self.VALID_PERSONAS + ([PROFIL_GENERAL] if general else [])
             logger.warning(f"❌ Invalid persona: {persona}")
             raise InvalidPersonaError(
-                f"Invalid persona '{persona}'. Must be one of: {', '.join(self.VALID_PERSONAS)}"
+                f"Invalid persona '{persona}'. Must be one of: {', '.join(admis)}"
             )
-        return True
+        return canonique
 
     # ========================================================================
     # ANALYTICS - REAL-TIME
@@ -238,7 +242,7 @@ class PersonaService:
         Raises:
             InvalidPersonaError: If persona is invalid
         """
-        await self.validate_persona(persona)
+        persona = await self.validate_persona(persona, general=True)
 
         # Default date range: last 30 days
         if not end_date:
@@ -312,7 +316,7 @@ class PersonaService:
             List of stats dicts for each persona
         """
         all_stats = []
-        for persona in self.VALID_PERSONAS:
+        for persona in PROFILS:
             stats = await self.get_persona_stats(persona, start_date, end_date)
             all_stats.append(stats)
 
@@ -378,7 +382,7 @@ class PersonaService:
         start_datetime = datetime.combine(target_date, datetime.min.time())
         end_datetime = datetime.combine(target_date, datetime.max.time())
 
-        for persona in self.VALID_PERSONAS:
+        for persona in PROFILS:
             await self._aggregate_persona_day(persona, target_date, start_datetime, end_datetime)
 
         await self.db.commit()
@@ -755,7 +759,7 @@ class PersonaService:
             InvalidPersonaError: If persona is invalid
         """
         if persona:
-            await self.validate_persona(persona)
+            persona = await self.validate_persona(persona, general=True)
 
         # Build query
         query = select(MessageFeedback)
@@ -790,7 +794,7 @@ class PersonaService:
         # By persona breakdown
         by_persona = {}
         if not persona:
-            for p in self.VALID_PERSONAS:
+            for p in PROFILS:
                 p_feedbacks = await self._get_persona_feedbacks(p, start_date, end_date)
                 by_persona[p] = {
                     "total": len(p_feedbacks),
@@ -856,7 +860,7 @@ class PersonaService:
         Raises:
             InvalidPersonaError: If persona is invalid
         """
-        await self.validate_persona(persona)
+        persona = await self.validate_persona(persona, general=True)
 
         start_date = date.today() - timedelta(days=days)
         # Pas de borne haute : `end_date` etait calculee et jamais utilisee. La
@@ -947,7 +951,7 @@ class PersonaService:
         Raises:
             InvalidPersonaError: If persona is invalid
         """
-        await self.validate_persona(persona)
+        persona = await self.validate_persona(persona, general=True)
 
         # Get user messages for this persona (last 90 days)
         start_date = datetime.now() - timedelta(days=90)
@@ -1018,7 +1022,7 @@ class PersonaService:
             "personas": {}
         }
 
-        for persona in self.VALID_PERSONAS:
+        for persona in PROFILS:
             stats = await self.get_persona_stats(persona, start_date, end_date)
 
             if metric == "usage":
@@ -1032,7 +1036,10 @@ class PersonaService:
 
             comparison["personas"][persona] = {
                 "value": value,
-                "display_name": self.PERSONA_INFO[persona]["display_name"]
+                # Le profil general n'a pas de fiche : c'est l'absence de profil.
+                "display_name": self.PERSONA_INFO.get(persona, {}).get(
+                    "display_name", "Profil général"
+                ),
             }
 
         logger.info(f"📊 Compared personas by {metric} over {days} days")
@@ -1059,7 +1066,7 @@ class PersonaService:
             InvalidPersonaError: If persona is invalid
             ValueError: If metric is invalid
         """
-        await self.validate_persona(persona)
+        persona = await self.validate_persona(persona, general=True)
 
         valid_metrics = ["questions", "confidence", "satisfaction"]
         if metric not in valid_metrics:

@@ -77,13 +77,32 @@ class TestPersonaOperations:
 
     @pytest.mark.asyncio
     async def test_validate_persona_valid(self, db_session: AsyncSession):
-        """Test validating valid persona returns True."""
+        """Un profil valide rend sa forme canonique."""
         service = PersonaService(db_session)
 
-        assert await service.validate_persona("citoyen") is True
-        assert await service.validate_persona("avocat") is True
-        assert await service.validate_persona("entrepreneur") is True
-        assert await service.validate_persona("étudiant") is True
+        assert await service.validate_persona("citoyen") == "citoyen"
+        assert await service.validate_persona("avocat") == "avocat"
+        assert await service.validate_persona("entrepreneur") == "entrepreneur"
+        assert await service.validate_persona("étudiant") == "étudiant"
+
+    @pytest.mark.asyncio
+    async def test_les_alias_du_chat_sont_admis(self, db_session: AsyncSession):
+        """« etudiant » donnait 400 ici alors que le chat l'accepte."""
+        service = PersonaService(db_session)
+
+        for alias in ("etudiant", "Étudiant", "e\u0301tudiant"):
+            assert await service.validate_persona(alias) == "\u00e9tudiant"
+
+    @pytest.mark.asyncio
+    async def test_le_profil_general_seulement_la_ou_il_a_des_donnees(
+        self, db_session: AsyncSession
+    ):
+        """Statistiques oui (c'est le defaut du chat), fiche descriptive non."""
+        service = PersonaService(db_session)
+
+        assert await service.validate_persona("general", general=True) == "general"
+        with pytest.raises(InvalidPersonaError):
+            await service.validate_persona("general")
 
     @pytest.mark.asyncio
     async def test_validate_persona_invalid(self, db_session: AsyncSession):
@@ -166,7 +185,9 @@ class TestAnalyticsStats:
 
         all_stats = await service.get_all_persona_stats()
 
-        assert len(all_stats) == 4
+        # Les 4 profils et le profil general, defaut du chat.
+        assert len(all_stats) == 5
+        assert "general" in [s["persona"] for s in all_stats]
         personas = [s["persona"] for s in all_stats]
         assert "citoyen" in personas
         assert "avocat" in personas

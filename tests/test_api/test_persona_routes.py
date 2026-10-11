@@ -161,7 +161,7 @@ class TestGetAllPersonaStatsAPI:
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
-        assert len(data) == 4
+        assert len(data) == 5  # les 4 profils et le profil general, defaut du chat
 
         personas = [s["persona"] for s in data]
         assert "citoyen" in personas
@@ -180,7 +180,7 @@ class TestGetAllPersonaStatsAPI:
         )
 
         assert response.status_code == 200
-        assert len(response.json()) == 4
+        assert len(response.json()) == 5
 
 
 class TestGetUsageBreakdownAPI:
@@ -303,8 +303,9 @@ class TestComparePersonasAPI:
         assert data["metric"] == "usage"
         assert data["days"] == 30
         assert "personas" in data
-        assert len(data["personas"]) == 4
+        assert len(data["personas"]) == 5
         assert "citoyen" in data["personas"]
+        assert data["personas"]["general"]["display_name"] == "Profil général"
 
     @pytest.mark.asyncio
     async def test_compare_confidence(self, client: AsyncClient):
