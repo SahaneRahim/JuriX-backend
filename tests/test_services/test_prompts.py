@@ -84,9 +84,22 @@ def test_la_grammaire_des_prompts_est_lisible_par_la_regex(langue, persona):
     Rien ne leve, rien ne se journalise : seule cette assertion le voit.
     """
     prompt = SYSTEM_PROMPTS[langue][persona]
+    exemple = (
+        "l'article 5 du Code Minier et l'article 6 du Code Minier" if langue == "fr"
+        else "Article 5 of the Mining Code and Article 6 of the Mining Code"
+    )
+    texte = "Code Minier" if langue == "fr" else "Mining Code"
 
-    assert re.search(RAGService.CITATION_REGEX, prompt), (
-        f"la phrase-exemple de {langue}/{persona} n'est pas reconnue par "
+    # La phrase-exemple est dans le prompt, et la regex en relit les DEUX
+    # citations, chacune avec son texte : un simple `re.search` passait des
+    # qu'une citation quelconque etait lue, y compris un contre-exemple.
+    assert exemple in prompt
+    lues = [
+        (m.group(2), m.group(3).strip())
+        for m in re.finditer(RAGService.CITATION_REGEX, exemple, re.IGNORECASE)
+    ]
+    assert lues == [("5", texte), ("6", texte)], (
+        f"la phrase-exemple de {langue}/{persona} n'est pas relue par "
         "CITATION_REGEX : les sources ne s'afficheront plus"
     )
 
@@ -170,8 +183,9 @@ def test_l_avocat_n_est_pas_renvoye_vers_un_avocat(langue, interdit):
 ])
 def test_l_alinea_de_l_avocat_reste_lisible_par_la_regex(langue, phrase, texte):
     """
-    « l'article 33 alinéa 2 du Code Minier » ne serait PAS relu : la source
-    disparaitrait. L'alinea vient donc apres la citation complete.
+    L'alinea vient apres la citation complete. La regex relit aussi
+    « l'article 33, alinéa 2, du Code Minier » depuis la mesure du 2026-10-11,
+    mais une seule forme dans le prompt garde des citations homogenes.
     """
     assert phrase in SYSTEM_PROMPTS[langue]["avocat"]
     correspondance = re.search(RAGService.CITATION_REGEX, phrase)
@@ -180,11 +194,18 @@ def test_l_alinea_de_l_avocat_reste_lisible_par_la_regex(langue, phrase, texte):
 
 @pytest.mark.parametrize("langue,persona", TOUS_LES_PERSONAS)
 def test_aucun_profil_ne_pousse_a_inventer(langue, persona):
-    """Le corpus ne contient ni jurisprudence ni contexte historique."""
+    """
+    Le corpus ne contient ni jurisprudence ni contexte historique, et le
+    message utilisateur exige de s'en tenir aux documents : aucun profil ne
+    doit inviter a puiser ailleurs (l'etudiant le faisait, « Tu peux rappeler
+    une notion générale du droit »).
+    """
     prompt = SYSTEM_PROMPTS[langue][persona]
 
     for incitation in ("jurisprudence pertinente", "relevant case law",
-                       "contexte historique", "historical context"):
+                       "contexte historique", "historical context",
+                       "notion générale du droit", "general legal notion",
+                       "hiérarchie des normes", "hierarchy of norms"):
         assert incitation not in prompt
 
 
@@ -271,11 +292,36 @@ def test_le_profil_general_n_ajoute_aucune_audience(langue, intention):
 
 # ==================== AUCUN RESULTAT ====================
 
+# Le texte d'avant les profils, fige ici : NO_RESULTS_MESSAGE est desormais
+# construit par message_sans_resultat, le comparer a lui-meme ne protegeait rien.
+TEXTE_SANS_RESULTAT_AVANT_LES_PROFILS = {
+    "fr": (
+        "Je n'ai pas trouvé d'information pertinente dans la base de données juridique "
+        "camerounaise pour répondre à votre question.\n\nSuggestions:\n"
+        "- Reformulez votre question de manière plus précise\n"
+        "- Vérifiez l'orthographe des termes juridiques\n"
+        "- Essayez des termes alternatifs\n"
+        "- Consultez un avocat pour des conseils personnalisés\n\n"
+        "Puis-je vous aider autrement?"
+    ),
+    "en": (
+        "I couldn't find relevant information in the Cameroonian legal database to "
+        "answer your question.\n\nSuggestions:\n"
+        "- Rephrase your question more precisely\n"
+        "- Check spelling of legal terms\n"
+        "- Try alternative terms\n"
+        "- Consult a lawyer for personalized advice\n\n"
+        "How else can I help you?"
+    ),
+}
+
+
 @pytest.mark.parametrize("langue", ["fr", "en"])
 def test_le_message_sans_resultat_du_citoyen_ne_change_pas(langue):
-    assert message_sans_resultat(langue, "citoyen") == NO_RESULTS_MESSAGE[langue]
-    assert message_sans_resultat(langue, PROFIL_GENERAL) == NO_RESULTS_MESSAGE[langue]
-    assert NO_RESULTS_MESSAGE[langue].startswith(("Je n'ai pas trouvé", "I couldn't find"))
+    avant = TEXTE_SANS_RESULTAT_AVANT_LES_PROFILS[langue]
+    assert message_sans_resultat(langue, "citoyen") == avant
+    assert message_sans_resultat(langue, PROFIL_GENERAL) == avant
+    assert NO_RESULTS_MESSAGE[langue] == avant
 
 
 @pytest.mark.parametrize("langue,consulter", [("fr", "Consultez un avocat"), ("en", "Consult a lawyer")])
