@@ -110,6 +110,9 @@ class TestAuthorization:
         ("get", "/api/v1/search/stats"),
         ("post", "/api/v1/upload/cleanup"),
         ("get", "/api/v1/batch-upload/status"),
+        # Le texte des questions et des avis des autres utilisateurs.
+        ("get", "/api/v1/personas/citoyen/questions"),
+        ("get", "/api/v1/personas/feedback/1"),
     ]
 
     @pytest.mark.asyncio

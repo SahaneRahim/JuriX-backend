@@ -9,11 +9,11 @@ Endpoints:
 - GET /api/v1/personas/stats/all - Get stats for all personas
 - GET /api/v1/personas/stats/usage - Get usage breakdown
 - GET /api/v1/personas/{persona}/engagement - Get engagement metrics
-- GET /api/v1/personas/{persona}/questions - Get popular questions
+- GET /api/v1/personas/{persona}/questions - Get popular questions (admin)
 - GET /api/v1/personas/compare/{metric} - Compare personas
 - GET /api/v1/personas/{persona}/trends/{metric} - Get trend data
 - POST /api/v1/personas/feedback - Add message feedback
-- GET /api/v1/personas/feedback/{message_id} - Get feedback
+- GET /api/v1/personas/feedback/{message_id} - Get feedback (admin)
 - GET /api/v1/personas/feedback/stats - Get feedback statistics
 
 Author: JuriX Team
@@ -27,7 +27,9 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import get_current_admin_user
 from app.core.database import get_db
+from app.models.user import User
 from app.schemas.persona import (
     EngagementMetricsResponse,
     ErrorResponse,
@@ -449,7 +451,11 @@ async def get_engagement_metrics(
 async def get_popular_questions(
     persona: str = Path(..., description="Persona name"),
     limit: int = Query(10, ge=1, le=50, description="Max number of questions (1-50)"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    # Administrateurs seulement : la route rend le TEXTE EXACT des questions de
+    # tous les utilisateurs sur 90 jours. Publique, elle livrait a n'importe qui
+    # ce que d'autres avaient confie au chat.
+    _: User = Depends(get_current_admin_user),
 ) -> PopularQuestionsResponse:
     """
     Get most frequently asked questions for a persona.
@@ -678,7 +684,9 @@ async def add_message_feedback(
 )
 async def get_message_feedback(
     message_id: int = Path(..., description="Message ID", gt=0),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    # Administrateurs seulement : un avis porte un commentaire libre.
+    _: User = Depends(get_current_admin_user),
 ) -> Optional[MessageFeedbackResponse]:
     """
     Get feedback for a specific message.

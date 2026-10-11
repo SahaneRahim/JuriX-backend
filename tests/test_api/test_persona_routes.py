@@ -243,9 +243,9 @@ class TestGetPopularQuestionsAPI:
     """Tests for GET /api/v1/personas/{persona}/questions endpoint."""
 
     @pytest.mark.asyncio
-    async def test_get_popular_questions_default(self, client: AsyncClient):
+    async def test_get_popular_questions_default(self, admin_client: AsyncClient):
         """Test getting popular questions with default limit."""
-        response = await client.get("/api/v1/personas/citoyen/questions")
+        response = await admin_client.get("/api/v1/personas/citoyen/questions")
 
         assert response.status_code == 200
         data = response.json()
@@ -255,20 +255,35 @@ class TestGetPopularQuestionsAPI:
         assert "total_count" in data
 
     @pytest.mark.asyncio
-    async def test_get_popular_questions_custom_limit(self, client: AsyncClient):
+    async def test_get_popular_questions_custom_limit(self, admin_client: AsyncClient):
         """Test getting popular questions with custom limit."""
-        response = await client.get("/api/v1/personas/citoyen/questions?limit=5")
+        response = await admin_client.get("/api/v1/personas/citoyen/questions?limit=5")
 
         assert response.status_code == 200
         data = response.json()
         assert len(data["questions"]) <= 5
 
     @pytest.mark.asyncio
-    async def test_get_popular_questions_invalid_persona(self, client: AsyncClient):
+    async def test_get_popular_questions_invalid_persona(self, admin_client: AsyncClient):
         """Test popular questions for invalid persona."""
-        response = await client.get("/api/v1/personas/invalid/questions")
+        response = await admin_client.get("/api/v1/personas/invalid/questions")
 
         assert response.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_les_questions_d_autrui_sont_refusees_aux_anonymes(self, client: AsyncClient):
+        """Elles rendaient le texte exact des questions de tous les utilisateurs."""
+        response = await client.get("/api/v1/personas/citoyen/questions")
+
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_les_questions_d_autrui_sont_refusees_a_un_compte_simple(
+        self, client: AsyncClient, auth_headers
+    ):
+        response = await client.get("/api/v1/personas/citoyen/questions", headers=auth_headers)
+
+        assert response.status_code == 403
 
 
 # ============================================================================
@@ -506,7 +521,7 @@ class TestGetFeedbackAPI:
     @pytest.mark.asyncio
     async def test_get_feedback_success(
         self,
-        client: AsyncClient,
+        admin_client: AsyncClient,
         db_session: AsyncSession
     ):
         """Test getting existing feedback."""
@@ -524,7 +539,7 @@ class TestGetFeedbackAPI:
         await db_session.commit()
 
         # Get via API
-        response = await client.get(f"/api/v1/personas/feedback/{msg.id}")
+        response = await admin_client.get(f"/api/v1/personas/feedback/{msg.id}")
 
         assert response.status_code == 200
         data = response.json()
@@ -533,11 +548,18 @@ class TestGetFeedbackAPI:
         assert data["rating"] == 4
 
     @pytest.mark.asyncio
-    async def test_get_feedback_not_found(self, client: AsyncClient):
+    async def test_get_feedback_not_found(self, admin_client: AsyncClient):
         """Test getting feedback for message without feedback."""
-        response = await client.get("/api/v1/personas/feedback/999999")
+        response = await admin_client.get("/api/v1/personas/feedback/999999")
 
         assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_un_avis_est_refuse_aux_anonymes(self, client: AsyncClient):
+        """Un avis porte un commentaire libre."""
+        response = await client.get("/api/v1/personas/feedback/1")
+
+        assert response.status_code == 401
 
 
 class TestGetFeedbackStatsAPI:
