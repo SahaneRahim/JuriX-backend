@@ -30,6 +30,16 @@ fi
 # construction de l'image : refuse a l'etape 6 seulement, le mot de passe
 # faisait echouer un deploiement de vingt minutes. create_admin.py reste juge.
 mdp=$(valeur ADMIN_PASSWORD)
+# docker compose interprete le .env avant de le passer au conteneur : $NOM y
+# devient une variable (vide si absente), ` #` ouvre un commentaire, les
+# guillemets et les espaces du bord disparaissent. « Jurix2026$admin »
+# arrivait a create_admin.py sous la forme « Jurix2026 » : un administrateur
+# cree avec un autre mot de passe que celui du .env.
+case "$mdp" in
+    *'$'*|*'#'*|*'"'*|*"'"*|[[:space:]]*|*[[:space:]])
+        echo "ADMIN_PASSWORD refuse : ni \$, ni #, ni guillemets, ni espace au debut ou a la fin (docker compose les interprete)"
+        exit 1 ;;
+esac
 if [ -n "$mdp" ] && ! { [ "${#mdp}" -ge 8 ] && [ "${#mdp}" -le 100 ] \
         && [[ $mdp =~ [[:upper:]] ]] && [[ $mdp =~ [[:lower:]] ]] && [[ $mdp =~ [[:digit:]] ]]; }; then
     echo "ADMIN_PASSWORD refuse : 8 a 100 caracteres, dont une majuscule, une minuscule et un chiffre"
@@ -51,14 +61,40 @@ echo "== 3. Restauration initiale, seulement si la base n'a AUCUNE loi"
 # (vide) a chaque demarrage, et un premier demarrage avant la restauration la
 # faisait sauter pour toujours, sans un mot.
 # Deux requetes, et non un CASE : PostgreSQL resout `laws` a l'analyse, meme
-# dans la branche non prise, et sur une base neuve la requete echouait, ce qui
-# arretait le script avant toute restauration.
-lois=0
-if [ "$(requete "SELECT to_regclass('public.laws') IS NOT NULL")" = "t" ]; then
-    lois=$(requete "SELECT count(*) FROM laws")
+# dans la branche non prise, et sur une base neuve la requete echouait.
+# Une affectation seule, puis un `case` qui n'accepte que t ou f : dans la
+# condition d'un `if`, `set -e` ne s'applique pas, et un psql en echec
+# (conteneur qui redemarre, demon Docker) passait pour « aucune table », donc
+# pour une base a restaurer : DROP DATABASE de la production, puis retour au
+# corpus du premier jour, sans un compte.
+existe=$(requete "SELECT to_regclass('public.laws') IS NOT NULL")
+case "$existe" in
+    t) lois=$(requete "SELECT count(*) FROM laws") ;;
+    f) lois=0 ;;
+    *) echo "Reponse inattendue de la base (« $existe ») : arret, rien n'est touche"; exit 1 ;;
+esac
+
+# Un temoin pose avant le DROP, retire apres une restauration complete. Sans
+# lui, une restauration interrompue (coupure, memoire pendant l'index HNSW)
+# laissait des lois sans index ni contraintes, et la relance, qui ne compte
+# que les lois, prenait cette base pour saine.
+temoin=sauvegardes/.restauration_en_cours
+a_restaurer=0
+peuplee=0
+if [ -f "$temoin" ]; then
+    [ -f sauvegardes/initial.dump ] || {
+        echo "Restauration interrompue, et plus de sauvegardes/initial.dump : restaurer a la main (README §6)"
+        exit 1
+    }
+    echo "La restauration precedente n'a pas abouti : elle reprend de zero"
+    a_restaurer=1
+elif [ "$lois" = "0" ] && [ -f sauvegardes/initial.dump ]; then
+    a_restaurer=1
 fi
-if [ "$lois" = "0" ] && [ -f sauvegardes/initial.dump ]; then
-    echo "Base sans loi : restauration de sauvegardes/initial.dump dans une base neuve"
+
+if [ "$a_restaurer" = 1 ]; then
+    echo "Restauration de sauvegardes/initial.dump dans une base neuve"
+    touch "$temoin"
     docker compose stop api caddy >/dev/null 2>&1 || true
     requete "DROP DATABASE IF EXISTS jurix WITH (FORCE)" postgres >/dev/null
     requete "CREATE DATABASE jurix OWNER jurix" postgres >/dev/null
@@ -67,15 +103,26 @@ if [ "$lois" = "0" ] && [ -f sauvegardes/initial.dump ]; then
     docker compose exec -T db pg_restore -U jurix -d jurix --no-owner --no-privileges \
         --exit-on-error < sauvegardes/initial.dump
     lois=$(requete "SELECT count(*) FROM laws")
-    echo "$lois lois restaurees"
     [ "$lois" -gt 0 ] || { echo "Restauration en echec : aucune loi"; exit 1; }
+    # Consomme : plus aucune mise a jour ne pourra la rejouer, quoi qu'il
+    # arrive a la base ensuite. Gardee pour memoire, sous un autre nom (hors de
+    # la rotation de sauvegarde.sh).
+    mv sauvegardes/initial.dump "sauvegardes/initial.restaure_$(date +%Y%m%d_%H%M).dump"
+    rm -f "$temoin"
+    echo "$lois lois restaurees"
 elif [ "$lois" = "0" ]; then
     echo "ATTENTION : base sans aucune loi, et pas de sauvegardes/initial.dump"
 else
     echo "Base deja peuplee ($lois lois) : pas de restauration"
+    peuplee=1
 fi
 
 echo "== 4. API (reconstruite si le code a change) et Caddy"
+# Une sauvegarde AVANT une mise a jour : l'API applique les migrations a son
+# demarrage, et la sauvegarde nocturne peut avoir jusqu'a 24 h.
+if [ "$peuplee" = 1 ]; then
+    bash sauvegarde.sh
+fi
 docker compose up -d --build
 # Caddy ne relit pas sa configuration tout seul.
 docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile </dev/null >/dev/null 2>&1 \

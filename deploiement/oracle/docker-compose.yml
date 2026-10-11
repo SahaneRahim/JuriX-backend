@@ -62,6 +62,11 @@ services:
       # vers http://, que le navigateur bloque depuis une page HTTPS. Sans
       # danger : aucun port de l'API n'est publie, seul Caddy la joint.
       FORWARDED_ALLOW_IPS: "*"
+      # Derives du domaine, et non recopies dans .env : laisses a
+      # jurix.exemple.cm, les liens des courriels (mot de passe oublie)
+      # pointaient vers un domaine que n'importe qui peut acheter.
+      FRONTEND_BASE_URL: https://${JURIX_DOMAINE}
+      ALLOWED_ORIGINS: https://${JURIX_DOMAINE}
     volumes:
       # Le modele n'est pas dans l'image (500 Mo) : monte en lecture seule.
       - ./modeles/embeddinggemma-300m-onnx:/app/modeles/embeddinggemma-300m-onnx:ro

@@ -9,6 +9,12 @@
 	# flush_interval -1 : les reponses du chat arrivent en flux (SSE), mot apres
 	# mot ; mises en tampon, elles n'apparaitraient qu'a la fin.
 	handle /api/* {
+		# Plafond par requete : sans lui, un envoi de 1 ou 2 Go saturait la
+		# memoire de l'API. 300 Mo couvre le plus gros envoi prevu (250 Mo,
+		# app/api/routes/upload.py).
+		request_body {
+			max_size 300MB
+		}
 		reverse_proxy api:8000 {
 			flush_interval -1
 		}
@@ -17,10 +23,24 @@
 		reverse_proxy api:8000
 	}
 
-	# Le front statique (application monopage) : toute route inconnue rend
+	# Les fichiers construits du front. Ceux de /_app/immutable portent leur
+	# empreinte dans leur nom : en cache un an. Un fichier absent repond 404, et
+	# non index.html : apres une mise a jour, un onglet ouvert qui reclamait un
+	# ancien morceau recevait du HTML a la place du JavaScript.
+	handle /_app/* {
+		root * /srv/front
+		header /_app/immutable/* Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
+	# Le reste de l'application monopage : toute route inconnue rend
 	# index.html, sans quoi un lien profond (/laws/123) repondrait 404.
+	# no-cache : le navigateur revalide index.html a chaque visite. Sans
+	# en-tete, il le gardait selon son heuristique et, apres une mise a jour,
+	# reclamait des morceaux supprimes : page blanche.
 	handle {
 		root * /srv/front
+		header Cache-Control "no-cache"
 		try_files {path} {path}/ /index.html
 		file_server
 	}

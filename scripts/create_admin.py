@@ -13,6 +13,7 @@ Usage:
     python scripts/create_admin.py --email admin@jurix.cm --username admin
     python scripts/create_admin.py --reset-password
     python scripts/create_admin.py --role superadmin
+    python scripts/create_admin.py --promouvoir      # compte ordinaire deja inscrit
 
 Les valeurs par défaut viennent de .env : ADMIN_EMAIL, ADMIN_USERNAME,
 ADMIN_PASSWORD. Si aucun mot de passe n'est fourni ni par option ni par
@@ -55,6 +56,11 @@ def parse_args() -> argparse.Namespace:
         "--reset-password",
         action="store_true",
         help="Réinitialise le mot de passe d'un compte existant",
+    )
+    p.add_argument(
+        "--promouvoir",
+        action="store_true",
+        help="Promeut un compte ORDINAIRE existant ; son mot de passe est alors remplacé",
     )
     return p.parse_args()
 
@@ -107,6 +113,21 @@ async def main() -> int:
                 print(f"✅ Compte créé : {args.email} (rôle {args.role})")
                 return 0
 
+            # Un compte ordinaire deja inscrit a cette adresse n'est jamais promu
+            # en silence. Le site est public avant la creation de
+            # l'administrateur (demarrer.sh, etape 6) : quiconque s'inscrivait
+            # sous ADMIN_EMAIL devenait superadmin, avec SON mot de passe.
+            ordinaire = existing.role not in ("admin", "superadmin")
+            if ordinaire and not args.promouvoir:
+                print(
+                    f"❌ {args.email} est déjà un compte ordinaire (rôle {existing.role}) : "
+                    "il n'est pas promu sans confirmation. S'il est bien à vous, relancez avec "
+                    "--promouvoir (son mot de passe sera remplacé) ; sinon, choisissez un autre "
+                    "ADMIN_EMAIL.",
+                    file=sys.stderr,
+                )
+                return 1
+
             changed = []
             if existing.role != args.role:
                 existing.role = args.role
@@ -114,7 +135,7 @@ async def main() -> int:
             if not existing.is_active:
                 existing.is_active = True
                 changed.append("réactivation")
-            if args.reset_password:
+            if args.reset_password or ordinaire:
                 existing.hashed_password = hash_password(password)
                 changed.append("mot de passe")
 

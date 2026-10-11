@@ -17,8 +17,8 @@
 # - ici : le depot du front a cote de celui-ci (ou JURIX_FRONT), sur la branche
 #   du site statique, avec ses node_modules ; pour --avec-donnees, le conteneur
 #   local jurix-pg demarre et le modele dans ~/modeles (ou JURIX_MODELE).
-# JURIX_GOOGLE_CLIENT_ID : l'identifiant OAuth Google, si la connexion Google
-# est activee (il est fige dans le front au build).
+# JURIX_GOOGLE_CLIENT_ID : l'identifiant OAuth Google (fige dans le front au
+# build). Facultatif : a defaut, GOOGLE_CLIENT_ID du .env de la VM.
 set -euo pipefail
 
 CIBLE=${1:?usage : JURIX_DOMAINE=... deployer.sh utilisateur@ip [--avec-donnees]}
@@ -37,11 +37,31 @@ RSYNC=(rsync -az --partial --info=progress2 -e "ssh -i $CLE -o StrictHostKeyChec
 RSYNC_ROOT=("${RSYNC[@]}" --rsync-path="sudo rsync")
 
 echo "== 1. Code du backend (etat commite de $(git -C "$RACINE" rev-parse --short HEAD))"
-git -C "$RACINE" archive --format=tar HEAD | "${SSH[@]}" "$CIBLE" "mkdir -p jurix && tar -x -C jurix"
+# Extrait a cote, puis aligne avec rsync --delete : un `tar -x` direct n'effacait
+# rien, et un fichier supprime du depot restait sur la VM, jusque dans l'image.
+# Les donnees de la VM (.env, modele, PDF, sauvegardes, front) sont exclues :
+# rsync ne les touche pas.
+git -C "$RACINE" archive --format=tar HEAD | "${SSH[@]}" "$CIBLE" 'set -e
+    rm -rf jurix.nouveau && mkdir jurix.nouveau && tar -x -C jurix.nouveau
+    mkdir -p jurix
+    rsync -a --delete \
+        --exclude=/deploiement/oracle/.env \
+        --exclude=/deploiement/oracle/modeles/ \
+        --exclude=/deploiement/oracle/donnees/ \
+        --exclude=/deploiement/oracle/sauvegardes/ \
+        --exclude=/deploiement/oracle/front/ \
+        jurix.nouveau/ jurix/
+    rm -rf jurix.nouveau'
 
 echo "== 2. Front, construit pour https://$JURIX_DOMAINE"
+# L'identifiant Google est fige dans le front a la construction. Sans
+# JURIX_GOOGLE_CLIENT_ID ici, il est repris du .env de la VM : sinon chaque
+# mise a jour faite sans la variable retirait la connexion Google, en silence.
+GOOGLE_ID=${JURIX_GOOGLE_CLIENT_ID:-$("${SSH[@]}" "$CIBLE" \
+    "grep -E '^GOOGLE_CLIENT_ID=' $DISTANT/.env 2>/dev/null | tail -1 | cut -d= -f2-" || true)}
+echo "Connexion Google : $([ -n "$GOOGLE_ID" ] && echo activee || echo absente)"
 ( cd "$FRONT" && VITE_API_URL="https://$JURIX_DOMAINE" \
-    VITE_GOOGLE_CLIENT_ID="${JURIX_GOOGLE_CLIENT_ID:-}" npm run build >/dev/null )
+    VITE_GOOGLE_CLIENT_ID="$GOOGLE_ID" npm run build >/dev/null )
 "${RSYNC[@]}" --delete "$FRONT/build/" "$CIBLE:$DISTANT/front/"
 
 if [ "$AVEC_DONNEES" = "--avec-donnees" ]; then

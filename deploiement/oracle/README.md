@@ -92,16 +92,28 @@ deploiement/oracle/deployer.sh ubuntu@$IP --avec-donnees
 ```
 
 Prérequis sur la machine de développement : le dépôt du front à côté de celui-ci
-(ou `JURIX_FRONT`), sur la branche du site statique, avec ses `node_modules` ; le
-conteneur `jurix-pg` démarré ; le modèle dans `~/modeles` (ou `JURIX_MODELE`).
-Pour la connexion Google, `JURIX_GOOGLE_CLIENT_ID` (il est figé dans le front).
+(ou `JURIX_FRONT`), avec ses `node_modules` ; le conteneur `jurix-pg` démarré ;
+le modèle dans `~/modeles` (ou `JURIX_MODELE`).
+
+Connexion Google (facultative) : `GOOGLE_CLIENT_ID` dans le `.env` de la VM
+(`deployer.sh` le reprend pour construire le front), et, dans la console Google
+Cloud, `https://jurix.exemple.cm` ajouté aux **origines JavaScript autorisées**
+de cet identifiant. Sans cela, le bouton Google échoue.
 
 La base de la VM est restaurée depuis un dump de `jurix_dev`, **seulement si
 elle ne contient aucune loi**, et **sans les comptes ni les conversations** de
-développement : le corpus seulement. Le compte administrateur de `.env` est
-créé ensuite. `demarrer.sh` refuse de démarrer si un secret du `.env` est vide
-ou recopié de l'exemple, et l'API refuse une `SECRET_KEY` de moins de 32
-caractères. Le certificat HTTPS est obtenu dès que le DNS pointe sur la VM.
+développement : le corpus seulement. Une fois restauré, le dump est renommé
+`initial.restaure_….dump` : aucune mise à jour ne pourra plus le rejouer. Une
+restauration interrompue est reprise de zéro à la relance. Le compte
+administrateur de `.env` est créé ensuite ; si un compte ordinaire existe déjà
+à cette adresse, `create_admin.py` refuse de le promouvoir sans `--promouvoir`.
+`demarrer.sh` refuse de démarrer si un secret du `.env` est vide ou recopié de
+l'exemple, et l'API refuse une `SECRET_KEY` de moins de 32 caractères.
+
+Le certificat HTTPS est demandé dès que Caddy démarre. Si le DNS ne pointait
+pas encore sur la VM, Caddy réessaie de lui-même, à intervalles croissants
+(jusqu'à plusieurs heures) : une fois le DNS en place, `docker compose restart
+caddy` relance la demande tout de suite.
 
 Vérifier : `https://jurix.exemple.cm` et `https://jurix.exemple.cm/health`.
 
@@ -112,13 +124,16 @@ JURIX_DOMAINE=jurix.exemple.cm deploiement/oracle/deployer.sh ubuntu@$IP
 ```
 
 Envoie l'état **commité** du backend (`git archive` : jamais un `.env` local),
-reconstruit le front, et relance avec `docker compose up -d --build`. Les
-données de la VM (base, PDF, sauvegardes, `.env`) ne sont pas touchées.
+et efface sur la VM les fichiers retirés du dépôt. Reconstruit le front, fait
+une sauvegarde de la base, puis relance avec `docker compose up -d --build` (les
+migrations s'appliquent au démarrage de l'API). Les données de la VM (base,
+PDF, sauvegardes, `.env`) ne sont pas touchées.
 
 ## 6. Sauvegardes
 
-Chaque nuit à 03:15, `sauvegarde.sh` écrit `sauvegardes/jurix_AAAAMMJJ_HHMM.dump`,
-gardé 14 jours. À la main :
+Chaque nuit à 03:15, et avant chaque mise à jour, `sauvegarde.sh` écrit
+`sauvegardes/jurix_AAAAMMJJ_HHMM.dump`, gardé 14 jours. Rien ne prévient d'un
+échec : jeter un œil de temps en temps à `sauvegardes/sauvegarde.log`. À la main :
 
 ```bash
 bash sauvegarde.sh
@@ -155,5 +170,7 @@ free -h ; df -h                      # mémoire et disque
 - **Déménager** : tout est dans Docker. Sur la nouvelle machine : y copier le
   dossier `jurix/` entier (le code et ce dossier, avec `.env`, `modeles/`,
   `donnees/`), placer la dernière sauvegarde sous `sauvegardes/initial.dump`,
-  lancer `installer.sh`, puis `bash demarrer.sh` : la base, vide, est restaurée
-  avant le démarrage de l'API. Enfin, faire pointer le DNS sur la nouvelle IP.
+  lancer `installer.sh`, **se reconnecter** (le groupe `docker` ne vaut que
+  pour une nouvelle session), puis `bash demarrer.sh` : la base, vide, est
+  restaurée avant le démarrage de l'API. Enfin, faire pointer le DNS sur la
+  nouvelle IP.

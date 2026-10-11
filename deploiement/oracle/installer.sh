@@ -7,8 +7,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 echo "== 1. Docker et Docker Compose (depots Ubuntu)"
-sudo apt-get update -q
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
+# Sur une VM qui vient de demarrer, les mises a jour automatiques tiennent le
+# verrou de dpkg plusieurs minutes : apt-get echouait aussitot. Il attend.
+apt=(sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600)
+"${apt[@]}" update -q
+"${apt[@]}" install -y -q \
     docker.io docker-compose-v2 iptables-persistent rsync
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER"
