@@ -58,6 +58,12 @@ class User(Base):
     # Profile
     full_name = Column(String(255), nullable=True)
 
+    # Le profil choisi a l'entree du site (app/core/personas.py), garde pour
+    # suivre l'utilisateur d'un appareil a l'autre. NULL : aucun choix
+    # enregistre ; un refus de repondre n'est jamais stocke. La contrainte
+    # `ck_users_persona_connu` (migration 015) n'admet que les quatre profils.
+    persona = Column(String(50), nullable=True)
+
     # Authorization
     role = Column(
         String(50),

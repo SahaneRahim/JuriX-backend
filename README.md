@@ -189,7 +189,24 @@ JWT porteur, trois rôles : `user`, `admin`, `superadmin`.
 | `POST /api/v1/auth/google` | Connexion par Google Identity Services |
 | `POST /api/v1/auth/login` | Formulaire OAuth2 (utilisé par `/docs`) |
 | `POST /api/v1/auth/login/json` | JSON (utilisé par le front) |
-| `GET /api/v1/auth/me` | Compte associé au jeton |
+| `GET /api/v1/auth/me` | Compte associé au jeton, profil (`persona`) compris |
+| `PATCH /api/v1/auth/me` | Le profil du compte, seul champ modifiable en libre-service |
+
+**Le profil du compte** (`users.persona`, migration 015) suit l'utilisateur
+d'un appareil à l'autre. `PATCH /auth/me` accepte exactement
+`{"persona": "avocat"}` (casse et accents tolérés) ou `{"persona": null}`
+pour l'effacer ; tout autre champ, et `general`, répondent 422. Un refus de
+répondre n'est jamais enregistré sur le compte : il vaut pour la visite. Le
+profil n'entre pas dans le JWT, qui resterait périmé jusqu'à 30 jours.
+
+Règles côté front :
+- à la connexion, un profil enregistré sur le compte l'emporte ; un compte
+  sans profil n'hérite pas de celui choisi dans le navigateur avant la
+  connexion (la question sera reposée) ;
+- au démarrage, connecté : un envoi en attente est renvoyé ; sinon le compte
+  fait foi, `null` compris ;
+- un changement explicite s'écrit dans le navigateur, puis sur le compte ;
+- la déconnexion efface le profil du navigateur (appareil partagé).
 
 Les écritures, les endpoints d'administration, l'OCR et l'upload exigent un
 rôle administrateur. L'inscription publique, elle, écrit `role: "user"` côté

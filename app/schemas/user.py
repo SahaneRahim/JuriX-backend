@@ -12,6 +12,8 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from app.core.personas import normaliser_persona
+
 # ==================== Base Schemas ====================
 
 
@@ -102,6 +104,9 @@ class UserResponse(UserBase):
     is_verified: bool
     created_at: datetime
     last_login_at: Optional[datetime] = None
+    # Ici et pas dans UserBase : UserCreate en heriterait, et la creation par
+    # un administrateur l'ignorerait sans rien dire. null : aucun profil.
+    persona: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -174,6 +179,31 @@ class GoogleAuthRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     credential: str = Field(..., min_length=100, max_length=4096)
+
+
+class MiseAJourDuCompte(BaseModel):
+    """
+    Ce qu'un utilisateur peut changer lui-meme sur son compte : son profil.
+
+    N'HERITE PAS DE `UserUpdate`, pour la meme raison que `SignupRequest` :
+    `UserUpdate` porte `email`, `password`, `is_active` et `role`. Le
+    reutiliser pour une route en libre-service aurait laisse n'importe quel
+    compte se donner le role superadmin. `extra="forbid"` fait de tout autre
+    champ un 422 plutot qu'un silence.
+
+    `persona` : l'un des quatre profils (casse et accents toleres), ou null
+    pour effacer. « general » est refuse : un refus de repondre ne s'enregistre
+    jamais sur le compte. Un corps vide ne change rien.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    persona: Optional[str] = Field(None, description="citoyen, avocat, entrepreneur, étudiant, ou null")
+
+    @field_validator("persona", mode="before")
+    @classmethod
+    def valider_persona(cls, v: object) -> Optional[str]:
+        return None if v is None else normaliser_persona(v)
 
 
 # ==================== Courriel : verification et reinitialisation ====================

@@ -80,6 +80,7 @@ from app.schemas.user import (
     DemandeReinitialisation,
     GoogleAuthRequest,
     MessageReponse,
+    MiseAJourDuCompte,
     ReinitialisationMotDePasse,
     SignupRequest,
     UserLogin,
@@ -379,6 +380,30 @@ async def connexion_google(
 @router.get("/me", response_model=UserResponse, status_code=status.HTTP_200_OK)
 async def read_me(current_user: User = Depends(get_current_active_user)) -> User:
     """Renvoie l'utilisateur associé au jeton fourni."""
+    return current_user
+
+
+@router.patch("/me", response_model=UserResponse, status_code=status.HTTP_200_OK)
+async def update_me(
+    payload: MiseAJourDuCompte,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> User:
+    """
+    Le profil (persona) du compte, en libre-service : seul champ modifiable.
+
+    `{"persona": "avocat"}` l'enregistre, `{"persona": null}` l'efface, `{}` ne
+    change rien. Tout autre champ : 422 (voir MiseAJourDuCompte). Le profil
+    n'entre pas dans le JWT, qui resterait perime jusqu'a 30 jours ; le front
+    le relit par GET /auth/me.
+    """
+    changements = payload.model_dump(exclude_unset=True)
+    if "persona" in changements:
+        current_user.persona = changements["persona"]
+        await db.commit()
+        await db.refresh(current_user)
+        # L'identifiant seulement : un profil est une donnee personnelle.
+        logger.info("👤 Profil du compte %s mis a jour", current_user.id)
     return current_user
 
 
