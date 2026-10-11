@@ -21,6 +21,7 @@ from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.personas import PERSONAS
 from app.models.conversation import (
     Conversation,
     Message,
@@ -88,7 +89,9 @@ class PersonaService:
         await service.add_message_feedback(msg_id, helpful=True, rating=5)
     """
 
-    VALID_PERSONAS = ["citoyen", "avocat", "entrepreneur", "étudiant"]
+    # La liste unique, dans app/core/personas.py : elle etait recopiee ici, dans
+    # le validateur du chat et dans les cles des prompts.
+    VALID_PERSONAS = list(PERSONAS)
 
     # Persona metadata
     PERSONA_INFO = {
