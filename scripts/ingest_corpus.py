@@ -79,6 +79,9 @@ _TYPES = (
     ("instruction", "instruction"),
     ("constitution", "loi"),
     ("loi", "loi"),
+    # En DERNIER : la recherche dans tout le titre suit cet ordre, et
+    # « Decret portant ratification de l'Acte uniforme… » reste un decret.
+    ("acte uniforme", "acte uniforme"),
 )
 
 # Statuts que l'ingestion reprend. Une loi 'archived' ou 'draft' a ete mise
@@ -256,8 +259,8 @@ def _canoniques(documents: List[Document]) -> Dict[str, Optional[Document]]:
 
 def _noter_doublon(document: Document, canonique: Document) -> None:
     """La ligne du doublon existe, 'refused', et dit pourquoi : visible, jamais indexee."""
-    reference = f"PRC-{document.doc_id}"
-    raison = f"Meme PDF que PRC-{canonique.doc_id} : non indexe en double."
+    reference = document.cote
+    raison = f"Meme PDF que {canonique.cote} : non indexe en double."
     if _numero_acte(document.titre) != _numero_acte(canonique.titre):
         raison += " Numeros d'acte differents : l'un des deux titres est faux, a verifier."
     with SyncSessionLocal() as session:
@@ -301,7 +304,7 @@ def _preparer_loi(document: Document, stockage: Path, force: bool) -> Optional[D
     Returns:
         {"law_id", "file_id"}, ou None si la loi n'est pas a (re)traiter.
     """
-    reference = f"PRC-{document.doc_id}"
+    reference = document.cote
     with SyncSessionLocal() as session:
         loi = session.query(Law).filter(Law.reference == reference).first()
         if loi and loi.status not in _A_REPRENDRE and not force:
@@ -393,8 +396,8 @@ def indexer(
                 resultat = traiter(loi["law_id"], loi["file_id"], extraction_cache_seulement=True)
                 bilan["publies"] += 1
                 logger.info(
-                    "[%s/%s] PRC-%s publie : %s articles, %s vecteurs",
-                    position, len(documents), document.doc_id,
+                    "[%s/%s] %s publie : %s articles, %s vecteurs",
+                    position, len(documents), document.cote,
                     resultat.get("articles_count", 0), resultat.get("embeddings_generated", 0),
                 )
                 break
@@ -409,7 +412,7 @@ def indexer(
                 # dans processing_error : la prochaine execution la reprendra.
                 bilan["echecs"] += 1
                 logger.error(
-                    "[%s/%s] PRC-%s ECHEC : %s", position, len(documents), document.doc_id, exc
+                    "[%s/%s] %s ECHEC : %s", position, len(documents), document.cote, exc
                 )
                 break
 

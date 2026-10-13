@@ -30,7 +30,7 @@ from app.services.docling_extraction import (
 )
 from app.services.legal_domain_classifier import ADMINISTRATIF
 from scripts import extraire_corpus, ingest_corpus
-from scripts.extraire_corpus import Document, superviser
+from scripts.extraire_corpus import Document, charger_corpus, superviser
 
 # ==================== DOUBLURES ====================
 
@@ -339,6 +339,38 @@ def embeddings_doubles(monkeypatch):
 
 class TestIndexation:
 
+    def test_un_texte_venu_d_ailleurs_garde_sa_reference(
+        self, sync_db_session, tmp_path, stockage, extraction_en_cache, embeddings_doubles
+    ):
+        """Un Acte uniforme OHADA ne pretend pas venir de prc.cm : pas de « PRC- »."""
+        ext = _extracteur(extraction_en_cache)
+        chemin = _pdf(tmp_path / "aua.pdf", 2)
+        doc = Document(
+            doc_id="OHADA-AUA-2017", chemin=str(chemin), sha256=sha256_fichier(chemin), pages=2,
+            titre="Acte uniforme relatif au droit de l'arbitrage du 23 novembre 2017",
+            reference="OHADA-AUA-2017",
+        )
+        ext.extraire(Path(doc.chemin))
+
+        assert ingest_corpus.indexer([doc], ext, stockage)["publies"] == 1
+        loi = sync_db_session.query(Law).filter(Law.reference == "OHADA-AUA-2017").one()
+        assert loi.type == "acte uniforme"
+        assert loi.publication_date == date(2017, 11, 23)
+        assert sync_db_session.query(Law).filter(Law.reference.like("PRC-%")).count() == 0
+
+    def test_l_index_peut_donner_la_reference(self, tmp_path):
+        chemin = _pdf(tmp_path / "x.pdf", 1)
+        index = tmp_path / "index.json"
+        index.write_text(json.dumps([
+            {"doc_id": "1", "path": str(chemin), "title": "t", "sha256": sha256_fichier(chemin)},
+            {"doc_id": "LOI-1992-007", "path": str(chemin), "title": "t",
+             "sha256": sha256_fichier(chemin), "reference": "LOI-1992-007"},
+        ]), encoding="utf-8")
+
+        cotes = [d.cote for d in charger_corpus(index, tmp_path / "suivi")]
+
+        assert cotes == ["PRC-1", "LOI-1992-007"]
+
     def test_document_non_extrait_reste_en_attente(self, sync_db_session, tmp_path, stockage):
         ext = _extracteur(tmp_path / "cache")
         doc = _document(_pdf(tmp_path / "d.pdf", 2), pages=2)
@@ -437,6 +469,13 @@ class TestMetadonnees:
         ("Arrête N° 0632 du 22 juillet 2016 portant nomination", "arrêté"),
         ("Accord de Paris sur les Changements Climatiques", "autre"),
         ("Mémorandum d'Entente à l'issue du Sommet des Chefs d'Etat", "autre"),
+        # Corpus complementaire : OHADA, traites, lois-cadres
+        ("Acte uniforme révisé relatif au droit des sociétés commerciales et du GIE "
+         "du 30 janvier 2014", "acte uniforme"),
+        ("Décret N°2020/001 portant ratification de l'Acte uniforme relatif à la médiation",
+         "décret"),
+        ("Traité relatif à l'harmonisation du droit des affaires en Afrique", "autre"),
+        ("Loi-cadre N°2011/012 du 06 mai 2011 portant protection du consommateur", "loi"),
     ])
     def test_type_lu_sur_le_premier_mot(self, titre, attendu):
         assert ingest_corpus._infer_type(titre) == attendu
@@ -458,6 +497,9 @@ class TestMetadonnees:
         ("arrête_n_0 453_cab_pr_du_05.06.2024", date(2024, 6, 5)),
         ("Décret N°2018/148 portant modification du Décret N°2014/308 du 14 aout 2014",
          date(2018, 1, 1)),
+        ("Loi N°69/LF/18 du 10 novembre 1969 instituant un régime d'assurance de pensions",
+         date(1969, 11, 10)),
+        ("Acte uniforme relatif au droit de l'arbitrage du 23 novembre 2017", date(2017, 11, 23)),
     ])
     def test_date_de_signature(self, titre, attendu):
         assert ingest_corpus._infer_date(titre) == attendu

@@ -79,6 +79,15 @@ class Document:
     titre: str
     sha256: str
     pages: int
+    # Reference en base. Vide : `PRC-{doc_id}`, la cote des documents de
+    # prc.cm. Un texte venu d'ailleurs (Actes uniformes OHADA, Code CIMA,
+    # lois retrouvees hors du site) porte la sienne, sans pretendre venir de
+    # la Presidence.
+    reference: str = ""
+
+    @property
+    def cote(self) -> str:
+        return self.reference or f"PRC-{self.doc_id}"
 
 
 # ==================== CORPUS ====================
@@ -110,7 +119,7 @@ def charger_corpus(index: Path, dossier: Path) -> List[Document]:
             cache_pages[sha] = compter_pages(chemin)
         documents.append(Document(
             doc_id=str(e["doc_id"]), chemin=str(chemin), titre=e.get("title", ""),
-            sha256=sha, pages=cache_pages[sha],
+            sha256=sha, pages=cache_pages[sha], reference=e.get("reference", ""),
         ))
 
     dossier.mkdir(parents=True, exist_ok=True)
