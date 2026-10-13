@@ -500,6 +500,9 @@ class TestMetadonnees:
         ("Loi N°69/LF/18 du 10 novembre 1969 instituant un régime d'assurance de pensions",
          date(1969, 11, 10)),
         ("Acte uniforme relatif au droit de l'arbitrage du 23 novembre 2017", date(2017, 11, 23)),
+        # Le numero d'un texte MODIFICATIF, apres l'objet, ne donne pas l'annee
+        ("Décret N°94/199 du 07 octobre 1994 portant Statut Général de la Fonction Publique, "
+         "modifié et complété par le décret n°2000/287 du 12 octobre 2000", date(1994, 10, 7)),
     ])
     def test_date_de_signature(self, titre, attendu):
         assert ingest_corpus._infer_date(titre) == attendu

@@ -169,8 +169,13 @@ def _infer_date(title: str):
         except ValueError:
             return None
 
+    # Le numero de l'acte lui-meme, AVANT son objet : « Decret N°94/199 du 07
+    # octobre 1994 portant…, modifie par le decret n°2000/287 » prenait 2000,
+    # l'annee du texte modificatif, et rejetait la vraie date comme trop loin.
+    objet = _DEBUT_OBJET.search(title)
+    tete = title[:objet.start()] if objet else title
     numero = re.search(
-        r"n\s*[°ºo]?\s*(?:\d{1,2}[./-])?((?:19|20)\d{2})\s*/", title, re.IGNORECASE
+        r"n\s*[°ºo]?\s*(?:\d{1,2}[./-])?((?:19|20)\d{2})\s*/", tete, re.IGNORECASE
     )
     annee_numero = int(numero.group(1)) if numero else None
 
@@ -210,8 +215,6 @@ def _infer_date(title: str):
                 return trouvee
         return None
 
-    objet = _DEBUT_OBJET.search(title)
-    tete = title[:objet.start()] if objet else title
     trouvee = _chercher(tete, avec_du=False) or _chercher(title, avec_du=True)
     if trouvee:
         return trouvee
