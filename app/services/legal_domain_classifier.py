@@ -133,9 +133,13 @@ VERSION_DES_CONSIGNES = "2026-10-07"
 LONGUEUR_EXTRAIT = 500
 
 # Jetons de sortie : un verdict en coute une trentaine ; la marge couvre la
-# reflexion que gpt-oss ne permet pas de couper tout a fait.
+# reflexion que gpt-oss ne permet pas de couper tout a fait. Elle etait de
+# 400 : le 2026-10-14, un lot de 40 titres est revenu coupe deux fois
+# (« max_completion_tokens atteint »), redemande en deux lots de 20 coupes
+# eux aussi, et chaque essai brulait le quota du jour sans un verdict. Couper
+# le lot ne sert a rien quand c'est la reflexion, pas les verdicts, qui deborde.
 _JETONS_PAR_VERDICT = 45
-_JETONS_DE_MARGE = 400
+_JETONS_DE_MARGE = 1000
 
 
 class ClassementIndisponible(Exception):
