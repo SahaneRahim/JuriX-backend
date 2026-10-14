@@ -6,9 +6,10 @@ Provides utilities for building context strings and formatting conversation hist
 """
 
 import logging
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from app.core.personas import PROFIL_GENERAL, normaliser_profil
+from app.services.textes_successifs import abreger_les_repetitions, lignes_en_deux
 from app.utils.chunk_refiner import est_pseudo_numero
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,22 @@ LANGUAGE_INSTRUCTION = {
 # modele finissait parfois par une liste brute (« l'article 33 de la Loi
 # N°2023/014 portant Code Minier l'article 34 de la Loi... »), affichee telle
 # quelle, alors que l'interface montre deja les sources sous la reponse.
+#
+# TEXTES SUCCESSIFS. Chaque extrait porte sa date et, s'il a ete touche par un
+# texte plus recent, une ligne de statut qui dit ce qui en decoule (voir
+# textes_successifs). La regle demande de suivre ces lignes, et dit ce que la
+# date ne departage pas : « le plus recent l'emporte », applique a deux textes
+# DIFFERENTS, ferait citer le Code de justice militaire (2017) contre le Code
+# penal (2016) pour une agression sexuelle commise par un civil. Dans son
+# champ, un texte special n'ecarte le texte general que sur ce qu'il regle
+# autrement : le Code de justice militaire renvoie au Code de procedure penale.
+#
+# ESSAYE ET RETIRE (mesure a l'aveugle du 2026-10-14, 4 tirages par
+# question) : « si la question dit a qui elle s'applique, reponds selon ce
+# seul regime ». A la question sur un militaire, le modele ne repondait plus
+# qu'avec l'article 49 du Code de justice militaire (harcelement) et
+# reservait le Code penal aux faits « hors service », l'inverse du droit :
+# note 2,50 sur 5 avec la regle actuelle, 1,88 avec celle-la.
 
 _FORME_FR = """
 
@@ -61,6 +78,12 @@ Citer tes sources est obligatoire, et la FORME de la citation ne se négocie pas
 - Ces citations sont relues par le programme pour construire les liens vers les textes. Une autre formulation ne casse rien, mais fait disparaître les sources sous ta réponse.
 - Place chaque citation DANS la phrase qu'elle appuie. Ne termine jamais par une liste de références : les sources sont déjà affichées sous ta réponse.
 - Même entre parenthèses ou dans une liste, écris la formule entière : « (l'article 15 du Décret N°2019/143) », jamais « (art. 15) ».
+
+Textes successifs : chaque extrait porte la date de son texte, et parfois des lignes « Statut » ou « Ce texte … » qui disent si un texte plus récent l'a modifié, complété, abrogé ou remplacé, et ce qui en découle.
+- Suis ces lignes. Ne présente jamais comme en vigueur ce qu'elles disent abrogé ou remplacé, et quand une règle a changé, dis-le en nommant le texte qui la change.
+- Entre deux versions d'un même texte, ou entre un texte et la loi qui le modifie, la plus récente l'emporte. Une date « non indiquée » ne départage rien.
+- Entre deux textes différents sur un même sujet, la date ne départage rien. Un texte spécial — Code de justice militaire, loi sur le terrorisme, statut d'une profession — ne s'applique qu'aux personnes et aux faits qu'il vise lui-même, et n'écarte le texte général que sur les points qu'il règle autrement. Pour tout le reste, le texte général s'applique : Code pénal, Code de procédure pénale, Code du travail.
+- Si la question ne permet pas de savoir quel champ s'applique, présente les deux régimes en disant à qui chacun s'applique.
 
 N'invente jamais un numéro d'article, un intitulé de loi, ni une obligation absente des documents fournis. Si l'information n'y est pas, dis-le en une phrase."""
 
@@ -81,6 +104,12 @@ Citing your sources is mandatory, and the FORM of the citation is not negotiable
 - Put each citation INSIDE the sentence it supports. Never end with a list of references: the sources are already displayed under your answer.
 - Even in parentheses or in a list, write the whole formula: "(Article 15 of Decree No. 2019/143)", never "(art. 15)".
 
+Successive texts: each extract carries the date of its text ("Date du texte"), and sometimes "Statut" or "Ce texte …" lines (in French) saying whether a more recent text has modified, supplemented, repealed or replaced it, and what follows from that.
+- Follow these lines. Never present as in force what they say is repealed or replaced, and when a rule has changed, say so and name the text that changes it.
+- Between two versions of the same text, or between a text and the law that amends it, the more recent one prevails. A date marked "non indiquée" decides nothing.
+- Between two different texts on the same subject, the date decides nothing. A special text — the Code of Military Justice, the anti-terrorism law, the statute of a profession — applies only to the persons and acts it covers itself, and sets aside the general text only on the points it regulates differently. For everything else, the general text applies: the Penal Code, the Criminal Procedure Code, the Labour Code.
+- If the question does not show which scope applies, set out both regimes and say to whom each applies.
+
 Never invent an article number, a statute title, or an obligation absent from the supplied documents. If the information is not there, say so in one sentence."""
 
 
@@ -93,9 +122,10 @@ Never invent an article number, a statute title, or an obligation absent from th
 # l'interlocuteur, ce qu'il attend, et comment lui repondre : vocabulaire,
 # profondeur, ordre, ce qu'on met en avant, renvoi ou non vers un avocat.
 #
-# Le bloc _FORME_FR / _FORME_EN, partage, ne change pas : longueur, grammaire
-# de citation relue par CITATION_REGEX, singulier, interdiction d'inventer.
-# tests/test_services/test_prompts.py le verifie pour chaque profil.
+# Le bloc _FORME_FR / _FORME_EN est le meme pour tous les profils : longueur,
+# grammaire de citation relue par CITATION_REGEX, singulier, textes
+# successifs, interdiction d'inventer. tests/test_services/test_prompts.py le
+# verifie pour chaque profil.
 #
 # PROFIL_GENERAL est celui d'un utilisateur qui n'a pas dit qui il est : il ne
 # presume rien de son lecteur.
@@ -285,12 +315,32 @@ def _truncate_on_boundary(content: str, limit: int) -> str:
     return window.rstrip() + CONTEXT_TRUNCATION_MARK
 
 
-def format_chunk_block(chunk, index: int) -> str:
+def _date_du_texte(chunk) -> str:
+    """
+    La date, pour departager deux versions d'un meme texte.
+
+    Un 1er janvier que l'intitule ne mentionne pas est une date de remplissage
+    (« Décret N°2024/193 juin 10 », date en base 2024-01-01) : seule l'annee
+    est sure.
+    """
+    jour = chunk.publication_date
+    if not jour:
+        return "Date du texte : non indiquée"
+    if (jour.day, jour.month) == (1, 1) and "janvier" not in (chunk.law_title or "").lower():
+        return f"Date du texte : {jour.year} (jour non indiqué)"
+    return f"Date du texte : {jour:%d/%m/%Y}"
+
+
+def format_chunk_block(chunk, index: int, deja_vues: Optional[Dict[str, int]] = None) -> str:
     """
     Formate un chunk (un article) en un bloc de contexte.
 
     L'en-tete porte tout ce qui permet une citation exacte : reference de la
-    loi, numero d'article, titre, section et page.
+    loi, numero d'article, titre, section et page. Il porte aussi la date du
+    texte et, quand un texte plus recent l'a touche, son statut : le modele
+    citait l'ancienne version d'un article reecrit depuis (voir
+    textes_successifs). `deja_vues` (ligne -> numero du bloc) abrege une
+    ligne de statut deja donnee sous un bloc precedent.
     """
     header = f"[{index}] {chunk.reference} — {chunk.law_title}"
 
@@ -317,8 +367,15 @@ def format_chunk_block(chunk, index: int) -> str:
         meta.append(f"Page {chunk.page_number}")
     if chunk.category_name:
         meta.append(chunk.category_name)
+    meta.append(_date_du_texte(chunk))
     meta.append(f"Pertinence : {chunk.relevance_score:.2f}")
     lines.append("   |   ".join(meta))
+
+    statuts = lignes_en_deux(chunk.reference, chunk.number, chunk.content, chunk.section)
+    if deja_vues is None:
+        lines.extend(str(ligne) for ligne in statuts)
+    else:
+        lines.extend(abreger_les_repetitions(statuts, deja_vues, index))
 
     return "\n".join(lines)
 
@@ -343,6 +400,7 @@ def build_context_string(chunks: List) -> str:
     used = 0
     dropped = 0
     languages = set()
+    statuts_vus: Dict[str, int] = {}
 
     for index, chunk in enumerate(chunks, 1):
         content = chunk.content or chunk.excerpt or ""
@@ -355,7 +413,7 @@ def build_context_string(chunks: List) -> str:
                 break
             content = _truncate_on_boundary(content, remaining)
 
-        blocks.append(f"{format_chunk_block(chunk, index)}\n\n{content}")
+        blocks.append(f"{format_chunk_block(chunk, index, statuts_vus)}\n\n{content}")
         used += len(content)
         if chunk.language:
             languages.add(chunk.language)

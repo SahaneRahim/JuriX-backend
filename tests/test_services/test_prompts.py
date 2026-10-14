@@ -209,6 +209,43 @@ def test_aucun_profil_ne_pousse_a_inventer(langue, persona):
         assert incitation not in prompt
 
 
+# ==================== TEXTES SUCCESSIFS ====================
+
+@pytest.mark.parametrize("langue,persona", TOUS_LES_PERSONAS)
+def test_une_version_recente_l_emporte_sur_l_ancienne(langue, persona):
+    """
+    Les extraits portent leur date et leur statut (textes_successifs). Sans
+    la regle, le modele cite l'article tel qu'il etait avant d'etre reecrit.
+    """
+    attendu = (
+        "la plus récente l'emporte" if langue == "fr"
+        else "the more recent one prevails"
+    )
+
+    assert attendu in SYSTEM_PROMPTS[langue][persona]
+
+
+@pytest.mark.parametrize("langue,persona", TOUS_LES_PERSONAS)
+def test_la_date_ne_departage_pas_deux_textes_differents(langue, persona):
+    """
+    « Le plus recent l'emporte », applique a deux textes DIFFERENTS, ferait
+    citer le Code de justice militaire (2017) contre le Code penal (2016)
+    pour une agression sexuelle commise par un civil. Et dans son champ, le
+    texte special n'ecarte le general que sur ce qu'il regle autrement : le
+    Code de justice militaire renvoie lui-meme au Code de procedure penale.
+    """
+    attendus = (
+        ("la date ne départage rien", "Code de justice militaire", "le texte général s'applique",
+         "n'écarte le texte général que sur les points qu'il règle autrement")
+        if langue == "fr"
+        else ("the date decides nothing", "Code of Military Justice", "the general text applies",
+              "sets aside the general text only on the points it regulates differently")
+    )
+
+    for attendu in attendus:
+        assert attendu in SYSTEM_PROMPTS[langue][persona]
+
+
 # ==================== PROMPTS CONVERSATIONNELS ====================
 
 @pytest.mark.parametrize("langue,intention", TOUTES_LES_INTENTIONS)
