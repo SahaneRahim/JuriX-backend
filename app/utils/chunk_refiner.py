@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 # ~800 tokens. Au-dela on coupe aux alineas (1), (2), (3)...
 TARGET_MAX_CHARS = 3000
+# Debut du chapeau d'un article coupe, repete devant chacun de ses morceaux.
+LONGUEUR_CHAPEAU_REPETE = 200
 # En-deca, un chunk isole n'est pas repondable seul
 MIN_CHARS = 120
 # Seuil d'un VRAI article : « Article 4.- Le decret n° 2001/041 est abroge. »
@@ -859,6 +861,20 @@ def _split_long_article(
         head = parts[0] if not _DEBUT_ALINEA.match(parts[0]) else ""
         body = parts[1:] if head else parts
 
+    # Le chapeau est repete devant chaque morceau, TRONQUE a 200 caracteres. Un
+    # chapeau plus long n'existait donc nulle part en entier : tout ce qui
+    # depassait etait perdu. Loi 2010/012 : les articles 69 a 74 al. 2, colles
+    # sur une ligne par l'OCR avant le premier alinea « (3) », reduits a
+    # « …celui qui accede san ». Un chapeau long ouvre desormais le premier
+    # morceau EN ENTIER (aux paragraphes s'il depasse lui-meme la taille
+    # cible), et seul son debut est repete devant les morceaux suivants.
+    chapeau_long = len(head) > LONGUEUR_CHAPEAU_REPETE
+    if chapeau_long:
+        tete = [p.strip() for p in re.split(r"\n\s*\n", head) if p.strip()]
+        if len(head) <= target_max_chars or len(tete) < 2:
+            tete = [head]
+        body = tete + body
+
     # Regroupement glouton jusqu'a la taille cible : pas de morceau minuscule
     # a chaque alinea court, pas de morceau geant non plus.
     morceaux: List[str] = []
@@ -871,11 +887,14 @@ def _split_long_article(
     # Le chapeau est repete en tete de chaque morceau pour qu'il reste citable
     # seul, mais tronque : colle entier au premier, un long chapeau faisait un
     # premier morceau a peine plus petit que l'article.
-    prefix = (head[:200].strip() + "\n") if head else ""
+    prefix = (head[:LONGUEUR_CHAPEAU_REPETE].strip() + "\n") if head else ""
     out: List[Dict[str, Any]] = []
     for i, morceau in enumerate(morceaux):
         piece = dict(chunk)
-        piece["content"] = (prefix + morceau).strip()
+        # Le premier morceau commence par le chapeau long lui-meme : le
+        # repeter devant lui le doublerait.
+        tete_du_morceau = "" if (chapeau_long and i == 0) else prefix
+        piece["content"] = (tete_du_morceau + morceau).strip()
         piece["number"] = f"{chunk['number']}.{i + 1}"
         piece["parent_id"] = str(chunk["number"])
         piece["char_count"] = len(piece["content"])

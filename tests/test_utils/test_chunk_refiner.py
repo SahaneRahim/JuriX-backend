@@ -618,6 +618,44 @@ class TestTaillesDocling:
         tout = "\n".join(c["content"] for c in r.chunks)
         assert all(f"terme{i} :" in tout for i in range(40))
 
+    def test_un_chapeau_long_n_est_jamais_tronque(self, contexte):
+        """
+        Loi 2010/012 : les articles 69 a 74 al. 2, colles sur une ligne par
+        l'OCR, formaient le chapeau d'un « article 69 » coupe aux alineas
+        (3), (4)... de l'article 74. Le chapeau n'etait garde qu'en prefixe
+        de 200 caracteres : le reste disparaissait de la base.
+        """
+        chapeau = " ".join(
+            f"Article {n}.- Est puni d'une amende celui qui commet l'infraction numero {n} "
+            "dans un systeme d'information, sans droit et en violation des mesures de securite."
+            for n in range(69, 75)
+        )
+        alineas = "\n".join(
+            f"({i}) Est puni de la peine numero {i}, " + "texte de l'alinea assez long. " * 30
+            for i in range(3, 8)
+        )
+        r = refine([chunk("69", chapeau + "\n" + alineas)], contexte)
+
+        tout = "\n".join(c["content"] for c in r.chunks)
+        for n in range(69, 75):
+            assert f"l'infraction numero {n}" in tout, f"article {n} perdu"
+        assert r.chunks[0]["content"].startswith("Article 69.-")
+        # Le chapeau entier n'est PAS repete : seul son debut l'est.
+        assert tout.count("l'infraction numero 74") == 1
+
+    @pytest.mark.parametrize("chapeau_mots", [5, 60, 400, 900])
+    def test_aucun_mot_ne_se_perd_a_la_coupe(self, contexte, chapeau_mots):
+        """Quelle que soit la longueur du chapeau, chaque mot de l'article reste en base."""
+        chapeau = " ".join(f"chapeau{i}" for i in range(chapeau_mots))
+        alineas = "\n".join(
+            f"({i}) " + " ".join(f"alinea{i}mot{j}" for j in range(120)) for i in range(1, 9)
+        )
+        contenu = chapeau + "\n" + alineas
+        r = refine([chunk("12", contenu)], contexte)
+
+        mots_sortie = set(" ".join(c["content"] for c in r.chunks).split())
+        assert set(contenu.split()) <= mots_sortie
+
     def test_alineas_courts_regroupes(self, contexte):
         contenu = "Le conseil :\n" + "\n".join(f"({i}) délibère sur le point {i} ;" for i in range(1, 9))
         contenu += "\n" + "Texte complémentaire. " * 150
