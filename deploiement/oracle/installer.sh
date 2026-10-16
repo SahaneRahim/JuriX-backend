@@ -46,8 +46,9 @@ fi
 
 echo "== 4. Dossiers des donnees"
 # Avant tout `docker compose up` : sinon Docker cree les dossiers montes, en
-# root, et les envois echouent ensuite sur un refus d'acces.
-mkdir -p donnees/uploads sauvegardes front
+# root, et les envois echouent ensuite sur un refus d'acces. front-node/
+# recoit le front construit par deployer.sh.
+mkdir -p donnees/uploads sauvegardes front-node
 # L'API tourne sous l'utilisateur 1000 dans son conteneur : elle doit pouvoir
 # ecrire les PDF envoyes.
 sudo chown -R 1000:1000 donnees

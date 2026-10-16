@@ -1,18 +1,30 @@
 # JuriX en production sur UNE machine : une VM ARM d'Oracle Cloud (palier
 # « Always Free » : 2 coeurs, 12 Go de memoire, 200 Go de disque).
 #
-# Trois conteneurs :
+# Quatre conteneurs :
 #   db     PostgreSQL 16 + pgvector. Aucun port publie : seule l'API le voit.
 #   api    l'image du Dockerfile du depot (FastAPI). Les embeddings viennent
 #          de l'API Voyage AI, en HTTPS sortant : aucun modele en memoire.
-#   caddy  le seul expose (80 et 443) : certificats HTTPS automatiques, front
-#          statique, et l'API sous /api sur le MEME domaine (pas de CORS).
+#   front  le serveur Node du front (SvelteKit, adapter-node) : pages rendues
+#          par le serveur, et fichiers du build. deployer.sh l'envoie dans
+#          front-node/.
+#   caddy  le seul expose (80 et 443) : certificats HTTPS automatiques, l'API
+#          sous /api et le front pour tout le reste, sur le MEME domaine (pas
+#          de CORS).
 #
 # Lancement, depuis ce dossier :
 #   docker compose up -d --build
 # Voir README.md pour le premier deploiement et les mises a jour.
 
 name: jurix
+
+# Le pilote json-file de Docker ne fait tourner aucun journal par defaut :
+# chacun grossirait jusqu'a remplir le disque. 3 x 10 Mo par conteneur.
+x-journaux: &journaux
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 services:
   db:
@@ -48,7 +60,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+    # A l'arret, PostgreSQL ecrit un dernier point de controle, qui peut
+    # depasser les 10 s que Docker accorde avant de le tuer ; tue, il rejoue
+    # son journal au demarrage suivant.
+    stop_grace_period: 1m
     mem_limit: 4g
+    logging: *journaux
 
   api:
     build:
@@ -90,6 +107,70 @@ services:
       # Migrations au demarrage, puis sonde de Voyage.
       start_period: 120s
     mem_limit: 5g
+    logging: *journaux
+
+  front:
+    # Le build COPIE dans l'image, et non monte : deployer.sh remplace
+    # front-node/ pendant que le conteneur en place tourne encore, et un
+    # montage lui changerait ses fichiers en pleine marche. Ni npm ni
+    # node_modules : adapter-node integre au build les devDependencies, et
+    # deployer.sh refuse des "dependencies", qu'il laisserait en import
+    # externe. package.json ne sert que pour son "type": "module".
+    build:
+      context: ./front-node
+      dockerfile_inline: |
+        FROM node:24.21.0-alpine
+        WORKDIR /app
+        COPY package.json ./
+        COPY build ./build
+        USER node
+        CMD ["node", "build"]
+    restart: unless-stopped
+    # Pas d'env_file : le .env porte les secrets de l'API, et le rendu
+    # serveur, qui lit tout son environnement ($env/dynamic/private), n'en a
+    # besoin d'aucun.
+    environment:
+      # L'origine publique : le serveur en tire l'URL de chaque requete (liens
+      # canoniques) et l'annonce a l'API, dont ALLOWED_ORIGINS vient du meme
+      # domaine. VITE_API_URL, figee au build, doit le designer aussi : sinon
+      # les pages s'affichent, mais le navigateur envoie ses appels a l'API
+      # (recherche, connexion, chat) ailleurs. deployer.sh et demarrer.sh le
+      # verifient.
+      ORIGIN: https://${JURIX_DOMAINE}
+      # Le rendu serveur appelle l'API par le reseau interne, au lieu de
+      # ressortir par l'IP publique et de revenir par Caddy
+      # (src/hooks.server.ts du front).
+      API_INTERNE: http://api:8000
+      # Caddy garde ses connexions vers le front 2 min sans activite, Node 5 s
+      # par defaut : Caddy pourrait reutiliser une connexion que Node ferme au
+      # meme instant, et le visiteur recevrait une 502. Node les garde donc
+      # plus longtemps ; HEADERS_TIMEOUT doit depasser KEEP_ALIVE_TIMEOUT.
+      KEEP_ALIVE_TIMEOUT: "125"
+      HEADERS_TIMEOUT: "126"
+      # Les requetes en cours finissent a l'arret, dans les 10 s que Docker
+      # accorde avant de tuer le conteneur.
+      SHUTDOWN_TIMEOUT: "8"
+      # Le tas de V8 plafonne sous mem_limit : Node ramasse ses dechets avant
+      # que le noyau ne tue le conteneur.
+      NODE_OPTIONS: --max-old-space-size=256
+      PORT: "3000"
+      HOST: 0.0.0.0
+    expose:
+      - "3000"
+    # Sans attendre que l'API soit prete : sans elle, le front rend ses pages
+    # en 503, et demarrer.sh attend l'API puis controle le rendu.
+    depends_on:
+      - api
+    healthcheck:
+      # Un fichier du build, et non une page : une panne de l'API ne doit pas
+      # faire passer le front pour malade. 127.0.0.1 et non localhost, qui
+      # peut se resoudre en ::1, ou Node n'ecoute pas.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/favicon.svg"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: 384m
+    logging: *journaux
 
   caddy:
     image: caddy:2
@@ -102,14 +183,16 @@ services:
       JURIX_DOMAINE: ${JURIX_DOMAINE:?renseigner JURIX_DOMAINE dans .env}
     volumes:
       # Le DOSSIER, pas le fichier : un fichier monte seul garde l'ancienne
-      # version quand une mise a jour le remplace.
+      # version quand une mise a jour le remplace. Il porte aussi
+      # maintenance.html, la page servie quand le front ou l'API ne repond pas.
       - ./caddy:/etc/caddy:ro
-      - ./front:/srv/front:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
       - api
+      - front
     mem_limit: 256m
+    logging: *journaux
 
 volumes:
   db:

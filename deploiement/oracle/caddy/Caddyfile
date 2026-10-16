@@ -2,6 +2,18 @@
 # Caddy obtient et renouvelle seul le certificat HTTPS (Let's Encrypt) des que
 # le DNS du domaine pointe sur la VM et que les ports 80 et 443 sont ouverts.
 
+# En-tetes de securite, importes deux fois : avec -Server, le bloc est differe,
+# applique quand la route normale ecrit sa reponse. Une erreur part par
+# handle_errors, qui ne passe pas par lui : la page d'attente les perdait.
+(securite) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
+
 {$JURIX_DOMAINE} {
 	encode zstd gzip
 
@@ -23,34 +35,32 @@
 		reverse_proxy api:8000
 	}
 
-	# Les fichiers construits du front. Ceux de /_app/immutable portent leur
-	# empreinte dans leur nom : en cache un an. Un fichier absent repond 404, et
-	# non index.html : apres une mise a jour, un onglet ouvert qui reclamait un
-	# ancien morceau recevait du HTML a la place du JavaScript.
-	handle /_app/* {
-		root * /srv/front
-		header /_app/immutable/* Cache-Control "public, max-age=31536000, immutable"
-		file_server
-	}
-
-	# Le reste de l'application monopage : toute route inconnue rend
-	# index.html, sans quoi un lien profond (/laws/123) repondrait 404.
-	# no-cache : le navigateur revalide index.html a chaque visite. Sans
-	# en-tete, il le gardait selon son heuristique et, apres une mise a jour,
-	# reclamait des morceaux supprimes : page blanche.
+	# Tout le reste : le serveur Node du front, qui rend les pages et sert les
+	# fichiers du build (deja compresses, et /_app/immutable en cache un an :
+	# rien a ajouter ici). Pendant qu'il redemarre (mise a jour), Caddy retente
+	# la connexion jusqu'a 10 s au lieu de repondre aussitot 502.
 	handle {
-		root * /srv/front
-		header Cache-Control "no-cache"
-		try_files {path} {path}/ /index.html
-		file_server
+		reverse_proxy front:3000 {
+			lb_try_duration 10s
+		}
 	}
 
-	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		X-Content-Type-Options "nosniff"
-		Referrer-Policy "strict-origin-when-cross-origin"
-		-Server
+	# Front ou API injoignable (conteneur arrete, ou qui redemarre) : une page
+	# d'attente en 503, et non une 502 vide. Seules les erreurs levees par Caddy
+	# arrivent ici : une reponse du front, meme un 503 qu'il rend lui-meme
+	# quand l'API ne repond pas, passe telle quelle.
+	handle_errors 502 503 504 {
+		import securite
+		root * /etc/caddy
+		rewrite * /maintenance.html
+		header Retry-After 30
+		header Cache-Control no-store
+		file_server {
+			status 503
+		}
 	}
+
+	import securite
 
 	# Pas de journal d'acces : il ecrirait les URL entieres, dont le jeton
 	# d'administration du WebSocket (?token=...) et les liens de
