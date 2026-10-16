@@ -35,7 +35,12 @@ from app.schemas.search import (
     SearchResult,
 )
 from app.services.article_reference import parse_reference
-from app.services.embedding_service import EmbeddingService, get_embedding_service
+from app.services.embedding_service import (
+    EmbeddingDefinitiveError,
+    EmbeddingService,
+    get_embedding_service,
+    suivi_semantique,
+)
 from app.services.postgres_search_service import (
     _make_cache_key,
     apply_trigram_threshold,
@@ -60,7 +65,6 @@ logger = logging.getLogger(__name__)
 
 _embedding_service_instance: Optional[EmbeddingService] = None
 _singletons_initialized: bool = False
-
 
 def _init_global_singletons() -> None:
     """
@@ -89,21 +93,25 @@ def _init_global_singletons() -> None:
 
 def precharger_les_embeddings() -> bool:
     """
-    Construit le service d'embeddings et charge son modele. Appele au demarrage.
+    Construit le service d'embeddings et sonde son fournisseur. Appele au
+    demarrage.
 
-    Une installation incomplete — modele absent, fichier tronque, dependance
-    manquante — ne se revelait qu'a la premiere question : la recherche
-    hybride avalait l'erreur et repondait en plein texte seul, sans rien
-    signaler. Ici l'echec est journalise au demarrage, et GET /search/health
-    repond « degraded ».
+    Une configuration fausse — cle absente ou refusee, modele ou dimension
+    inconnus — ne se revelait qu'a la premiere question : la recherche hybride
+    avalait l'erreur et repondait en plein texte seul, sans rien signaler. Ici
+    l'echec est journalise au demarrage, et GET /search/health le montre.
 
-    Un service qui echoue a son prechauffage est ECARTE (None). Garde, il
-    retenterait de charger 300 Mo a chaque question, pour echouer pareil.
+    Deux sortes d'echec, deux suites :
+    - DEFINITIF (cle refusee, requete invalide, construction impossible) : le
+      service est ECARTE (None). Garde, il echouerait pareil a chaque question.
+    - PASSAGER (reseau ou DNS pas encore prets au redemarrage de la machine,
+      5xx, 429) : le service est GARDE. L'ecarter couperait la recherche
+      semantique jusqu'au prochain redemarrage, pour une panne d'une minute.
 
     Synchrone, et bloquant : a lancer hors de la boucle d'evenements.
 
     Returns:
-        True si la recherche semantique est operationnelle.
+        True si la sonde a reussi.
     """
     global _embedding_service_instance
 
@@ -118,15 +126,24 @@ def precharger_les_embeddings() -> bool:
 
     try:
         service.prechauffer()
-    except Exception as e:
+    except EmbeddingDefinitiveError as e:
         logger.error(
-            f"❌ Prechauffage du modele d'embeddings en echec, recherche "
-            f"semantique coupee : {e}"
+            f"❌ Fournisseur d'embeddings refuse, recherche semantique coupee : {e}"
         )
+        suivi_semantique.noter_sonde(e)
         _embedding_service_instance = None
         return False
+    except Exception as e:
+        logger.warning(
+            f"⚠️ Sonde du fournisseur d'embeddings en echec, sans doute passager ; "
+            f"service garde, chaque question retentera : {e}"
+        )
+        # GET /search/health reste « degraded » jusqu'au premier appel reussi.
+        suivi_semantique.noter_sonde(e)
+        return False
 
-    logger.info("✅ Modele d'embeddings pret")
+    suivi_semantique.noter_sonde(None)
+    logger.info("✅ Fournisseur d'embeddings pret")
     return True
 
 
@@ -221,6 +238,12 @@ class SearchService:
         self.db = db
         self.use_cache = use_cache
         self.embedding_service = _embedding_service_instance
+        # Vrai quand le volet semantique de la DERNIERE recherche hybride a
+        # echoue (fournisseur lent ou en panne) et qu'elle a repondu par le
+        # plein texte seul. Une telle reponse n'est pas mise en cache. Un
+        # SearchService sert une requete, et ses recherches se suivent : un
+        # attribut d'instance suffit.
+        self.semantique_degradee = False
 
         logger.debug(f"SearchService ready (cache={use_cache}, pg_fts=True)")
 
@@ -278,7 +301,7 @@ class SearchService:
         if self.use_cache:
             cache_key = _make_cache_key(
                 request.query, request.filters, request.limit, request.offset,
-                request.mode,
+                request.mode, request.semantic_query,
             )
             # Le cache est une optimisation, pas une dependance : si query_cache
             # est absente ou injoignable, on doit degrader, pas renvoyer 500.
@@ -302,6 +325,7 @@ class SearchService:
                 )
                 return cached_response
 
+        self.semantique_degradee = False
         chunks = await self._execute_search_by_mode(request)
 
         # Re-ranking AVANT la construction de la reponse, donc avant la
@@ -318,8 +342,10 @@ class SearchService:
             self.db, request.query, request.mode, response.total, elapsed_ms, cached=False,
         )
 
-        # Store in PostgreSQL cache
-        if self.use_cache:
+        # Store in PostgreSQL cache. Pas une reponse degradee : la panne d'une
+        # API distante est le plus souvent passagere, et la reponse plein texte
+        # seul serait resservie cinq minutes, au chat comme a la recherche.
+        if self.use_cache and not self.semantique_degradee:
             try:
                 await store_in_pg_cache(
                     self.db,
@@ -350,9 +376,14 @@ class SearchService:
         if request.mode == "text":
             return await self.text_chunks(request.query, request.filters, budget, 0)
         elif request.mode == "semantic":
-            return await self.semantic_chunks(request.query, request.filters, budget, 0)
+            return await self.semantic_chunks(
+                request.semantic_query or request.query, request.filters, budget, 0
+            )
         elif request.mode == "hybrid":
-            return await self.hybrid_chunks(request.query, request.filters, budget, 0)
+            return await self.hybrid_chunks(
+                request.query, request.filters, budget, 0,
+                texte_semantique=request.semantic_query,
+            )
         else:
             raise ValueError(f"Mode invalide: {request.mode}")
 
@@ -526,7 +557,7 @@ class SearchService:
         Enonce de la recherche semantique, en DEUX etages.
 
         Etage 1, dans la sous-requete : parcours de l'index HNSW pose sur la
-        colonne (`embedding vector_cosine_ops`), qui fournit `candidates`
+        colonne (`embedding halfvec_cosine_ops`), qui fournit `candidates`
         lignes munies de leur distance cosinus.
 
         Etage 2, a l'exterieur : tri STRICT de ces candidats, puis limit et
@@ -552,19 +583,22 @@ class SearchService:
           que le planificateur ne rattache a aucun index.
         - La distance est projetee DANS la sous-requete. Calculee a
           l'exterieur, la sous-requete devrait remonter articles.embedding,
-          soit 3 Ko par candidat traversant le plan.
+          soit 2 Ko par candidat traversant le plan.
+        - La colonne n'est JAMAIS castee : l'index porte sur elle, et
+          `embedding::vector` ou un CAST le rendraient inutilisable. La
+          question est liee en HALFVEC, le type de la colonne.
         - L'offset ne s'applique qu'a l'exterieur : le poser a l'interieur
           jetterait les meilleurs candidats avant le tri.
 
         Extrait dans une methode pour qu'un test puisse le compiler sans base.
         """
-        from pgvector.sqlalchemy import Vector
+        from pgvector.sqlalchemy import HALFVEC
         from sqlalchemy import literal, literal_column
 
         dim = EmbeddingService.EMBEDDING_DIM
         candidates = self._ann_candidates(limit)
 
-        distance = Article.embedding.cosine_distance(literal(query_vector, Vector(dim)))
+        distance = Article.embedding.cosine_distance(literal(query_vector, HALFVEC(dim)))
 
         inner = (
             select(
@@ -618,9 +652,13 @@ class SearchService:
         SET LOCAL exige une transaction ouverte — l'AsyncSession en ouvre une au
         premier execute — et ne vaut que jusqu'a la fin de celle-ci.
         """
+        # Chaque reglage dans son propre SAVEPOINT : un refus du serveur
+        # (pgvector 0.7 ne connait pas iterative_scan) avorterait sinon la
+        # transaction, et la requete vectorielle qui suit echouerait avec elle.
         ef_search = int(min(max(40, candidates), 1000))
         try:
-            await self.db.execute(text(f"SET LOCAL hnsw.ef_search = {ef_search}"))
+            async with self.db.begin_nested():
+                await self.db.execute(text(f"SET LOCAL hnsw.ef_search = {ef_search}"))
         except Exception as err:
             logger.debug(f"hnsw.ef_search indisponible: {err}")
 
@@ -628,9 +666,10 @@ class SearchService:
             # Sous filtre, PostgreSQL elague APRES le parcours du graphe et peut
             # rendre moins de lignes que demande. iterative_scan rescanne.
             try:
-                await self.db.execute(
-                    text("SET LOCAL hnsw.iterative_scan = 'relaxed_order'")
-                )
+                async with self.db.begin_nested():
+                    await self.db.execute(
+                        text("SET LOCAL hnsw.iterative_scan = 'relaxed_order'")
+                    )
             except Exception as err:
                 logger.debug(f"hnsw.iterative_scan indisponible: {err}")
 
@@ -669,24 +708,46 @@ class SearchService:
             if self.embedding_service is None:
                 logger.warning("⚠️ Semantic search unavailable: EmbeddingService not loaded")
                 return []
+            # Un texte blanc ne se vectorise pas : ce n'est ni une panne du
+            # fournisseur ni une raison de degrader la sante publique, que
+            # n'importe qui pourrait sinon faire basculer.
+            if not query.strip():
+                return []
 
             # TASK_QUERY et non TASK_DOCUMENT : encoder une question comme un
             # document degrade la pertinence en recherche asymetrique.
-            # Version async : le client Gemini est synchrone et gelait la boucle
-            # d'evenements pour tout l'aller-retour reseau.
+            # Version async : le fournisseur est synchrone et gelerait la
+            # boucle d'evenements pour tout l'aller-retour reseau. Elle borne
+            # aussi l'attente (delai du fournisseur plus une seconde) : au-dela,
+            # l'erreur leve VectorSearchError, et l'hybride repond par le plein
+            # texte seul.
             query_embedding = await self.embedding_service.generate_embedding_async(
                 query, task_type=self.embedding_service.TASK_QUERY
             )
+        except Exception as e:
+            # L'echec du fournisseur est deja compte par le service
+            # d'embeddings (suivi_semantique).
+            logger.error(f"❌ Semantic search failed: {e}")
+            raise VectorSearchError(f"Échec recherche sémantique: {e}") from e
+
+        try:
             # Liste passee en parametre lie, PAS en chaine castee : le
             # convertisseur pgvector attend une liste ou un ndarray.
             query_vector = query_embedding.tolist()
 
             candidates = self._ann_candidates(limit)
-            await self._apply_hnsw_settings(candidates, filters is not None)
-
             stmt = self._build_semantic_statement(query_vector, filters, limit, offset)
-            result = await self.db.execute(stmt)
-            rows = result.all()
+            # Dans un SAVEPOINT : une erreur SQL (vecteur d'une autre
+            # dimension pendant une bascule, index absent) avorterait sinon
+            # TOUTE la transaction de la session, partagee avec le chat.
+            # L'hybride la rattraperait, mais chaque instruction suivante
+            # echouerait : journal de recherche, cache, puis l'enregistrement
+            # des messages du chat — une erreur 500 apres une reponse deja
+            # generee. Le SAVEPOINT n'annule que lui-meme, SET LOCAL compris.
+            async with self.db.begin_nested():
+                await self._apply_hnsw_settings(candidates, filters is not None)
+                result = await self.db.execute(stmt)
+                rows = result.all()
 
             chunks = [
                 ChunkResult(
@@ -723,7 +784,10 @@ class SearchService:
             return chunks
 
         except Exception as e:
+            # Echec de la requete vectorielle (dimension, index) : compte aussi,
+            # il prive chaque question de son volet semantique.
             logger.error(f"❌ Semantic search failed: {e}")
+            suivi_semantique.noter(e)
             raise VectorSearchError(f"Échec recherche sémantique: {e}") from e
 
     async def hybrid_chunks(
@@ -732,9 +796,14 @@ class SearchService:
         filters: Optional[SearchFilters] = None,
         limit: int = 15,
         offset: int = 0,
+        texte_semantique: Optional[str] = None,
     ) -> List[ChunkResult]:
         """
         Recherche hybride au niveau article, fusion RRF (40% texte + 60% semantique).
+
+        `texte_semantique` : ce que vectorise le volet semantique, s'il differe
+        de `query` (le chat y passe la question entiere, `query` portant ses
+        mots-cles).
         """
         assert isinstance(query, str) and len(query) > 0
         assert isinstance(limit, int) and limit > 0
@@ -758,10 +827,13 @@ class SearchService:
                 text_res_list = []
 
             try:
-                sem_res_list = await self.semantic_chunks(query, filters, budget, 0)
+                sem_res_list = await self.semantic_chunks(
+                    texte_semantique or query, filters, budget, 0
+                )
             except Exception as e:
-                logger.warning(f"⚠️ Semantic search failed in hybrid: {e}")
+                logger.warning(f"⚠️ Semantic search failed in hybrid, plein texte seul : {e}")
                 sem_res_list = []
+                self.semantique_degradee = True
 
             if not text_res_list and not sem_res_list:
                 return []

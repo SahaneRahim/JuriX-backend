@@ -79,8 +79,9 @@ def mock_embedding_service():
     mock_service = MagicMock()
     mock_service.generate_embedding.return_value = _unit_vector(0)
     mock_service.generate_embedding_async = AsyncMock(return_value=_unit_vector(0))
-    mock_service.TASK_DOCUMENT = "RETRIEVAL_DOCUMENT"
-    mock_service.TASK_QUERY = "RETRIEVAL_QUERY"
+    # Lues sur le vrai service : un renommage ne passerait pas inapercu.
+    mock_service.TASK_DOCUMENT = EmbeddingService.TASK_DOCUMENT
+    mock_service.TASK_QUERY = EmbeddingService.TASK_QUERY
     mock_service.health_check.return_value = {
         "status": "healthy",
         "dimensions": EmbeddingService.EMBEDDING_DIM,
@@ -921,3 +922,175 @@ class TestSearchEntryPoint:
         """Test search with invalid mode raises error."""
         with pytest.raises(Exception):  # Pydantic validation
             SearchRequest(query="test", mode="invalid_mode")
+
+
+# ============================================================================
+# Repli du volet semantique (fournisseur distant lent ou en panne)
+# ============================================================================
+
+
+class TestRepliDuVoletSemantique:
+    """
+    Le fournisseur d'embeddings est une API distante : sa panne la plus
+    probable est passagere. La recherche hybride doit alors repondre par le
+    plein texte seul, ne pas garder cette reponse en cache, et laisser la
+    session utilisable.
+    """
+
+    @staticmethod
+    def _en_panne(mock):
+        from app.services.embedding_service import EmbeddingServiceError
+
+        mock.generate_embedding_async = AsyncMock(
+            side_effect=EmbeddingServiceError("Pas de vecteur pour la question en 4.0 s")
+        )
+
+    @pytest.mark.asyncio
+    async def test_une_panne_du_fournisseur_rend_le_plein_texte(
+        self, search_service, sample_data, mock_embedding_service
+    ):
+        self._en_panne(mock_embedding_service)
+
+        reponse = await search_service.search(
+            SearchRequest(query="responsabilité", mode="hybrid")
+        )
+
+        assert reponse.total >= 1
+        assert "semantic" not in {c.source for c in reponse.chunks}
+        assert search_service.semantique_degradee is True
+
+    @pytest.mark.asyncio
+    async def test_une_reponse_degradee_n_est_pas_mise_en_cache(
+        self, db_session, sample_data, mock_embedding_service
+    ):
+        """
+        Sinon la reponse plein texte seul serait resservie cinq minutes, au
+        chat comme a la recherche, apres une panne d'une seconde.
+        """
+        from sqlalchemy import text as sa_text
+
+        self._en_panne(mock_embedding_service)
+        service = SearchService(db_session, use_cache=True)
+        service.embedding_service = mock_embedding_service
+
+        await service.search(SearchRequest(query="responsabilité", mode="hybrid"))
+        assert (await db_session.execute(sa_text("SELECT count(*) FROM query_cache"))).scalar() == 0
+
+        # Le fournisseur revient : la reponse complete, elle, est gardee.
+        mock_embedding_service.generate_embedding_async = AsyncMock(return_value=_unit_vector(0))
+        await service.search(SearchRequest(query="responsabilité", mode="hybrid"))
+        assert service.semantique_degradee is False
+        assert (await db_session.execute(sa_text("SELECT count(*) FROM query_cache"))).scalar() == 1
+
+    @pytest.mark.asyncio
+    async def test_une_erreur_sql_du_volet_semantique_n_avorte_pas_la_session(
+        self, search_service, db_session, sample_data, mock_embedding_service
+    ):
+        """
+        Un vecteur d'une autre dimension (fenetre de bascule, ancienne API face
+        a une base migree) fait echouer la requete vectorielle. Sans SAVEPOINT,
+        toute la transaction etait avortee : journal de recherche, cache, puis
+        l'enregistrement des messages du chat echouaient a leur tour.
+        """
+        from sqlalchemy import text as sa_text
+
+        mock_embedding_service.generate_embedding_async = AsyncMock(
+            return_value=np.ones(768, dtype=np.float32) / np.sqrt(768)
+        )
+
+        reponse = await search_service.search(
+            SearchRequest(query="responsabilité", mode="hybrid")
+        )
+        assert reponse.total >= 1
+        assert search_service.semantique_degradee is True
+
+        # La session repond encore : le journal a recu sa ligne, et une
+        # seconde recherche passe.
+        evenements = (await db_session.execute(sa_text("SELECT count(*) FROM search_events"))).scalar()
+        assert evenements >= 1
+        mock_embedding_service.generate_embedding_async = AsyncMock(return_value=_unit_vector(0))
+        seconde = await search_service.search(SearchRequest(query="infractions", mode="hybrid"))
+        assert seconde.total >= 1
+        assert search_service.semantique_degradee is False
+
+    @pytest.mark.asyncio
+    async def test_le_volet_semantique_vectorise_semantic_query(
+        self, search_service, sample_data, mock_embedding_service
+    ):
+        """
+        Le chat cherche en plein texte sur les mots-cles, mais vectorise la
+        question entiere quand il la passe dans semantic_query.
+        """
+        await search_service.search(SearchRequest(
+            query="responsabilité dirigeants",
+            semantic_query="Quelle est la responsabilité des dirigeants ?",
+            mode="hybrid",
+        ))
+
+        (appel,) = mock_embedding_service.generate_embedding_async.await_args_list
+        assert appel.args[0] == "Quelle est la responsabilité des dirigeants ?"
+
+    @pytest.mark.asyncio
+    async def test_sans_semantic_query_la_requete_est_vectorisee(
+        self, search_service, sample_data, mock_embedding_service
+    ):
+        await search_service.search(SearchRequest(query="responsabilité", mode="hybrid"))
+
+        (appel,) = mock_embedding_service.generate_embedding_async.await_args_list
+        assert appel.args[0] == "responsabilité"
+
+    def test_semantic_query_fait_partie_de_la_cle(self):
+        from app.services.postgres_search_service import _make_cache_key
+
+        a = _make_cache_key("kw", None, 8, 0, "hybrid", "question A")
+        b = _make_cache_key("kw", None, 8, 0, "hybrid", "question B")
+        sans = _make_cache_key("kw", None, 8, 0, "hybrid")
+
+        assert len({a, b, sans}) == 3
+        # Le mode texte ne vectorise rien : la question n'y change pas la cle.
+        assert _make_cache_key("kw", None, 8, 0, "text", "question A") == _make_cache_key(
+            "kw", None, 8, 0, "text"
+        )
+
+
+class TestSuiviDuVoletSemantique:
+    """
+    Ce que les recherches ont vu, pour GET /search/health. L'echec du
+    fournisseur est compte par le service d'embeddings ; la recherche, elle,
+    compte l'echec de sa requete vectorielle, et jamais une requete blanche.
+    """
+
+    @pytest.mark.asyncio
+    async def test_un_echec_de_la_requete_vectorielle_est_compte(
+        self, search_service, sample_data, mock_embedding_service
+    ):
+        from app.services.embedding_service import suivi_semantique
+
+        mock_embedding_service.generate_embedding_async = AsyncMock(
+            return_value=np.ones(768, dtype=np.float32) / np.sqrt(768)
+        )
+        await search_service.search(SearchRequest(query="responsabilité", mode="hybrid"))
+
+        etat = suivi_semantique.etat()
+        assert (etat["appels"], etat["echecs"]) == (1, 1)
+
+    @pytest.mark.asyncio
+    async def test_une_requete_blanche_n_est_ni_vectorisee_ni_comptee(
+        self, search_service, sample_data, mock_embedding_service
+    ):
+        """Sinon n'importe qui ferait basculer la sante publique en « degraded »."""
+        from app.services.embedding_service import suivi_semantique
+
+        for _ in range(4):
+            assert await search_service.semantic_chunks("   ", None, 10, 0) == []
+
+        mock_embedding_service.generate_embedding_async.assert_not_awaited()
+        assert suivi_semantique.etat()["appels"] == 0
+
+
+class TestSemanticQueryBlanc:
+
+    @pytest.mark.parametrize("valeur", ["", "   ", "\n"])
+    def test_un_texte_blanc_vaut_absence(self, valeur):
+        """Vectorise, il levait une erreur 500 en mode semantique."""
+        assert SearchRequest(query="kw", semantic_query=valeur).semantic_query is None

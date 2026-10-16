@@ -2,7 +2,7 @@
 
 from typing import Literal, Optional
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 # Parametres TLS que le pilote asyncpg ne connait pas. Au niveau module et non
@@ -10,10 +10,10 @@ from pydantic_settings import BaseSettings
 # initial en ModelPrivateAttr, qui n'est pas iterable.
 _PARAMS_QUI_FUIENT = ("sslmode", "channel_binding")
 
-# Dimension de la colonne articles.embedding, `vector(768)`. La migration la
+# Dimension de la colonne articles.embedding, `halfvec(1024)`. La migration la
 # fige en dur, comme toute migration ; Article.embedding la repete, et un test
 # verifie que modele, configuration et service s'accordent.
-_DIMENSION_DU_SCHEMA = 768
+_DIMENSION_DU_SCHEMA = 1024
 
 
 class Settings(BaseSettings):
@@ -94,20 +94,23 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-3-flash-preview"
     GEMINI_EMBEDDING_MODEL: str = "models/gemini-embedding-001"
-    # Dimension des embeddings : 768, et aucune autre (validateur plus bas).
-    # C'est la sortie native d'EmbeddingGemma, et une dimension que
-    # gemini-embedding-001 produit sur demande (output_dimensionality,
-    # troncature Matryoshka que le service renormalise). Un seul schema pour
-    # les deux fournisseurs : passer de l'un a l'autre ne migre rien.
-    # Sous le plafond de 2000 du type `vector`, l'index HNSW se pose sur la
-    # colonne elle-meme (migration c4d5e6f7a8b9).
+    # Dimension des embeddings : 1024, et aucune autre (validateur plus bas).
+    # C'est la dimension par defaut de voyage-4-large (256, 512, 1024 et 2048
+    # sont permises), et une dimension que gemini-embedding-001 produit sur
+    # demande (output_dimensionality, troncature Matryoshka que le service
+    # renormalise). Un seul schema pour les deux fournisseurs : passer de l'un
+    # a l'autre ne migre rien.
+    # Stockage en halfvec (2 octets par composante, 2 Ko par article au lieu
+    # de 4) ; l'index HNSW halfvec_cosine_ops se pose sur la colonne elle-meme
+    # (migration a8b9c0d1e2f3).
     EMBEDDING_DIM: int = _DIMENSION_DU_SCHEMA
 
     # ---- Fournisseur d'embeddings (app/services/embedding_service.py) ----
-    # "gemma", le defaut : EmbeddingGemma execute EN LOCAL par onnxruntime,
-    # gratuit, sans reseau. Il exige le modele sur disque (GEMMA_MODEL_DIR) et
-    # ~1,5 Go de RAM dans le processus de l'API. Gemini ne sert plus alors
-    # qu'au chat. "gemini" : l'API payante, a 768 dimensions elle aussi.
+    # "voyage", le defaut : l'API Voyage AI (voyage-4-large), choisie par
+    # mesure le 16/10/2026 sur le jeu relu de 102 questions et tout le corpus
+    # (MRR@20 0,758 contre 0,537 pour EmbeddingGemma, en francais). Aucun
+    # modele sur disque ni en memoire : l'API ne fait que des appels HTTPS.
+    # "gemini" : l'API Gemini, a 1024 dimensions elle aussi.
     #
     # Changer de fournisseur change l'espace vectoriel : TOUT le corpus doit
     # etre re-encode (scripts/regenerate_embeddings.py --all, qui reconnait
@@ -117,38 +120,26 @@ class Settings(BaseSettings):
     #
     # PIEGE : `class Config` porte `extra = "ignore"`. Une cle mal
     # orthographiee dans .env est ignoree EN SILENCE et le defaut s'applique.
-    EMBEDDING_PROVIDER: Literal["gemini", "gemma"] = "gemma"
+    EMBEDDING_PROVIDER: Literal["voyage", "gemini"] = "voyage"
 
-    # Dossier du modele EmbeddingGemma exporte en ONNX
-    # (onnx-community/embeddinggemma-300m-ONNX). Le `.onnx` et son
-    # `.onnx_data` doivent rester DANS LE MEME DOSSIER et sous leur nom
-    # d'origine : le graphe reference ses poids par nom. Telecharger avec
-    # `hf download ... --local-dir`, jamais dans le cache Hugging Face, dont
-    # les blobs partages separent les deux fichiers — onnxruntime refuse alors
-    # le chargement (« External data path escapes model directory »).
-    GEMMA_MODEL_DIR: str = "models/embeddinggemma-300m-onnx"
-    # int8, et non q4 — MESURE, pas preference. Sur cette machine :
-    #   int8 : requete 196 ms, 1,5 Go de RAM, quasi identique au fp32 de
-    #          reference (ecart de score <= 0,005, meme classement) ;
-    #   q4   : requete 35 ms, 434 Mo, mais sur 180 articles du Code Minier et
-    #          15 questions, cosinus moyen 0,954 avec l'int8, premier resultat
-    #          DIFFERENT pour 2 questions sur 15, ~12 % du top-10 change.
-    # La fidelite prime pour un corpus juridique. q4 reste l'option mesuree
-    # d'un hebergement contraint en memoire : l'empreinte du fournisseur rend
-    # le changement sur — il declenche une regeneration, jamais un melange.
-    # Les variantes fp16 (model_fp16, model_q4f16) ne sont pas supportees.
-    GEMMA_ONNX_FILE: str = "onnx/model_quantized.onnx"
-    # Revision EPINGLEE du depot onnx-community. Un nouvel export changerait
-    # les vecteurs des requetes, mais pas ceux des documents deja stockes : les
-    # deux espaces divergeraient sans erreur. Elle entre dans l'empreinte du
-    # fournisseur, donc dans la cle de cache.
-    GEMMA_REVISION: str = "5090578d9565bb06545b4552f76e6bc2c93e4a66"
-    # Contexte du modele, <bos> et <eos> compris. Au-dela, onnxruntime leve une
-    # erreur RotaryEmbedding : la troncature est obligatoire, et journalisee.
-    GEMMA_MAX_TOKENS: int = 2048
-    # Fils de calcul d'onnxruntime. 0 = coeurs physiques moins un, pour laisser
-    # respirer la recherche pendant une ingestion.
-    GEMMA_INTRA_OP_THREADS: int = 0
+    # Cle de l'API Voyage AI. Absente, la recherche semantique est coupee
+    # (GET /search/health : embedding_service « unavailable ») et le chat
+    # repond par le plein texte seul.
+    VOYAGE_API_KEY: str = ""
+    # Modele EPINGLE. Il entre dans l'empreinte du fournisseur, donc dans la
+    # cle de cache et dans articles.embedding_model : en changer declare tous
+    # les vecteurs stockes « foreign » jusqu'a une regeneration complete.
+    VOYAGE_EMBEDDING_MODEL: str = "voyage-4-large"
+    # Delai d'un appel pour vectoriser une QUESTION, en secondes. Court : au
+    # dela, la question est servie par le plein texte seul, plutot que de
+    # faire attendre l'utilisateur. A caler par mesure depuis l'hote de
+    # production.
+    # Strictement positif : a 0, l'echeance du service disparaitrait (elle
+    # suit ce delai) alors que chaque appel echouerait.
+    VOYAGE_TIMEOUT_QUESTION_S: float = Field(3.0, gt=0)
+    # Delai d'un appel pour un lot de DOCUMENTS (ingestion, regeneration) :
+    # une requete porte jusqu'a ~90 000 jetons.
+    VOYAGE_TIMEOUT_DOCUMENT_S: float = Field(120.0, gt=0)
 
     # Delai maximal d'un appel Gemini, en SECONDES. Sans lui, le client
     # n'impose AUCUN delai : une prise reseau qui ne repond plus bloque
@@ -457,25 +448,49 @@ class Settings(BaseSettings):
             )
         return valeur
 
+    @field_validator("EMBEDDING_PROVIDER", mode="before")
+    @classmethod
+    def _fournisseur_d_embeddings(cls, v):
+        """
+        « gemma » est refuse avec la raison, plutot qu'avec l'erreur generique
+        de pydantic, illisible pour qui a garde un vieux .env.
+
+        Refuser plutot que ramener a « voyage » : les vecteurs d'EmbeddingGemma
+        (768) ne tiennent plus dans la colonne, et un .env qui le demande
+        encore est un .env d'avant la bascule, a relire en entier.
+        """
+        if not isinstance(v, str):
+            return v
+        valeur = v.strip().lower()
+        if valeur == "gemma":
+            raise ValueError(
+                "EMBEDDING_PROVIDER=gemma n'existe plus : EmbeddingGemma rend 768 "
+                f"dimensions et la colonne articles.embedding est en "
+                f"halfvec({_DIMENSION_DU_SCHEMA}). Retirez la ligne du .env (defaut "
+                "voyage, qui exige VOYAGE_API_KEY), ainsi que les GEMMA_*."
+            )
+        return valeur
+
     @field_validator("EMBEDDING_DIM")
     @classmethod
     def _exiger_la_dimension_du_schema(cls, v: int) -> int:
         """
         Refuse toute dimension autre que celle de la colonne.
 
-        Le piege vise est concret : un .env d'avant la bascule porte
-        EMBEDDING_DIM=3072, et il l'emporte sur le defaut. Sans ce refus, le
-        service demanderait des vecteurs 3072 que la colonne vector(768)
-        rejette — a la premiere ecriture pour l'ingestion, a la premiere
-        question pour la recherche, que l'hybride avale en retombant sans
-        bruit sur le plein texte. Mieux vaut ne pas demarrer.
+        Le piege vise est concret : un .env d'avant une bascule porte encore
+        EMBEDDING_DIM=768 (EmbeddingGemma) ou 3072, et il l'emporte sur le
+        defaut. Sans ce refus, le service demanderait des vecteurs que la
+        colonne halfvec(1024) rejette — a la premiere ecriture pour
+        l'ingestion, a la premiere question pour la recherche, que l'hybride
+        avale en retombant sans bruit sur le plein texte. Mieux vaut ne pas
+        demarrer.
         """
         if v != _DIMENSION_DU_SCHEMA:
             raise ValueError(
                 f"EMBEDDING_DIM={v}, or la colonne articles.embedding est en "
-                f"vector({_DIMENSION_DU_SCHEMA}) et les deux fournisseurs y sont "
+                f"halfvec({_DIMENSION_DU_SCHEMA}) et les deux fournisseurs y sont "
                 "regles. Retirez EMBEDDING_DIM du .env : un .env d'avant la "
-                "bascule porte encore 3072."
+                "bascule porte encore 768 ou 3072."
             )
         return v
 

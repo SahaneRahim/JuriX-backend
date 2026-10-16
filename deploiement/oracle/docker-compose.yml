@@ -3,7 +3,8 @@
 #
 # Trois conteneurs :
 #   db     PostgreSQL 16 + pgvector. Aucun port publie : seule l'API le voit.
-#   api    l'image du Dockerfile du depot (FastAPI, EmbeddingGemma en memoire).
+#   api    l'image du Dockerfile du depot (FastAPI). Les embeddings viennent
+#          de l'API Voyage AI, en HTTPS sortant : aucun modele en memoire.
 #   caddy  le seul expose (80 et 443) : certificats HTTPS automatiques, front
 #          statique, et l'API sous /api sur le MEME domaine (pas de CORS).
 #
@@ -15,13 +16,16 @@ name: jurix
 
 services:
   db:
-    image: pgvector/pgvector:pg16
+    # Version EPINGLEE, celle de developpement : la colonne articles.embedding
+    # est en halfvec (pgvector 0.7 au moins). Une etiquette flottante pouvait
+    # changer de version au gre d'une reconstruction.
+    image: pgvector/pgvector:0.8.6-pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: jurix
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?renseigner POSTGRES_PASSWORD dans .env}
       POSTGRES_DB: jurix
-    # Reglages pour 12 Go partages avec l'API (le modele en prend ~1,5).
+    # Reglages pour 12 Go partages avec l'API.
     command: >
       postgres
       -c shared_buffers=1GB
@@ -56,7 +60,10 @@ services:
       # La base est le conteneur voisin ; le reseau interne n'a pas de TLS.
       DATABASE_URL: postgresql+asyncpg://jurix:${POSTGRES_PASSWORD}@db:5432/jurix
       PGSSLMODE: disable
-      GEMMA_MODEL_DIR: /app/modeles/embeddinggemma-300m-onnx
+      # Fige ici, et non seulement dans .env : un .env recopie d'avant la
+      # bascule porterait encore EMBEDDING_PROVIDER=gemma, que la
+      # configuration refuse, et l'API redemarrerait en boucle.
+      EMBEDDING_PROVIDER: voyage
       # uvicorn croit les en-tetes X-Forwarded-* de Caddy. Sans cela, il se
       # croyait en HTTP : ses redirections (barre oblique finale) partaient
       # vers http://, que le navigateur bloque depuis une page HTTPS. Sans
@@ -68,8 +75,6 @@ services:
       FRONTEND_BASE_URL: https://${JURIX_DOMAINE}
       ALLOWED_ORIGINS: https://${JURIX_DOMAINE}
     volumes:
-      # Le modele n'est pas dans l'image (500 Mo) : monte en lecture seule.
-      - ./modeles/embeddinggemma-300m-onnx:/app/modeles/embeddinggemma-300m-onnx:ro
       # Les PDF d'origine (visionneuse, telechargement), et les envois futurs.
       - ./donnees/uploads:/app/data/uploads
     depends_on:
@@ -82,7 +87,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
-      # Chargement du modele et migrations au demarrage.
+      # Migrations au demarrage, puis sonde de Voyage.
       start_period: 120s
     mem_limit: 5g
 

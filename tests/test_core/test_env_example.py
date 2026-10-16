@@ -67,11 +67,12 @@ def test_les_valeurs_actives_se_chargent():
 
 
 def test_les_reglages_des_fournisseurs_sont_documentes():
-    """Chaque reglage Mistral et Groq apparait dans l'exemple, actif ou commente."""
+    """Chaque reglage Mistral, Groq et Voyage apparait dans l'exemple, actif ou commente."""
     documentees = {cle for _, _, cle, _ in _cles()}
     reglages = [
         cle for cle in Settings.model_fields
-        if cle.startswith(("MISTRAL_", "GROQ_")) or cle in ("INTENT_CLASSIFIER", "LLM_PROVIDER")
+        if cle.startswith(("MISTRAL_", "GROQ_", "VOYAGE_"))
+        or cle in ("INTENT_CLASSIFIER", "LLM_PROVIDER", "EMBEDDING_PROVIDER")
     ]
 
     assert [cle for cle in reglages if cle not in documentees] == []

@@ -6,42 +6,153 @@ interchangeable, et garde pour lui tout le reste — validation, cache
 PostgreSQL, gardes de dimension, normalisation, reprises, ordre des lots.
 
 POURQUOI CETTE SEPARATION. Le modele d'embeddings est le composant que JuriX
-changera le plus souvent : gratuit en local pour le lancement, meilleur et
-payant quand les moyens le permettront. Le changer doit etre un reglage, pas
-un chantier. Un fournisseur ne sait qu'une chose — transformer des textes en
-vecteurs — et laisse remonter ses exceptions brutes.
+changera le plus souvent : il a deja change trois fois (Gemini, EmbeddingGemma
+en local, Voyage). Le changer doit etre un reglage, pas un chantier. Un
+fournisseur ne sait qu'une chose — transformer des textes en vecteurs — et
+laisse remonter ses exceptions.
 
 Architecture:
-- Fournisseurs: EmbeddingGemma en local (defaut, GemmaProvider) ou
-  Gemini API (GeminiProvider), selon settings.EMBEDDING_PROVIDER
-- Dimensions: settings.EMBEDDING_DIM (768)
+- Fournisseurs: l'API Voyage AI (defaut, VoyageProvider) ou l'API Gemini
+  (GeminiProvider), selon settings.EMBEDDING_PROVIDER
+- Dimensions: settings.EMBEDDING_DIM (1024)
 - Cache: Table embedding_cache PostgreSQL avec TTL 7 jours (cache en base)
 
 Author: JuriX Team
-Version: 4.0.0 (fournisseurs interchangeables)
+Version: 5.0.0 (Voyage AI)
 """
 
 import asyncio
 import hashlib
-import importlib.util
 import json
 import logging
-import os
+import re
 import threading
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
-from pathlib import Path
+from functools import lru_cache, partial
 from typing import Any, Dict, List, Optional
 
+import httpx
 import numpy as np
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
 from app.core.config import settings
 from app.core.database import SyncSessionLocal
 
 logger = logging.getLogger(__name__)
+
+# Fils dedies aux QUESTIONS. Hors de l'executeur par defaut d'asyncio
+# (min(32, coeurs + 4) fils, 6 sur la VM de production), que l'ingestion
+# occupe un fil par document : un fournisseur lent, dont les appels survivent a
+# l'echeance (voir generate_embedding_async), saturerait cet executeur et
+# ferait attendre tout le reste. Ici, il ne sature que ses quatre fils, et les
+# questions suivantes retombent sur le plein texte a l'echeance.
+_EXECUTEUR_QUESTIONS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="embed-question")
+
+# Fils dedies au cache des questions (lecture, puis ecriture sans attendre).
+# Ni l'executeur par defaut, que l'ingestion peut occuper des minutes, ni les
+# fils des appels au fournisseur, qu'une panne peut bloquer : une question
+# deja vectorisee doit rester servie dans les deux cas.
+_EXECUTEUR_CACHE = ThreadPoolExecutor(max_workers=2, thread_name_prefix="embed-cache")
+
+
+def motif_court(erreur: BaseException) -> str:
+    """
+    « HTTP 429 », « delai depasse »... : jamais le message, qui peut porter le
+    detail d'un refus, voire la cle. Pour GET /search/health, route publique.
+    """
+    if isinstance(erreur, TimeoutError):
+        return "delai depasse"
+    message = str(erreur)
+    code = re.search(r"HTTP (\d{3})", message)
+    if code:
+        return f"HTTP {code.group(1)}"
+    if "Pas de vecteur pour la question" in message or "delai depasse" in message:
+        return "delai depasse"
+    if "injoignable" in message:
+        return "injoignable"
+    return type(erreur.__cause__ or erreur).__name__
+
+
+class SuiviSemantique:
+    """
+    Issue des volets semantiques recents : chaque appel au fournisseur pour une
+    question, et chaque echec de la requete vectorielle. Une question servie
+    par le cache ne compte pas : elle ne dit rien du fournisseur.
+
+    POURQUOI. La sonde du demarrage ne voit ni une cle revoquee ensuite, ni un
+    compte bride (3 requetes par minute sans moyen de paiement) : chaque
+    question retombait sur le plein texte, sans autre trace que le journal.
+    Un TAUX sur une fenetre glissante, et non des echecs consecutifs : sous un
+    bridage, succes et refus alternent ; et un etat qui ne vieillit pas
+    laisserait la sante « degraded » une nuit entiere apres une coupure d'une
+    minute.
+    """
+
+    FENETRE_S = 15 * 60
+    MINIMUM = 3
+    TAUX_DEGRADE = 0.3
+
+    def __init__(self):
+        self._evenements = deque(maxlen=200)
+        self._verrou = threading.Lock()
+        # Issue de la sonde du demarrage : (motif ou None, horodatage ISO,
+        # instant monotone). Un echec passager garde le service ; la sante le
+        # montre jusqu'au premier appel reussi qui suit.
+        self._sonde: Optional[tuple] = None
+
+    def noter_sonde(self, erreur: Optional[BaseException]) -> None:
+        from datetime import datetime, timezone
+
+        motif = None if erreur is None else motif_court(erreur)
+        quand = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._verrou:
+            self._sonde = (motif, quand, time.monotonic())
+
+    def noter(self, erreur: Optional[BaseException]) -> None:
+        from datetime import datetime, timezone
+
+        motif = None if erreur is None else motif_court(erreur)
+        quand = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._verrou:
+            self._evenements.append((time.monotonic(), motif, quand))
+
+    def vider(self) -> None:
+        with self._verrou:
+            self._evenements.clear()
+            self._sonde = None
+
+    def etat(self) -> Dict[str, Any]:
+        limite = time.monotonic() - self.FENETRE_S
+        with self._verrou:
+            tous = list(self._evenements)
+            sonde = self._sonde
+        recents = [e for e in tous if e[0] >= limite]
+        echecs = [e for e in recents if e[1] is not None]
+        dernier = echecs[-1] if echecs else None
+        # Sonde ratee au demarrage, et aucun appel reussi depuis : rien ne dit
+        # que le volet semantique fonctionne.
+        sonde_en_echec = bool(sonde and sonde[0] is not None) and not any(
+            e[1] is None and e[0] >= sonde[2] for e in tous
+        )
+        return {
+            "fenetre_min": self.FENETRE_S // 60,
+            "appels": len(recents),
+            "echecs": len(echecs),
+            "derniere_erreur": dernier[1] if dernier else None,
+            "derniere_erreur_le": dernier[2] if dernier else None,
+            "sonde_demarrage": None if sonde is None else {"erreur": sonde[0], "le": sonde[1]},
+            "degrade": sonde_en_echec or (
+                len(echecs) >= self.MINIMUM and len(echecs) / len(recents) >= self.TAUX_DEGRADE
+            ),
+        }
+
+
+suivi_semantique = SuiviSemantique()
 
 
 def _is_daily_quota_error(error: Exception) -> bool:
@@ -75,6 +186,31 @@ class EmbeddingServiceError(Exception):
     pass
 
 
+class EmbeddingDefinitiveError(EmbeddingServiceError):
+    """
+    Echec qu'un nouvel essai reproduirait : cle refusee, requete invalide,
+    tache ou dimension inconnues du fournisseur.
+
+    Jamais rejouee par le service. Sous-classe d'EmbeddingServiceError : les
+    appelants qui attrapent celle-ci (process_law, regenerate_embeddings)
+    l'attrapent aussi. Au demarrage, elle ecarte le service
+    (search_service.precharger_les_embeddings) ; une panne passagere, non.
+
+    `code` : le code HTTP du refus, None pour un refus avant tout envoi. 400
+    et 422 visent la requete (un texte), les autres la configuration (cle,
+    droits, modele) : un traitement par lots peut sauter un lot refuse, pas
+    continuer avec une cle refusee.
+    """
+
+    def __init__(self, message: str, code: Optional[int] = None):
+        super().__init__(message)
+        self.code = code
+
+    @property
+    def vise_la_configuration(self) -> bool:
+        return self.code not in (400, 422)
+
+
 # ==================== FOURNISSEURS ====================
 
 
@@ -100,7 +236,19 @@ class GeminiProvider:
     - `embed(texts, task_type, dim)` : rend EXACTEMENT un vecteur float32 par
                       texte, de longueur `dim`, normalise ou non. Le service
                       verifie le nombre et la dimension, et normalise : le
-                      fournisseur n'a pas a s'en charger.
+                      fournisseur n'a pas a s'en charger. Une erreur qu'un
+                      nouvel essai reproduirait est une
+                      EmbeddingDefinitiveError, jamais rejouee.
+
+    Membres FACULTATIFS, lus par getattr :
+
+    - `dimensions_permises` : les seules dimensions acceptees, quand le modele
+                      n'en accepte pas d'autres que celles-la (Voyage)
+    - `max_caracteres` : texte le plus long accepte (defaut :
+                      EmbeddingService.MAX_TEXT_LENGTH)
+    - `delai_question_s` : delai d'un appel pour une question ; le service en
+                      fait l'echeance dure de generate_embedding_async
+    - `prechauffer(dim)` : sonde appelee au demarrage de l'API
     """
 
     name = "gemini"
@@ -108,6 +256,9 @@ class GeminiProvider:
     native_dim = 3072
     retryable = True
     inter_batch_delay_s = 0.5
+    # La limite d'avant Voyage, gardee pour ce fournisseur : 2 048 jetons de
+    # contexte chez gemini-embedding-001.
+    max_caracteres = 10_000
 
     def __init__(self, api_key: Optional[str] = None):
         api_key = api_key or settings.GEMINI_API_KEY
@@ -143,6 +294,20 @@ class GeminiProvider:
     def embed(self, texts: List[str], task_type: str, dim: int) -> List[np.ndarray]:
         # `self.client.models` est relu a CHAQUE appel, jamais memorise a la
         # construction : un test remplace `embed_content` apres coup.
+        try:
+            return self._embed(texts, task_type, dim)
+        except genai_errors.ClientError as e:
+            # 429 se rejoue, et _is_daily_quota_error lit son message. Les
+            # autres 4xx sont definitifs ; une cle invalide arrive en 400
+            # (API_KEY_INVALID) mais vise la configuration, pas la requete.
+            if e.code == 429:
+                raise
+            cle_refusee = e.code in (401, 403) or "API_KEY_INVALID" in str(e)
+            raise EmbeddingDefinitiveError(
+                f"Gemini HTTP {e.code} : {str(e)[:200]}", code=401 if cle_refusee else e.code
+            ) from None
+
+    def _embed(self, texts: List[str], task_type: str, dim: int) -> List[np.ndarray]:
         result = self.client.models.embed_content(
             model=self.model,
             # Un texte seul part en chaine, un lot en liste : c'est la forme
@@ -156,234 +321,268 @@ class GeminiProvider:
         return [np.array(emb.values, dtype=np.float32) for emb in result.embeddings]
 
 
-GEMMA_MODEL_ID = "onnx-community/embeddinggemma-300m-ONNX"
+VOYAGE_URL = "https://api.voyageai.com/v1/embeddings"
 
-# Prefixes d'EmbeddingGemma, AU CARACTERE PRES : espace final, « none » en
-# minuscules, barres ASCII. Source : la fiche du modele. Sans eux, ou avec le
-# meme des deux cotes, le classement change sans la moindre erreur (mesure).
-# Ils entrent dans l'empreinte : les modifier change la cle de cache et la
-# provenance des vecteurs.
-#
-# Document : « title: none » et non le titre de la loi. La regle R2 de
-# app/utils/chunk_refiner.py place DEJA l'en-tete du document dans embed_text ;
-# le remettre ici le doublerait et rapprocherait tous les articles d'une meme
-# loi, au detriment du classement a l'interieur du document.
-_GEMMA_PREFIXES = {
-    "RETRIEVAL_QUERY": "task: search result | query: ",
-    "RETRIEVAL_DOCUMENT": "title: none | text: ",
-}
+# Transport HTTP des appels a Voyage. None : le reseau. Les tests y posent un
+# httpx.MockTransport (doublure, ou garde qui interdit tout appel reel). Lu a
+# CHAQUE appel, il s'applique aussi au singleton deja construit.
+transport_http: Optional[Any] = None
 
-# Session ONNX et tokenizer : charges UNE fois par processus, partages par
-# toutes les instances. process_law.py construit un EmbeddingService par loi ;
-# un chargement par instance relirait 300 Mo et 1,5 s de tokenizer a chaque
-# loi. Le dictionnaire est garde par un verrou parce que lru_cache n'est pas
-# atomique au premier appel : deux threads chargeraient chacun leur copie.
-_gemma_ressources: Dict[tuple, tuple] = {}
-_gemma_verrou_chargement = threading.Lock()
+# Taches du service traduites en input_type de Voyage. Voyage ajoute lui-meme
+# son gabarit (« Represent the query for retrieving supporting documents: »,
+# « Represent the document for retrieval: ») : aucun prefixe cote client, il
+# serait double. Un input_type absent est accepte par l'API mais encode SANS
+# gabarit, dans un espace voisin et sans erreur : d'ou le refus d'une tache
+# inconnue.
+_VOYAGE_INPUT_TYPES = {"RETRIEVAL_QUERY": "query", "RETRIEVAL_DOCUMENT": "document"}
 
-# Verrou pose sur l'encodage de DOCUMENTS seulement. Deux ingestions
-# simultanees occuperaient chacune tous les coeurs et cumuleraient leur
-# memoire ; les requetes, elles, ne doivent jamais attendre un lot entier.
-_gemma_verrou_documents = threading.Lock()
+# Codes qu'un nouvel essai reproduirait : requete, cle ou droits a corriger.
+# 429 et 5xx, eux, se rejouent apres une pause (docs.voyageai.com, error-codes).
+_VOYAGE_CODES_DEFINITIFS = frozenset({400, 401, 403, 404, 422})
 
 
-def _charger_gemma(chemin_onnx: str, chemin_tokenizer: str, max_tokens: int, threads: int):
+def empreinte_voyage(modele: str) -> str:
     """
-    Charge (ou rend) la session et le tokenizer, configures une seule fois.
+    Empreinte des vecteurs Voyage d'un modele.
 
-    Le tokenizer est configure ICI et n'est plus jamais modifie : appeler
-    enable_truncation sur un objet partage entre threads provoque des erreurs
-    « Already borrowed » intermittentes, cote Rust.
+    Fonction de module : le chargement des vecteurs precalcules
+    (scripts/regenerate_embeddings.py --depuis-lots) l'ecrit en base sans
+    construire de fournisseur, donc sans cle. Elle doit rester EXACTEMENT celle
+    du fournisseur : un seul caractere d'ecart, et les vecteurs charges passent
+    pour etrangers — /search/health en « degraded », et une regeneration
+    complete qui les recalculerait tous.
     """
-    cle = (chemin_onnx, chemin_tokenizer, max_tokens, threads)
-    with _gemma_verrou_chargement:
-        if cle not in _gemma_ressources:
-            import onnxruntime as ort
-            from tokenizers import Tokenizer
-
-            tok = Tokenizer.from_file(chemin_tokenizer)
-            # Sans troncature, un texte de plus de 2048 jetons part entier et
-            # onnxruntime leve une erreur RotaryEmbedding. tokenizer.json porte
-            # « truncation: null » : il faut l'activer soi-meme.
-            tok.enable_truncation(max_length=max_tokens)
-            # Un « <eos> » ou un « <image_soft_token> » laisse par l'OCR doit
-            # etre lu comme du TEXTE. Sinon il devient un jeton de controle :
-            # le vecteur est altere en silence, et l'id 262144 de
-            # <image_soft_token>, hors de la table d'embeddings, fait echouer
-            # le lot entier.
-            tok.encode_special_tokens = True
-
-            options = ort.SessionOptions()
-            options.intra_op_num_threads = threads
-            options.inter_op_num_threads = 1
-            session = ort.InferenceSession(
-                chemin_onnx, sess_options=options, providers=["CPUExecutionProvider"]
-            )
-            _gemma_ressources[cle] = (session, tok)
-            logger.info(f"✅ EmbeddingGemma charge ({chemin_onnx}, {threads} fils)")
-        return _gemma_ressources[cle]
+    return f"voyage|{modele}"
 
 
-def _fils_par_defaut() -> int:
-    """Coeurs physiques moins un : la recherche doit respirer pendant une ingestion."""
-    try:
-        import psutil
-
-        physiques = psutil.cpu_count(logical=False)
-    except ImportError:
-        physiques = None
-    physiques = physiques or max(1, (os.cpu_count() or 2) // 2)
-    return max(1, physiques - 1)
-
-
-class GemmaProvider:
+class VoyageProvider:
     """
-    EmbeddingGemma, execute EN LOCAL par onnxruntime. Gratuit, sans reseau.
+    Embeddings par l'API Voyage AI (voyage-4-large par defaut).
 
-    Respecte le contrat decrit sur GeminiProvider. Trois differences de nature :
-    il ne rejoue pas (un modele local qui echoue echouera pareil), il ne fait
-    pas de pause entre lots, et il charge ses ressources paresseusement — le
-    mode Gemini et les tests n'importent jamais onnxruntime.
+    Respecte le contrat decrit sur GeminiProvider. Choisi par mesure sur le
+    jeu relu de 102 questions et tout le corpus (MRR@20 0,758 contre 0,537
+    pour EmbeddingGemma en francais, 0,680 contre 0,537 en anglais).
+
+    Le corps de requete reprend celui des vecteurs du corpus
+    (data/mesure_voyage/vectoriser_voyage.py) : memes input_type, dimension
+    1024, sortie float et troncature cote serveur. En changer un seul element
+    changerait l'espace des questions sans la moindre erreur. Les deux derniers
+    sont les defauts de l'API ; ils sont envoyes quand meme, pour qu'un
+    changement de defaut chez Voyage ne change rien ici.
+
+    Aucun appel reseau a la construction : construire ne coute rien, et ne
+    depend ni du reseau ni du quota (tests, --dry-run).
     """
 
-    name = "gemma"
-    label = "EmbeddingGemma ONNX (local)"
-    model = GEMMA_MODEL_ID
-    native_dim = 768
-    retryable = False
+    name = "voyage"
+    label = "Voyage AI"
+    native_dim = 2048
+    dimensions_permises = (256, 512, 1024, 2048)
+    retryable = True
+    # Palier 1 (carte enregistree) : 2 000 requetes et 3 M jetons par minute,
+    # pour toute l'organisation. Sans carte, 3 requetes et 10 000 jetons par
+    # minute : inutilisable pour le site.
     inter_batch_delay_s = 0.0
 
-    # Budget de jetons par appel au modele (nombre de textes x longueur du plus
-    # long, une fois completes). Une tranche fixe de vingt textes de 2048
-    # jetons demanderait plusieurs Go ; un budget borne la memoire quelle que
-    # soit la longueur des articles.
-    JETONS_PAR_APPEL = 6000
+    # Une requete accepte 1 000 textes et 120 000 jetons pour voyage-4-large.
+    # Marges : 900 textes et 90 000 jetons ESTIMES a 2,6 caracteres par jeton
+    # (mesure sur le corpus : 3,1). Ce sont les reglages qui ont vectorise les
+    # 32 303 morceaux du corpus sans un refus. Un tableau de chiffres compte
+    # plus de jetons par caractere : un refus « trop de jetons » coupe alors le
+    # lot en deux (_envoyer).
+    TEXTES_PAR_REQUETE = 900
+    JETONS_PAR_REQUETE = 90_000
+    CAR_PAR_JETON = 2.6
+    # Texte le plus long accepte : 30 000 jetons estimes, la coupe appliquee
+    # aux vecteurs du corpus. Au-dela de 32 000 jetons reels, Voyage tronque
+    # lui-meme (truncation). Le plus long morceau du corpus fait 15 323
+    # caracteres.
+    max_caracteres = 78_000
 
-    def __init__(self):
-        self.dossier = Path(settings.GEMMA_MODEL_DIR)
-        self.fichier = settings.GEMMA_ONNX_FILE
-        self.revision = settings.GEMMA_REVISION
-        self.max_tokens = settings.GEMMA_MAX_TOKENS
-        self.fils = settings.GEMMA_INTRA_OP_THREADS or _fils_par_defaut()
+    # Duree de vie d'une connexion inactive, en secondes. 5 s par defaut chez
+    # httpx : entre deux questions du chat, la connexion serait presque
+    # toujours refermee, et chaque question repaierait la poignee de main.
+    CONNEXION_INACTIVE_S = 60.0
 
-        # Controles BON MARCHE, a la construction : une installation
-        # incomplete doit se voir ici, pas au premier encodage, ou la recherche
-        # hybride avalerait l'erreur et repondrait en plein texte seul.
-        manquants = [m for m in ("onnxruntime", "tokenizers") if importlib.util.find_spec(m) is None]
-        if manquants:
-            raise EmbeddingServiceError(f"Dependances absentes : {', '.join(manquants)}")
-        for relatif in (self.fichier, self.fichier + "_data", "tokenizer.json"):
-            if not (self.dossier / relatif).is_file():
-                raise EmbeddingServiceError(
-                    f"Fichier du modele introuvable : {self.dossier / relatif}. "
-                    f"GEMMA_MODEL_DIR={settings.GEMMA_MODEL_DIR}"
-                )
+    def __init__(self, api_key: Optional[str] = None):
+        # strip : un espace ou un saut de ligne recopie avec la cle rendait
+        # l'en-tete Authorization illegal.
+        cle = (api_key or settings.VOYAGE_API_KEY or "").strip()
+        if not cle:
+            raise EmbeddingServiceError("VOYAGE_API_KEY non configurée")
+        self._cle = cle
+        self.model = settings.VOYAGE_EMBEDDING_MODEL
+        # Client HTTP GARDE d'un appel a l'autre, construit au premier appel.
+        # Un client par appel rouvrait TCP et TLS a chaque question : mesure
+        # depuis le poste de developpement, 1,14 s de mediane contre 0,42 s
+        # avec une connexion reutilisee. httpx.Client se partage entre fils.
+        self._client_http: Optional[httpx.Client] = None
+        self._transport_du_client: Optional[Any] = None
+        self._verrou_client = threading.Lock()
 
     @property
     def fingerprint(self) -> str:
-        prefixes = hashlib.sha256(
-            json.dumps(_GEMMA_PREFIXES, sort_keys=True).encode("utf-8")
-        ).hexdigest()[:8]
-        return (
-            f"{self.name}|{self.model}@{self.revision[:12]}|{self.fichier}"
-            f"|t{self.max_tokens}|p{prefixes}"
-        )
+        return empreinte_voyage(self.model)
+
+    @property
+    def delai_question_s(self) -> float:
+        """Delai d'un appel pour une question, relu a chaque acces."""
+        return settings.VOYAGE_TIMEOUT_QUESTION_S
 
     def embed(self, texts: List[str], task_type: str, dim: int) -> List[np.ndarray]:
-        prefixe = _GEMMA_PREFIXES.get(task_type)
-        if prefixe is None:
-            # Refuser plutot qu'ignorer : un task_type inconnu encode sans
-            # prefixe, donc dans un espace legerement different, sans erreur.
-            raise EmbeddingServiceError(f"task_type inconnu pour EmbeddingGemma : {task_type}")
-        if dim > self.native_dim:
-            raise EmbeddingServiceError(f"Dimension {dim} > {self.native_dim}, native d'EmbeddingGemma")
-
-        session, tok = self._ressources()
-
-        encodages = tok.encode_batch([prefixe + t for t in texts])
-        for i, enc in enumerate(encodages):
-            if enc.overflowing:
-                # 10 000 caracteres valent ~2 100 a 2 500 jetons : la fin des
-                # articles les plus longs disparait. La taire serait mentir.
-                logger.warning(
-                    f"✂️ Texte tronque a {self.max_tokens} jetons "
-                    f"({len(texts[i])} caracteres) : la fin n'est pas encodee"
-                )
-
-        if task_type == "RETRIEVAL_DOCUMENT":
-            with _gemma_verrou_documents:
-                vecteurs = self._encoder(session, encodages)
-        else:
-            vecteurs = self._encoder(session, encodages)
-
-        # Matryoshka : sous 768, tronquer suffit ; le service renormalise.
-        return [v[:dim].astype(np.float32) for v in vecteurs]
-
-    def prechauffer(self) -> None:
-        """
-        Charge le modele et encode une question, MAINTENANT.
-
-        Appele au demarrage de l'API. Sans lui, le chargement — 1,5 s et
-        ~1,2 Go — tombait sur la premiere question d'un utilisateur, et un
-        fichier tronque ou une version d'onnxruntime incompatible ne se
-        revelaient qu'a ce moment-la. Encoder pour de bon valide la chaine
-        entiere : session, sortie nommee, dimension.
-        """
-        vecteur = self.embed(["prechauffage"], "RETRIEVAL_QUERY", self.native_dim)[0]
-        if vecteur.shape != (self.native_dim,):
-            raise EmbeddingServiceError(
-                f"EmbeddingGemma rend {vecteur.shape}, attendu ({self.native_dim},)"
+        input_type = _VOYAGE_INPUT_TYPES.get(task_type)
+        if input_type is None:
+            raise EmbeddingDefinitiveError(f"task_type inconnu pour Voyage : {task_type}")
+        if dim not in self.dimensions_permises:
+            raise EmbeddingDefinitiveError(
+                f"Dimension {dim} refusee par Voyage (permises : {self.dimensions_permises})"
             )
 
-    def _ressources(self):
-        return _charger_gemma(
-            str(self.dossier / self.fichier),
-            str(self.dossier / "tokenizer.json"),
-            self.max_tokens,
-            self.fils,
-        )
+        # Une question attend l'utilisateur : delai court, au-dela duquel la
+        # recherche repond par le plein texte seul. Un lot de documents peut
+        # peser 90 000 jetons : delai long. La connexion, elle, est toujours
+        # courte.
+        if input_type == "query":
+            delai = settings.VOYAGE_TIMEOUT_QUESTION_S
+        else:
+            delai = settings.VOYAGE_TIMEOUT_DOCUMENT_S
+        timeout = httpx.Timeout(delai, connect=min(2.0, delai))
 
-    def _encoder(self, session, encodages) -> List[np.ndarray]:
-        """Lots par budget de jetons, tries par longueur ; ordre d'origine rendu."""
-        ordre = sorted(range(len(encodages)), key=lambda i: len(encodages[i].ids))
-        sortie: Dict[int, np.ndarray] = {}
+        client = self._client()
+        vecteurs: List[np.ndarray] = []
+        for lot in self._lots(texts):
+            vecteurs.extend(self._envoyer(client, lot, input_type, dim, timeout))
+        return vecteurs
 
-        lot: List[int] = []
-        for i in ordre + [None]:
-            if i is not None:
-                candidat = lot + [i]
-                longueur = len(encodages[i].ids)  # ordre croissant : le plus long est le dernier
-                if not lot or len(candidat) * longueur <= self.JETONS_PAR_APPEL:
-                    lot = candidat
-                    continue
-            if lot:
-                for j, v in zip(lot, self._passe(session, [encodages[k] for k in lot])):
-                    sortie[j] = v
-            lot = [i] if i is not None else []
+    def fermer(self) -> None:
+        """Ferme la connexion gardee (arret de l'API, fin d'un test reel)."""
+        with self._verrou_client:
+            if self._client_http is not None:
+                self._client_http.close()
+            self._client_http = None
+            self._transport_du_client = None
 
-        return [sortie[i] for i in range(len(encodages))]
+    def _client(self) -> httpx.Client:
+        """
+        Le client garde, reconstruit si `transport_http` a change : la garde
+        reseau des tests le remplace a chaque test, et un client construit
+        avant la garde garderait l'ancien transport — le vrai reseau.
+        """
+        transport = transport_http
+        with self._verrou_client:
+            if self._client_http is None or self._transport_du_client is not transport:
+                if self._client_http is not None:
+                    self._client_http.close()
+                self._client_http = httpx.Client(
+                    transport=transport,
+                    limits=httpx.Limits(keepalive_expiry=self.CONNEXION_INACTIVE_S),
+                )
+                self._transport_du_client = transport
+            return self._client_http
 
-    @staticmethod
-    def _passe(session, encodages) -> np.ndarray:
-        """Un appel au modele. Complete A DROITE, par id 0 et masque 0."""
-        longueur = max(len(e.ids) for e in encodages)
-        ids = np.zeros((len(encodages), longueur), dtype=np.int64)
-        masque = np.zeros((len(encodages), longueur), dtype=np.int64)
-        for r, e in enumerate(encodages):
-            ids[r, : len(e.ids)] = e.ids
-            masque[r, : len(e.ids)] = e.attention_mask
-        # PAR NOM, jamais par position : la sortie 0 est last_hidden_state, des
-        # etats PAR JETON. Les moyenner donne un vecteur de 768, de norme 1 une
-        # fois normalise, d'apparence parfaitement saine — et quasi orthogonal
-        # au vrai (cosinus 0,0188 mesure). sentence_embedding inclut les deux
-        # couches Dense et la normalisation.
-        return session.run(["sentence_embedding"], {"input_ids": ids, "attention_mask": masque})[0]
+    def prechauffer(self, dim: int) -> None:
+        """
+        Vectorise une question d'un mot (1 a 3 jetons), MAINTENANT.
+
+        Appele au demarrage de l'API : une cle refusee, un modele ou une
+        dimension inconnus se voient la, pas a la premiere question, ou la
+        recherche hybride avalerait l'erreur et repondrait en plein texte seul.
+        """
+        vecteur = self.embed(["prechauffage"], "RETRIEVAL_QUERY", dim)[0]
+        if vecteur.shape != (dim,):
+            raise EmbeddingDefinitiveError(f"Voyage rend {vecteur.shape}, attendu ({dim},)")
+
+    def _estimer(self, texte: str) -> int:
+        return int(len(texte) / self.CAR_PAR_JETON) + 1
+
+    def _lots(self, texts: List[str]):
+        """Lots d'au plus TEXTES_PAR_REQUETE textes et JETONS_PAR_REQUETE jetons estimes."""
+        lot: List[str] = []
+        jetons = 0
+        for texte in texts:
+            j = self._estimer(texte)
+            if lot and (jetons + j > self.JETONS_PAR_REQUETE or len(lot) >= self.TEXTES_PAR_REQUETE):
+                yield lot
+                lot, jetons = [], 0
+            lot.append(texte)
+            jetons += j
+        if lot:
+            yield lot
+
+    def _envoyer(
+        self, client: httpx.Client, lot: List[str], input_type: str, dim: int, timeout: httpx.Timeout,
+    ) -> List[np.ndarray]:
+        corps = {
+            "input": lot,
+            "model": self.model,
+            "input_type": input_type,
+            "output_dimension": dim,
+            "output_dtype": "float",
+            "truncation": True,
+        }
+        try:
+            r = client.post(
+                VOYAGE_URL, headers={"Authorization": f"Bearer {self._cle}"}, json=corps, timeout=timeout,
+            )
+        except httpx.HTTPError as e:
+            # Delai depasse, DNS, connexion refusee : passager, donc rejoue par
+            # le service pour un lot de documents. Cle masquee, et sans chainer
+            # l'exception d'origine : h11 recopie un en-tete refuse (cle suivie
+            # d'un espace...) dans son message, et une trace l'afficherait.
+            # Une lenteur n'est pas une panne reseau : le motif les distingue,
+            # pour qu'on releve le delai plutot que de chercher une coupure.
+            message = str(e).replace(self._cle, "***")
+            nature = "delai depasse" if isinstance(e, httpx.TimeoutException) else "injoignable"
+            raise EmbeddingServiceError(
+                f"Voyage {nature} : {type(e).__name__}: {message}"
+            ) from None
+
+        if r.status_code == 200:
+            try:
+                donnees = sorted(r.json()["data"], key=lambda e: e["index"])
+                vecteurs = [np.asarray(e["embedding"], dtype=np.float32) for e in donnees]
+            except (ValueError, KeyError, TypeError) as e:
+                raise EmbeddingServiceError(f"Réponse Voyage illisible : {type(e).__name__}") from e
+            if len(vecteurs) != len(lot):
+                raise EmbeddingServiceError(
+                    f"Réponse incomplète: {len(vecteurs)} vecteurs pour {len(lot)} textes"
+                )
+            return vecteurs
+
+        detail = self._detail(r)
+        if r.status_code == 400 and len(lot) > 1 and "token" in detail.lower():
+            # Lot plus lourd que prevu (chiffres, tableaux) : coupe en deux.
+            moitie = len(lot) // 2
+            return (
+                self._envoyer(client, lot[:moitie], input_type, dim, timeout)
+                + self._envoyer(client, lot[moitie:], input_type, dim, timeout)
+            )
+        # Le code HTTP figure dans le message : regenerate_embeddings ne
+        # reattend un lot que s'il y lit « 429 ».
+        message = f"Voyage HTTP {r.status_code} : {detail}"
+        if r.status_code in _VOYAGE_CODES_DEFINITIFS:
+            raise EmbeddingDefinitiveError(message, code=r.status_code)
+        raise EmbeddingServiceError(message)
+
+    def _detail(self, r: httpx.Response) -> str:
+        """Motif d'un refus, court, et jamais porteur de la cle."""
+        try:
+            corps = r.json()
+            detail = str(corps.get("detail") or "") if isinstance(corps, dict) else ""
+        except ValueError:
+            detail = ""
+        # Masquer AVANT de couper : coupee d'abord, une cle a cheval sur la
+        # limite laissait passer son debut.
+        return (detail or r.text or "").replace(self._cle, "***")[:200]
 
 
 def _construire_fournisseur(api_key: Optional[str] = None):
-    """Fournisseur par defaut, selon settings.EMBEDDING_PROVIDER."""
-    if settings.EMBEDDING_PROVIDER == "gemma":
-        return GemmaProvider()
+    """
+    Fournisseur par defaut, selon settings.EMBEDDING_PROVIDER. `api_key` est
+    la cle du fournisseur configure.
+    """
+    if settings.EMBEDDING_PROVIDER == "voyage":
+        return VoyageProvider(api_key=api_key)
     return GeminiProvider(api_key=api_key)
 
 
@@ -391,9 +590,9 @@ class EmbeddingService:
     """
     Service de génération d'embeddings vectoriels pour recherche sémantique.
 
-    Delegue la production des vecteurs a un fournisseur (voir GeminiProvider),
-    avec cache PostgreSQL (table embedding_cache). Supporte FR/EN,
-    normalisation L2 inconditionnelle.
+    Delegue la production des vecteurs a un fournisseur (contrat decrit sur
+    GeminiProvider), avec cache PostgreSQL (table embedding_cache). Supporte
+    FR/EN, normalisation L2 inconditionnelle.
 
     Dimension : settings.EMBEDDING_DIM, demandee au fournisseur a CHAQUE appel
     et jamais figee en lui — scripts/eval/validate_slicing.py change la
@@ -421,13 +620,20 @@ class EmbeddingService:
     # vie du cache, et la garde de dimension ne verrait rien.
     CACHE_KEY_VERSION = "v4"
     CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 jours
-    MAX_TEXT_LENGTH = 10000
+    # Texte le plus long accepte, par defaut. Un fournisseur qui declare
+    # `max_caracteres` impose le sien a l'instance (voir __init__) : lire
+    # MAX_TEXT_LENGTH sur l'instance, jamais sur la classe.
+    MAX_TEXT_LENGTH = 78_000
+    # Tentatives pour un DOCUMENT. Une question n'en fait qu'une : elle attend
+    # un utilisateur, et un echec passager ne lui coute que le volet semantique
+    # de sa recherche (repli sur le plein texte).
     MAX_RETRIES = 3
     RETRY_DELAY = 1  # seconds
 
-    # Types de tâche Gemini. La recherche est asymétrique : un article indexé
-    # et une question d'utilisateur ne doivent pas être encodés de la même
-    # façon, sinon la pertinence se dégrade.
+    # Types de tâche. La recherche est asymétrique : un article indexé et une
+    # question d'utilisateur ne doivent pas être encodés de la même façon,
+    # sinon la pertinence se dégrade. Chaque fournisseur les traduit dans son
+    # vocabulaire (input_type de Voyage, task_type de Gemini).
     TASK_DOCUMENT = "RETRIEVAL_DOCUMENT"
     TASK_QUERY = "RETRIEVAL_QUERY"
 
@@ -442,7 +648,7 @@ class EmbeddingService:
 
         Args:
             use_cache: Active/désactive le cache PostgreSQL
-            api_key: Clé API Gemini (si None, utilise settings.GEMINI_API_KEY)
+            api_key: Clé du fournisseur configuré (si None, celle des settings)
             provider: Fournisseur a utiliser. None construit celui de la
                 configuration ; un test y injecte sa doublure.
 
@@ -469,6 +675,16 @@ class EmbeddingService:
                 f"EMBEDDING_DIM={self.EMBEDDING_DIM} depasse la dimension native "
                 f"de {provider.label} ({provider.native_dim})"
             )
+        # Voyage n'accepte que quelques dimensions : 768 passerait le controle
+        # ci-dessus et n'echouerait qu'au premier appel, en HTTP 400, que la
+        # recherche hybride avalerait.
+        permises = getattr(provider, "dimensions_permises", None)
+        if permises and self.EMBEDDING_DIM not in permises:
+            raise EmbeddingServiceError(
+                f"EMBEDDING_DIM={self.EMBEDDING_DIM} n'est pas une dimension de "
+                f"{provider.label} (permises : {', '.join(map(str, permises))})"
+            )
+        self.MAX_TEXT_LENGTH = getattr(provider, "max_caracteres", self.MAX_TEXT_LENGTH)
 
         # Cache PostgreSQL (connexion synchrone pour les taches de fond).
         # Le service ne POSSEDE plus de moteur : il emprunte celui de
@@ -496,14 +712,24 @@ class EmbeddingService:
         """Fournisseur de cette instance."""
         return self._provider
 
+    def fermer(self) -> None:
+        """Ferme la connexion gardee par le fournisseur, s'il en garde une."""
+        fermer = getattr(self._provider, "fermer", None)
+        if fermer is not None:
+            fermer()
+
     def prechauffer(self) -> None:
         """
-        Charge le modele local maintenant. Sans effet pour une API : un appel
-        couterait du quota pour ne rien verifier de plus que la construction.
+        Sonde le fournisseur maintenant, s'il en a une : pour Voyage, une
+        question d'un mot qui verifie la cle, le modele, la dimension et la
+        sortie reseau. Sans effet pour un fournisseur sans sonde (Gemini).
+
+        Appel direct, sans cache ni reprise : une entree en cache masquerait
+        une cle revoquee, et une reprise retarderait le demarrage.
         """
         prechauffer = getattr(self._provider, "prechauffer", None)
         if prechauffer is not None:
-            prechauffer()
+            prechauffer(self.EMBEDDING_DIM)
 
     # ==================== PUBLIC API ====================
 
@@ -514,7 +740,7 @@ class EmbeddingService:
         task_type: str = TASK_DOCUMENT,
     ) -> np.ndarray:
         """
-        Génère l'embedding pour un texte unique via Gemini API.
+        Génère l'embedding pour un texte unique, par le fournisseur.
 
         Vérifie d'abord le cache PostgreSQL, génère l'embedding si nécessaire,
         puis le stocke dans le cache pour utilisation future.
@@ -531,7 +757,7 @@ class EmbeddingService:
             Embedding numpy array de dimension (EMBEDDING_DIM,)
 
         Raises:
-            ValueError: Si texte vide ou trop long (>10000 chars)
+            ValueError: Si texte vide ou trop long (> MAX_TEXT_LENGTH)
             EmbeddingServiceError: Si génération échoue
         """
         assert isinstance(text, str), "text must be a string"
@@ -549,8 +775,27 @@ class EmbeddingService:
                 logger.debug(f"🔍 Cache HIT ({elapsed:.1f}ms): {cache_key[:20]}...")
                 return cached_embedding
 
-        # Génération par le fournisseur, avec reprises s'il en vaut la peine
-        for attempt in range(self.MAX_RETRIES):
+        embedding = self._produire(text, normalize, task_type)
+
+        # Stockage dans cache PostgreSQL
+        if self.use_cache:
+            self._store_in_pg_cache(cache_key, embedding)
+
+        elapsed = (time.time() - start_time) * 1000
+        logger.debug(f"⏱️ Embedding généré en {elapsed:.1f}ms (dim={embedding.shape[0]})")
+        return embedding
+
+    def _produire(self, text: str, normalize: bool, task_type: str) -> np.ndarray:
+        """
+        Le vecteur d'un texte deja valide, par le fournisseur : ni lecture ni
+        ecriture du cache, reprises s'il en vaut la peine.
+
+        Une question n'a droit qu'a un essai : trois essais et leurs pauses
+        (1 s puis 2 s) la feraient attendre plus de dix secondes avant le
+        repli sur le plein texte.
+        """
+        essais = 1 if task_type == self.TASK_QUERY else self.MAX_RETRIES
+        for attempt in range(essais):
             try:
                 embedding = self._provider.embed([text], task_type, self.EMBEDDING_DIM)[0]
 
@@ -559,27 +804,24 @@ class EmbeddingService:
                         f"Dimension incorrecte: {embedding.shape[0]} != {self.EMBEDDING_DIM}"
                     )
 
-                embedding = self._normalize(embedding, normalize)
+                return self._normalize(embedding, normalize)
 
-                # Stockage dans cache PostgreSQL
-                if self.use_cache:
-                    self._store_in_pg_cache(cache_key, embedding)
-
-                elapsed = (time.time() - start_time) * 1000
-                logger.debug(f"⏱️ Embedding généré en {elapsed:.1f}ms (dim={embedding.shape[0]})")
-                return embedding
-
+            except EmbeddingDefinitiveError as e:
+                # Relancee TELLE QUELLE : son type dit a l'appelant qu'il est
+                # inutile de recommencer.
+                logger.error(f"❌ Erreur définitive du fournisseur d'embeddings: {e}")
+                raise
             except Exception as e:
                 if _is_daily_quota_error(e):
                     raise QuotaExhaustedError(
                         f"Quota journalier d'embeddings epuise: {e}"
                     ) from e
 
-                if attempt < self.MAX_RETRIES - 1 and self._provider.retryable:
+                if attempt < essais - 1 and self._provider.retryable:
                     logger.warning(f"⚠️ Tentative {attempt + 1} échouée, retry: {e}")
                     time.sleep(self.RETRY_DELAY * (attempt + 1))
                 else:
-                    logger.error(f"❌ Erreur génération embedding après {self.MAX_RETRIES} tentatives: {e}")
+                    logger.error(f"❌ Erreur génération embedding après {attempt + 1} tentative(s): {e}")
                     raise EmbeddingServiceError(f"Échec génération embedding: {e}") from e
 
         # Fallback in case loop exits without returning or raising
@@ -675,7 +917,9 @@ class EmbeddingService:
         }
 
         try:
-            test_emb = self.generate_embedding("test", normalize=False)
+            # Comme une question : un essai, delai court. Sur le chemin des
+            # documents, un fournisseur muet tiendrait la sonde six minutes.
+            test_emb = self.generate_embedding("test", normalize=False, task_type=self.TASK_QUERY)
             if test_emb.shape[0] != self.EMBEDDING_DIM:
                 status_info["status"] = "degraded"
                 status_info["api_error"] = f"Dimension incorrecte: {test_emb.shape[0]}"
@@ -840,6 +1084,9 @@ class EmbeddingService:
                 logger.info(f"  ✅ Chunk {current_chunk}/{chunk_count} completed")
                 return
 
+            except EmbeddingDefinitiveError:
+                # Rejouer un refus (cle, requete) ne ferait que le repeter.
+                raise
             except Exception as e:
                 # Un quota JOURNALIER ne se recharge pas pendant la boucle :
                 # insister ne fait que perdre trois fois le delai avant
@@ -934,7 +1181,7 @@ class EmbeddingService:
         """
         Version asynchrone de generate_embedding.
 
-        Le client Gemini est synchrone, le backoff est un time.sleep et les
+        Les fournisseurs sont synchrones, le backoff est un time.sleep et les
         lectures/écritures de cache passent par psycopg2 : appelée telle quelle
         depuis une coroutine, generate_embedding gèle la boucle d'événements
         pour tout l'aller-retour réseau. Tout appel depuis du code async doit
@@ -942,8 +1189,55 @@ class EmbeddingService:
 
         task_type vaut TASK_QUERY par défaut : le seul appelant asynchrone est
         la recherche sémantique, qui encode une question.
+
+        Pour une question, si le fournisseur declare `delai_question_s`,
+        l'attente est BORNEE a ce delai plus une seconde : au-dela,
+        EmbeddingServiceError, et la recherche hybride repond par le plein
+        texte seul. httpx borne la connexion et chaque lecture, mais pas la
+        resolution DNS : seule cette echeance garantit le delai. Le fil, lui,
+        ne s'interrompt pas : il finit son appel en arriere-plan (borne par
+        les delais httpx), puis libere sa place. Les questions ont leurs
+        propres fils (_EXECUTEUR_QUESTIONS).
         """
-        return await asyncio.to_thread(self.generate_embedding, text, True, task_type)
+        if task_type != self.TASK_QUERY:
+            return await asyncio.to_thread(self.generate_embedding, text, True, task_type)
+
+        self._validate_text(text)
+        boucle = asyncio.get_running_loop()
+        delai = getattr(self._provider, "delai_question_s", None)
+        echeance = delai + 1.0 if delai else None
+        cle = self._cache_key(text, task_type) if self.use_cache else None
+        try:
+            # UNE echeance pour tout : lecture du cache comprise.
+            async with asyncio.timeout(echeance):
+                # Le cache d'abord, sur ses propres fils : quand le fournisseur
+                # ne repond plus, ses appels occupent les fils des questions,
+                # et une question deja vectorisee attendrait derriere eux.
+                if cle is not None:
+                    en_cache = await boucle.run_in_executor(
+                        _EXECUTEUR_CACHE, self._get_from_pg_cache, cle
+                    )
+                    if en_cache is not None:
+                        return en_cache
+                vecteur = await boucle.run_in_executor(
+                    _EXECUTEUR_QUESTIONS, partial(self._produire, text, True, task_type)
+                )
+        except TimeoutError as e:
+            suivi_semantique.noter(e)
+            raise EmbeddingServiceError(
+                f"Pas de vecteur pour la question en {echeance:.1f} s ({self._provider.label})"
+            ) from e
+        except Exception as e:
+            suivi_semantique.noter(e)
+            raise
+        suivi_semantique.noter(None)
+        if cle is not None:
+            # Ecrit SANS attendre, hors echeance : le vecteur est la, une base
+            # lente ne doit pas le faire perdre a cette question. submit() et
+            # non run_in_executor : rien ne doit revenir vers une boucle qui
+            # serait fermee entre-temps.
+            _EXECUTEUR_CACHE.submit(self._store_in_pg_cache, cle, vecteur)
+        return vecteur
 
 
 @lru_cache()

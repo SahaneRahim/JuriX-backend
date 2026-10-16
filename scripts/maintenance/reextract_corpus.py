@@ -25,7 +25,7 @@ Usage:
 Enchainement complet :
     reextract_corpus.py --apply        # laws.content recoit les vrais <<PAGE:n>>
     rechunk_laws.py --apply            # articles.page_number devient exact
-    regenerate_embeddings.py --all --force
+    regenerate_embeddings.py --all     # sans --force : seuls les articles recrees
 
 Codes de sortie:
     0  termine

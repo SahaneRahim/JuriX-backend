@@ -66,23 +66,30 @@ MAX_CHUNKS_PER_LAW = 3
 # Version du schema de reponse mise en cache. A incrementer des que la forme de
 # SearchResponse change : sans elle, des reponses serialisees sous l'ancienne
 # forme (sans `chunks`) continueraient a etre servies pendant tout le TTL.
-CACHE_SCHEMA_VERSION = "v4"
+# Aussi quand l'espace des vecteurs change, ce qui change les resultats
+# semantiques et hybrides. v5 : passage a Voyage (voyage-4-large, 1024).
+CACHE_SCHEMA_VERSION = "v5"
 
 
 def _make_cache_key(
-    query: str, filters: Optional[SearchFilters], limit: int, offset: int, mode: str
+    query: str, filters: Optional[SearchFilters], limit: int, offset: int, mode: str,
+    semantic_query: Optional[str] = None,
 ) -> str:
     """
     Génère une clé de cache SHA-256 déterministe.
 
     Le mode en fait partie : sans lui, une recherche « text » et une recherche
     « hybrid » de la meme requete se servaient l'une l'autre pendant tout le TTL.
+    Le texte vectorise aussi, quand il differe de la requete : deux questions
+    aux memes mots-cles n'ont pas le meme volet semantique.
     """
     filters_dict = filters.model_dump() if filters else {}
     raw = (
         f"{CACHE_SCHEMA_VERSION}|{mode}|{query}|"
         f"{json.dumps(filters_dict, sort_keys=True)}|{limit}|{offset}"
     )
+    if semantic_query is not None and mode != "text":
+        raw += f"|semantique:{semantic_query}"
     return hashlib.sha256(raw.encode()).hexdigest()[:64]
 
 

@@ -121,6 +121,15 @@ class SearchRequest(BaseModel):
         "hybrid",
         description="Search mode: text, semantic, or hybrid"
     )
+    # Le chat cherche en plein texte sur les MOTS-CLES de la question, mais un
+    # modele d'embeddings comprend mieux la question entiere : il la recoit
+    # ici. Absent, le volet semantique vectorise `query`.
+    semantic_query: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=1000,
+        description="Texte vectorise par le volet semantique, s'il differe de query"
+    )
     filters: Optional[SearchFilters] = Field(
         None,
         description="Optional filters to apply"
@@ -136,6 +145,14 @@ class SearchRequest(BaseModel):
         ge=0,
         description="Number of results to skip (for pagination)"
     )
+
+    @field_validator("semantic_query", mode="before")
+    @classmethod
+    def _semantic_query_blanc_absent(cls, v):
+        """Un texte blanc ne se vectorise pas : il vaut absence, pas erreur 500."""
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     @field_validator("mode")
     @classmethod

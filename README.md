@@ -13,7 +13,7 @@ article, réponses citées via Mistral, classements par Groq.
 | API | FastAPI (Python 3.11) |
 | Base | PostgreSQL 16 + `pgvector` + `pg_trgm` |
 | Recherche plein texte | `tsvector` / `websearch_to_tsquery`, index GIN, triggers |
-| Recherche sémantique | `pgvector` + index HNSW, embeddings EmbeddingGemma 768 dim. calculés en local (Gemini en option) |
+| Recherche sémantique | `pgvector` + index HNSW, embeddings Voyage AI `voyage-4-large`, 1 024 dim. stockées en `halfvec` (Gemini en option) |
 | Cache | tables `query_cache` et `embedding_cache` |
 | Réponses du chat, explications, comparaisons | Mistral `ministral-14b` (API REST, `LLM_PROVIDER=mistral`) ; Gemini en option |
 | Classement d'intention et des lois | Groq : `qwen3.8-27b` (chat), `gpt-oss-120b` (lois) |
@@ -26,12 +26,13 @@ d'attente sont assurés par PostgreSQL et par le serveur applicatif.
 ## Prérequis
 
 - Python 3.11
-- PostgreSQL 16 avec les extensions `vector` et `pg_trgm`
+- PostgreSQL 16 avec les extensions `vector` (pgvector 0.8 au moins : `halfvec`
+  dès 0.7, le parcours itératif de l'index sous filtre dès 0.8) et `pg_trgm`
 - Une clé API Mistral (console.mistral.ai), pour le chat
 - Une clé API Groq (console.groq.com), pour le classement des messages et des
   lois
-- Le modèle EmbeddingGemma sur disque (voir plus bas), pour la recherche
-  sémantique
+- Une clé API Voyage AI (dash.voyageai.com), pour la recherche sémantique, sur
+  un compte **avec moyen de paiement** (voir plus bas)
 - Pour ingérer des PDF : Docling et torch (`requirements-ingestion.txt`), un GPU
   CUDA de préférence
 
@@ -88,22 +89,19 @@ curl -L -o models/fasttext/lid.176.bin \
 Sans lui, `POST /api/v1/language/detect` échoue ; le pipeline d'ingestion
 retombe sur une heuristique par mots vides.
 
-### Modèle d'embeddings
+### Clé Voyage (embeddings)
 
-EmbeddingGemma (330 Mo), à la révision épinglée dans `app/core/config.py`.
-Toujours avec `--local-dir` : le cache Hugging Face sépare le `.onnx` de son
-`.onnx_data`, et onnxruntime refuse alors de le charger.
+La recherche sémantique vectorise chaque question par l'API Voyage AI
+(`voyage-4-large`). Le compte de la clé doit avoir un **moyen de paiement** :
+sans lui, Voyage bride à 3 requêtes et 10 000 jetons par minute, pour tout le
+site. Les 200 M premiers jetons sont gratuits ; une question en coûte une
+dizaine, le corpus entier environ 10 M.
 
-```bash
-hf download onnx-community/embeddinggemma-300m-ONNX \
-  onnx/model_quantized.onnx onnx/model_quantized.onnx_data tokenizer.json \
-  --revision 5090578d9565bb06545b4552f76e6bc2c93e4a66 \
-  --local-dir models/embeddinggemma-300m-onnx
-```
-
-Il est chargé au démarrage de l'API (~1,5 Go de RAM). Sans lui, l'API démarre
-quand même — plein texte, chat et comptes fonctionnent — mais la recherche
-sémantique est coupée et `GET /api/v1/search/health` répond `degraded`.
+Sans clé valide, l'API démarre quand même — plein texte, chat et comptes
+fonctionnent — mais la recherche sémantique est coupée et
+`GET /api/v1/search/health` répond `degraded`. Si Voyage ne répond pas en
+4 secondes, la question est servie par le plein texte seul, et cette réponse
+n'est pas mise en cache.
 
 ## Configuration
 
@@ -118,8 +116,10 @@ Toutes les variables de `.env.example` sont réellement lues par
 | `GROQ_API_KEY` | Classement d'intention (`GROQ_MODEL`) et classement des lois (`GROQ_MODEL_CLASSEMENT`), deux modèles pour deux quotas |
 | `INTENT_CLASSIFIER` | `groq` (défaut) ou `llm` (le modèle du chat, un appel de plus par question) |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | Seulement si `LLM_PROVIDER=gemini` ou `EMBEDDING_PROVIDER=gemini` |
-| `EMBEDDING_PROVIDER` | `gemma` (défaut, local et gratuit) ou `gemini` (API payante). En changer impose de régénérer les vecteurs |
-| `GEMMA_MODEL_DIR` | Dossier du modèle EmbeddingGemma (défaut `models/embeddinggemma-300m-onnx`) |
+| `VOYAGE_API_KEY` | Embeddings de la recherche sémantique (questions et corpus) |
+| `EMBEDDING_PROVIDER` | `voyage` (défaut) ou `gemini`. En changer impose de régénérer les vecteurs |
+| `VOYAGE_EMBEDDING_MODEL` | `voyage-4-large`. Il entre dans l'empreinte des vecteurs : en changer les déclare tous périmés |
+| `VOYAGE_TIMEOUT_QUESTION_S` / `VOYAGE_TIMEOUT_DOCUMENT_S` | Délai de chaque lecture pour une question (3 s ; la question attend au plus ce délai plus une seconde, puis passe au plein texte seul) et pour un lot de documents (120 s) |
 | `PDF_EXTRACTION_PAGES_PER_CALL` | Pages envoyées par appel d'extraction (défaut 20) |
 | `SECRET_KEY` | Signature JWT. **Obligatoire hors développement** : l'application refuse de démarrer si la valeur du dépôt est conservée |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Valeurs par défaut de `scripts/create_admin.py` |
@@ -133,9 +133,13 @@ Paliers gratuits vérifiés le 07/10/2026 :
 | Mistral | `ministral-14b` | 30 requêtes par minute |
 | Mistral | `ministral-8b` (secours) | 188 requêtes par minute |
 | Groq, **par modèle** | `qwen3.8-27b`, `gpt-oss-120b` | 30 requêtes et 8 000 jetons par minute, 1 000 requêtes et 200 000 jetons par jour |
+| Voyage AI (16/10/2026) | `voyage-4-large` | 200 M de jetons offerts ; sans moyen de paiement, 3 requêtes et 10 000 jetons par minute ; avec, 2 000 requêtes et 3 M de jetons par minute |
 
-Chaque appel passe par un **limiteur** (`app/core/limiteur.py`) qui fait
-attendre avant d'envoyer, plutôt que de collectionner les refus.
+Chaque appel à Mistral et à Groq passe par un **limiteur**
+(`app/core/limiteur.py`) qui fait attendre avant d'envoyer, plutôt que de
+collectionner les refus. Pas Voyage : une question ne peut pas attendre son
+tour. Sur un compte sans moyen de paiement (3 requêtes par minute), les
+questions au-delà reviennent en 429 et passent au plein texte seul.
 
 - **Mistral.** Un 429 est rejoué (`Retry-After`), puis le modèle de secours
   prend le relais ; au-delà de 20 s d'attente, l'utilisateur reçoit « service
@@ -292,7 +296,7 @@ La liste unique est dans `app/core/personas.py` : `citoyen`, `avocat`,
 
 ```
 PDF → extraction Docling (OCR pleine page) → normalisation → découpage par article
-    → embeddings EmbeddingGemma → tsvector (trigger) → published
+    → embeddings Voyage (voyage-4-large) → tsvector (trigger) → published
 ```
 
 Un document est créé en `processing`. Il passe à `published` en cas de succès,
@@ -312,8 +316,9 @@ chaque article porte la page où il commence.
 
 ### Ingérer le corpus
 
-Deux passes, séparées pour la mémoire : Docling et EmbeddingGemma ne tiennent
-pas ensemble dans quelques Go de RAM. Toutes deux sont **reprenables** — une
+Deux passes : l'extraction, longue et gourmande (Docling, GPU), puis
+l'indexation, qui ne charge jamais Docling et appelle Voyage pour les vecteurs.
+Toutes deux sont **reprenables** — une
 interruption, quelle qu'elle soit, ne coûte que le travail en cours, et relancer
 la même commande reprend où elle s'était arrêtée.
 
@@ -331,7 +336,8 @@ touch data/ingestion/STOP                     # arrêt propre après le lot en c
 # que la passe 1 n'a pas fini est laissé pour la prochaine exécution.
 python scripts/ingest_corpus.py
 
-# Enfin : vecteurs manquants éventuels, puis index vectoriel reconstruit en masse
+# Enfin : vecteurs manquants éventuels (appels Voyage), puis index vectoriel
+# reconstruit en masse
 python scripts/regenerate_embeddings.py --all
 python scripts/regenerate_embeddings.py --reindex
 ```
@@ -388,14 +394,34 @@ La recherche renvoie des **chunks** — un article, pas un document. `SearchResu
 section, leur page et leur contenu intégral. C'est ce que consomme le RAG, et
 c'est ce qui permet à une citation de pointer un `article_id`.
 
-Les embeddings font **768 dimensions** et sont calculés **en local** par
-EmbeddingGemma (`onnx-community/embeddinggemma-300m-ONNX`, int8, exécuté par
-onnxruntime) : gratuit, sans réseau, ~1,5 Go de RAM dans le processus de l'API.
-`EMBEDDING_PROVIDER=gemini` repasse sur l'API Gemini, à 768 dimensions elle
-aussi : le schéma ne change pas. Le modèle se télécharge une fois — commande
-dans `.env.example` — et il est chargé au démarrage : s'il manque,
-`GET /api/v1/search/health` répond `degraded` au lieu de laisser la recherche
-retomber en silence sur le plein texte.
+Les embeddings font **1 024 dimensions**, stockées en `halfvec` (2 octets par
+composante) sous un index HNSW `halfvec_cosine_ops` posé sur la colonne. Ils
+viennent de l'API **Voyage AI** (`voyage-4-large`), choisie par mesure le
+16/10/2026 sur le jeu relu de 102 questions et tout le corpus : MRR@20 de 0,758
+contre 0,537 pour EmbeddingGemma, en français. Le corpus est vectorisé en
+`input_type: document`, les questions en `input_type: query`.
+`EMBEDDING_PROVIDER=gemini` repasse sur l'API Gemini, à 1 024 dimensions elle
+aussi : le schéma ne change pas. Le fournisseur est sondé au démarrage : une
+clé refusée y apparaît, et `GET /api/v1/search/health` répond `degraded` au lieu
+de laisser la recherche retomber en silence sur le plein texte.
+
+Une question n'attend Voyage que 4 secondes au plus (`VOYAGE_TIMEOUT_QUESTION_S`
+plus une seconde), en un seul essai : au-delà, ou en cas de panne, la recherche
+hybride répond par le plein texte seul, sans mettre cette réponse en cache. Une
+panne survenue APRÈS le démarrage (clé révoquée, compte bridé en 429) se lit
+dans `GET /api/v1/search/health`, champ `semantic_recent` : appels au
+fournisseur et échecs des 15 dernières minutes (une question servie par le
+cache ne compte pas), dernier motif court, issue de la sonde du démarrage.
+`status` passe à `degraded` à partir de 3 échecs représentant au moins 30 % des
+appels, ou tant qu'une sonde ratée au démarrage n'a été suivie d'aucun appel
+réussi.
+
+Le chat cherche en plein texte sur les mots-clés de la question, mais
+vectorise la question **entière** (`SearchRequest.semantic_query`). Mesuré par
+le chemin du chat sur les 102 questions relues, le bon article figure parmi
+les 8 extraits envoyés au modèle 92 % du temps en français et 87 % en anglais,
+contre 79 % et 72 % en vectorisant les mots-clés, et 61 % et 56 % avec
+EmbeddingGemma.
 
 Chaque vecteur porte l'empreinte du modèle qui l'a produit
 (`articles.embedding_model`). Après une migration de dimension, une
@@ -404,8 +430,18 @@ d'un autre modèle doivent être régénérés :
 
 ```bash
 DATABASE_URL=postgresql+asyncpg://jurix:jurix@localhost:5433/jurix_dev alembic upgrade head
-python scripts/regenerate_embeddings.py --all --batch-size 16   # reprenable
+python scripts/regenerate_embeddings.py --all                   # reprenable, appels Voyage
 python scripts/regenerate_embeddings.py --reindex               # index en masse
+```
+
+Les vecteurs `voyage-4-large` de tout le corpus ont déjà été calculés par la
+mesure (`data/mesure_voyage`, hors git). Ils se chargent sans appel à l'API ;
+un article dont le texte a changé depuis l'instantané garde son vecteur à NULL,
+que `--all` calcule ensuite :
+
+```bash
+python scripts/regenerate_embeddings.py --depuis-lots data/mesure_voyage/lots/voyage-4-large \
+    --instantane data/mesure_voyage/morceaux.jsonl
 ```
 
 Tant que le backfill n'est pas terminé, la recherche sémantique ne renvoie rien
@@ -451,7 +487,7 @@ corpus. Le harnais qui les calibre :
 
 ```bash
 python -m scripts.eval.generate_eval_set --sample 120   # puis RELECTURE
-python -m scripts.eval.run_eval --dims 768 512 256      # la dimension vaut-elle son coût ?
+python -m scripts.eval.run_eval --dims 1024 512 256     # la dimension vaut-elle son coût ?
 python -m scripts.eval.run_eval --sweep rrf             # les poids
 ```
 
@@ -489,18 +525,19 @@ pytest                                   # tout, sans aucun appel reseau
 pytest -m "not integration"              # sans base
 pytest -m groq_live                      # appels reels a Groq (une poignee)
 pytest -m mistral_live                   # appels reels a Mistral (cinq)
+pytest -m voyage_live                    # appels reels a Voyage (quelques milliers de jetons)
 pytest --cov=app --cov-report=term-missing
 ```
 
 Sans base joignable, les tests qui en dépendent sont **ignorés avec la commande
 à lancer** — jamais silencieusement verts.
 
-**Aucun appel réel par défaut.** Les clés de Gemini, Groq et Mistral sont
-remplacées par des clés factices, et une garde réseau fait échouer tout test qui
-tenterait de joindre Groq ou Mistral : une suite complète vidait le quota
-gratuit de Groq. Les tests marqués `groq_live` ou `mistral_live` lèvent la garde
-du seul service visé, avec les vraies clés, et ne tournent que sur demande
-(`-m`). `JURIX_E2E=1` garde les vraies clés et ouvre tout, pour un essai de bout
+**Aucun appel réel par défaut.** Les clés de Gemini, Groq, Mistral et Voyage
+sont remplacées par des clés factices, et une garde réseau fait échouer tout
+test qui tenterait de joindre Groq, Mistral ou Voyage : une suite complète
+vidait le quota gratuit de Groq. Les tests marqués `groq_live`, `mistral_live`
+ou `voyage_live` lèvent la garde du seul service visé, avec les vraies clés, et
+ne tournent que sur demande (`-m`). `JURIX_E2E=1` garde les vraies clés et ouvre tout, pour un essai de bout
 en bout délibéré.
 
 ## Structure
@@ -532,11 +569,11 @@ migrations, jamais dans `Base.metadata`, si bien qu'un schéma créé par
 **À ne jamais déclencher sans avoir d'abord vérifié s'il existe une base de
 production, et ce qu'elle contient.**
 
-La migration `c4d5e6f7a8b9` passe `articles.embedding` de `vector(3072)` à
-`vector(768)` et met **tous** les vecteurs à NULL : un vecteur Gemini 3072 n'a
-pas d'équivalent dans l'espace d'EmbeddingGemma. Le conteneur lançant
+La migration `a8b9c0d1e2f3` passe `articles.embedding` de `vector(768)` à
+`halfvec(1024)` et met **tous** les vecteurs à NULL : un vecteur EmbeddingGemma
+n'a pas d'équivalent dans l'espace de Voyage. Le conteneur lançant
 `alembic upgrade head` à chaque démarrage, **déployer ce code suffit à
-déclencher la purge**. Jusqu'à la régénération, la recherche sémantique ne rend
+déclencher la purge**. Jusqu'au rechargement, la recherche sémantique ne rend
 rien et l'hybride répond en plein texte seul.
 
 1. **Lire l'état de la base visée**, sans rien modifier :
@@ -546,49 +583,51 @@ rien et l'hybride répond en plein texte seul.
    SELECT count(*) AS articles, count(embedding) AS vecteurs FROM articles;
    ```
 
-   Aucun article : déployer suffit. Déjà en `c4d5e6f7a8b9` : la purge a eu
+   Aucun article : déployer suffit. Déjà en `a8b9c0d1e2f3` : la purge a eu
    lieu, reprendre à l'étape 5 si des vecteurs manquent.
 
-2. **Sauvegarder.** `alembic downgrade` rétablit le schéma 3072, pas les
-   vecteurs. Seul un dump permet de revenir en arrière sans repayer l'API :
+2. **Sauvegarder.** `alembic downgrade` rétablit le schéma 768, pas les
+   vecteurs. Seul un dump permet de revenir en arrière sans tout recalculer :
 
    ```bash
-   pg_dump --format=custom --file=jurix-avant-768.dump "postgresql://…"
+   pg_dump --format=custom --file=jurix-avant-voyage.dump "postgresql://…"
    ```
 
-3. **Mettre le modèle à disposition de l'API.** L'image Docker ne l'embarque
-   pas encore. Sans lui, l'API démarre, mais en `degraded` et sans recherche
-   sémantique. À défaut, `EMBEDDING_PROVIDER=gemini` (payant) fonctionne avec
-   le même schéma 768.
+3. **Poser `VOYAGE_API_KEY`**, d'un compte avec moyen de paiement, et
+   **retirer** de l'environnement de l'hôte `EMBEDDING_PROVIDER=gemma`,
+   `EMBEDDING_DIM=768` et les `GEMMA_*` : la configuration refuse les deux
+   premiers, et le conteneur s'arrêterait dès `alembic upgrade head`. Sans la clé,
+   l'API démarre, mais en `degraded` et sans recherche sémantique.
 
-4. **Déployer.** Le démarrage applique la migration.
+4. **Arrêter l'ancienne API, puis déployer.** Le démarrage applique la
+   migration. Une ancienne API qui tournerait encore enverrait des vecteurs de
+   768 dimensions à une colonne de 1 024.
 
-5. **Régénérer, hors du processus de l'API.** Le script charge sa propre copie
-   du modèle (~1,5 Go) et occupe tous les cœurs physiques moins un. Sur un
-   petit hébergement, le lancer depuis une machine qui a le modèle, contre la
-   base de production. Il est reprenable : une interruption ne coûte qu'un
-   lot.
+5. **Remplir les vecteurs** : charger les lots déjà calculés si la base a
+   accès à `data/mesure_voyage`, sinon recalculer par l'API (environ 10 M de
+   jetons, quelques minutes au palier payant). Les deux sont reprenables.
 
    ```bash
-   export DATABASE_URL="postgresql+asyncpg://…"   # la base de production
+   export DATABASE_URL="postgresql+asyncpg://…"   # la base visée
    export PGSSLMODE=require
-   python scripts/regenerate_embeddings.py --all --dry-run   # combien
+   python scripts/regenerate_embeddings.py --depuis-lots data/mesure_voyage/lots/voyage-4-large \
+       --instantane data/mesure_voyage/morceaux.jsonl
+   python scripts/regenerate_embeddings.py --all --dry-run   # ce qui reste
    python scripts/regenerate_embeddings.py --all
    python scripts/regenerate_embeddings.py --reindex
    ```
 
-   Ordre de grandeur mesuré sur le poste de développement : ~700 jetons par
-   seconde, soit 1 h 30 à 3 h pour le corpus.
+   Dans le conteneur : `docker compose exec api python scripts/regenerate_embeddings.py --all`.
 
 6. **Vérifier** `GET /api/v1/search/health` : `status` à `healthy`,
    `vectors.missing` et `vectors.foreign` à 0.
 
-Le même déroulé vaut pour tout changement de fournisseur à dimension égale
-(gemma vers gemini, ou un meilleur modèle plus tard), à une différence près :
-sans migration, les anciens vecteurs restent en place pendant la régénération.
-Leurs similarités avec une question encodée par l'autre modèle n'ont pas de
-sens ; la santé les compte dans `vectors.foreign` et reste `degraded` tant
-qu'il en reste.
+Le même déroulé vaut pour tout changement de fournisseur ou de modèle à
+dimension égale (voyage vers gemini, ou un meilleur modèle plus tard), à une
+différence près : sans migration, les anciens vecteurs restent en place
+pendant la régénération. Leurs similarités avec une question encodée par
+l'autre modèle n'ont pas de sens ; la santé les compte dans `vectors.foreign`
+et reste `degraded` tant qu'il en reste.
 
 ### L'URL de la base : deux pièges opposés
 
@@ -620,9 +659,9 @@ application derrière un pooler en mode transaction, ferait échouer libpq
   (lecture dans `./data/uploads`) est conservé.
 - **`--workers 1`** : plusieurs états sont en mémoire du processus (connexions
   WebSocket du suivi de lot, étranglement des envois de courriel par IP).
-- **Mémoire** : le modèle d'embeddings occupe ~1,5 Go dans le processus de
-  l'API. Une offre à 512 Mo ne suffit pas ; à défaut, `EMBEDDING_PROVIDER=gemini`
-  (payant). L'image Docker n'embarque pas encore le modèle.
+- **Embeddings** : poser `VOYAGE_API_KEY` chez l'hébergeur. L'API ne garde
+  aucun modèle d'embeddings en mémoire ; elle a besoin d'un HTTPS sortant vers
+  `api.voyageai.com`.
 - **`SECRET_KEY`** : `openssl rand -hex 32`. Avec `ENVIRONMENT` différent de
   `development`, le conteneur **refuse de démarrer** sur la valeur du dépôt.
 - **`ALLOWED_ORIGINS`** : origine exacte, sans slash final. `allow_credentials`
@@ -632,8 +671,9 @@ application derrière un pooler en mode transaction, ferait échouer libpq
   normalement ; seules la vérification d'adresse et la réinitialisation de mot
   de passe restent inertes. Le transport est l'API HTTPS de Brevo et **jamais
   SMTP** : les hébergeurs gratuits bloquent les ports sortants 25, 465 et 587.
-- **Extensions PostgreSQL** : `vector`, `pg_trgm` et `unaccent` doivent exister
-  **dans le schéma `public`**. Certains hébergeurs les installent ailleurs par
+- **Extensions PostgreSQL** : `vector` (pgvector 0.8 au moins ; avant 0.7, pas de
+  `halfvec` : la migration échoue et l'API ne démarre pas), `pg_trgm` et `unaccent`
+  doivent exister **dans le schéma `public`**. Certains hébergeurs les installent ailleurs par
   défaut, ce qui casse `immutable_unaccent` (migration `a6b7c8d9e0f1`). Créer
   explicitement `CREATE EXTENSION ... WITH SCHEMA public;` avant la première
   migration.

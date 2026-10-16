@@ -15,7 +15,7 @@ Author: JuriX Team
 """
 
 
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import HALFVEC
 from sqlalchemy import (
     Boolean,
     Column,
@@ -30,7 +30,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import deferred, relationship
 from sqlalchemy.sql import func
 
 from app.core.database import Base
@@ -183,7 +183,7 @@ class Article(Base):
         number: Numéro de l'article (ex: "1er", "2", "3bis")
         title: Titre optionnel de l'article
         content: Contenu textuel de l'article
-        embedding: Vecteur d'embedding (768 dimensions) pour recherche sémantique
+        embedding: Vecteur d'embedding (halfvec, 1024 dimensions) pour recherche sémantique
         embedding_model: Empreinte du fournisseur qui a produit le vecteur
         order: Ordre dans la loi (pour tri)
         created_at: Date de création
@@ -218,12 +218,22 @@ class Article(Base):
     content = Column(Text, nullable=False)
 
     # pgvector embedding for semantic search.
-    # 768 dimensions : la sortie native d'EmbeddingGemma, et une dimension que
-    # gemini-embedding-001 produit aussi sur demande. Stockee en fp32, sous le
-    # plafond de 2000 dimensions du type `vector` : l'index HNSW est pose sur
-    # la colonne elle-meme (migration c4d5e6f7a8b9). La dimension est aussi
-    # declaree dans settings.EMBEDDING_DIM ; un test verifie l'accord.
-    embedding = Column(Vector(768), nullable=True)
+    # 1024 dimensions : la dimension par defaut de voyage-4-large, et une
+    # dimension que gemini-embedding-001 produit aussi sur demande. Stockee en
+    # halfvec (fp16, 2 octets par composante : environ 3 chiffres
+    # significatifs, sans effet mesurable sur le classement) ; l'index HNSW
+    # halfvec_cosine_ops est pose sur la colonne elle-meme (migration
+    # a8b9c0d1e2f3). La dimension est aussi declaree dans
+    # settings.EMBEDDING_DIM ; un test verifie l'accord.
+    #
+    # DIFFERE (deferred) : jamais charge avec l'article, seulement a la
+    # lecture de l'attribut. Law.articles et Category.laws sont en
+    # lazy="selectin" : sans cela, ouvrir un document chargeait tous ses
+    # vecteurs (2 121 pour le plus gros, environ 27 Mo de texte), et une
+    # categorie ceux de toutes ses lois, sans qu'aucun de ces chemins ne les
+    # lise. La recherche les lit en SQL, sans passer par l'objet. En contexte
+    # asynchrone, lire l'attribut exige undefer(Article.embedding).
+    embedding = deferred(Column(HALFVEC(1024), nullable=True))
     # Empreinte du fournisseur qui a produit `embedding` : modele, revision,
     # gabarits. Deux modeles produisent des espaces sans rapport, et un cosinus
     # entre leurs vecteurs ne veut rien dire — sans que rien ne le signale.

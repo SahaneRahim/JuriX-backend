@@ -25,6 +25,11 @@ docling-core==2.99.0
 docling-ibm-models==4.0.3
 docling-parse==7.22.0
 rapidocr==3.9.2
+# Moteur de RapidOCR (EXTRACTION_OCR_ENGINE=rapidocr), que ni rapidocr ni
+# docling ne declarent. Il venait de requirements.txt, pour EmbeddingGemma.
+# Version EXACTE : elle entre dans l'empreinte du cache d'extraction en mode
+# rapidocr (docling_extraction.py), une autre version le rendrait invisible.
+onnxruntime==1.30.0
 transformers==5.17.0
 pypdfium2==5.13.0
 psutil>=5.9

@@ -3,12 +3,10 @@ Passe 2 de l'ingestion : indexation du corpus en base, avec reprise.
 
 Lit l'extraction faite par la passe 1 (scripts/extraire_corpus.py) et ne
 convertit RIEN elle-meme : un document que la passe 1 n'a pas fini est laisse
-pour une prochaine execution. Docling n'est donc jamais charge ici, ce qui
-laisse la memoire a EmbeddingGemma.
+pour une prochaine execution. Docling n'est donc jamais charge ici.
 
 Pour chaque document : ligne `laws`, copie du PDF dans le repertoire d'upload,
-decoupage en articles, langue, domaine, embeddings EmbeddingGemma (locaux),
-tsvector. C'est le pipeline de l'upload par l'API, appele hors HTTP.
+decoupage en articles, langue, domaine, embeddings (API Voyage), tsvector. C'est le pipeline de l'upload par l'API, appele hors HTTP.
 
 REPRISE. Une loi en echec passe 'refused', la cause dans processing_error. Une
 relance reprend les lignes 'refused', 'processing' et 'pending', et ignore les

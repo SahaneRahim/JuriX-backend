@@ -227,6 +227,16 @@ class RAGService:
     # document : huit articles entiers representent un contexte plus precis, et
     # souvent plus court, que cinq lois resumees a 400 caracteres chacune.
     TOP_K_CHUNKS = 8
+    # Le volet semantique de la recherche vectorise la question ENTIERE, et
+    # non ses mots-cles : les mots-cles servent le plein texte, un modele
+    # d'embeddings comprend mieux une phrase. Mesure par ce chemin meme
+    # (data/mesure_voyage/evaluer_chat.py, 102 questions, voyage-4-large,
+    # 16/10/2026), article attendu parmi les 8 extraits / MRR@8 :
+    #   francais : mots-cles 0,794 / 0,417 ; question entiere 0,922 / 0,504
+    #   anglais  : mots-cles 0,716 / 0,411 ; question entiere 0,873 / 0,538
+    # Ecart de MRR@8 en faveur de la question entiere : +0,087 [+0,035 ;
+    # +0,143] en francais, +0,127 [+0,067 ; +0,191] en anglais (IC 95 %).
+    vectoriser_la_question_entiere = True
     # Couvre du / de la / de l' / des / de, et la numerotation composee
     # (161, 1er, 94-2, L 94 septies). L'ancienne version ne connaissait que
     # "de la " : "article 161 du Code OHADA", la formulation la plus courante
@@ -777,6 +787,7 @@ class RAGService:
         search_response = await self.search_service.search(
             SearchRequest(
                 query=search_query,
+                semantic_query=question if self.vectoriser_la_question_entiere else None,
                 mode="hybrid",
                 filters=SearchFilters(status="published"),
                 limit=self.TOP_K_CHUNKS

@@ -1,11 +1,11 @@
 """
 Tests du schema vectoriel.
 
-La colonne est en vector(768), indexee par HNSW directement, sans le detour par
-une expression halfvec qu'imposaient les 3072 dimensions d'avant (migration
-c4d5e6f7a8b9). Ces tests verifient la dimension, l'index — un seul, le bon —,
-et surtout le PLAN de l'enonce que produit l'ORM : qu'il passe par l'index, et
-que le planificateur n'y supprime pas le tri final.
+La colonne est en halfvec(1024), indexee par HNSW directement
+(halfvec_cosine_ops), sans expression ni cast (migration a8b9c0d1e2f3). Ces
+tests verifient le type, l'index — un seul, le bon —, et surtout le PLAN de
+l'enonce que produit l'ORM : qu'il passe par l'index, et que le planificateur
+n'y supprime pas le tri final.
 """
 
 import numpy as np
@@ -19,7 +19,7 @@ from app.schemas.search import SearchFilters
 from app.services.embedding_service import EmbeddingService
 from app.services.search_service import SearchService
 
-INDEX = "idx_articles_embedding_hnsw_vector"
+INDEX = "idx_articles_embedding_hnsw_halfvec1024"
 
 
 @pytest.mark.asyncio
@@ -31,7 +31,9 @@ async def test_embedding_column_has_configured_dimension(db_session):
     """))
     declared = result.scalar()
 
-    assert declared == f"vector({EmbeddingService.EMBEDDING_DIM})"
+    assert declared == f"halfvec({EmbeddingService.EMBEDDING_DIM})"
+    # Valeur absolue : remarquer un changement accidentel, pas le suivre.
+    assert declared == "halfvec(1024)"
 
 
 @pytest.mark.asyncio
@@ -61,8 +63,9 @@ async def test_exactly_one_index_on_the_embedding_column(db_session):
 
     assert [r.indexname for r in rows] == [INDEX], rows
     indexdef = rows[0].indexdef.lower()
-    assert "using hnsw (embedding vector_cosine_ops)" in indexdef
-    assert "halfvec" not in indexdef
+    assert "using hnsw (embedding halfvec_cosine_ops)" in indexdef
+    # Sur la colonne, pas sur une expression : aucun cast a reproduire.
+    assert "::" not in indexdef
 
 
 def _statement(filters=None, limit=8):
@@ -103,8 +106,10 @@ def test_semantic_query_is_two_stage():
 
     assert "ORDER BY articles.embedding <=>" in inner
     assert "ORDER BY ann.distance + 0" in outer
-    # Plus aucun cast : l'index est pose sur la colonne elle-meme.
-    assert "HALFVEC" not in sql.upper()
+    # Aucun cast sur la colonne : l'index est pose sur la colonne elle-meme,
+    # et `embedding::vector` ou un CAST le rendraient inutilisable.
+    assert "articles.embedding::" not in sql
+    assert "CAST(articles.embedding" not in sql.upper()
     # L'offset ne s'applique qu'apres le tri strict.
     assert "OFFSET" not in inner
     assert "OFFSET" in outer

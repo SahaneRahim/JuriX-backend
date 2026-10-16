@@ -142,8 +142,9 @@ def mock_embedding_service_chunks():
     from unittest.mock import AsyncMock, MagicMock
 
     mock = MagicMock()
-    mock.TASK_QUERY = "RETRIEVAL_QUERY"
-    mock.TASK_DOCUMENT = "RETRIEVAL_DOCUMENT"
+    # Lues sur le vrai service : un renommage ne passerait pas inapercu.
+    mock.TASK_QUERY = EmbeddingService.TASK_QUERY
+    mock.TASK_DOCUMENT = EmbeddingService.TASK_DOCUMENT
     mock.generate_embedding_async = AsyncMock(
         return_value=np.array(_unit_vector(11), dtype=np.float32)
     )
@@ -390,9 +391,12 @@ class TestTwoStageSemantic:
         """
         chunks = await self._search(db_session, angles, mock_embedding_service_chunks, None)
 
+        # abs=1e-4 : la colonne est en halfvec (fp16), le serveur arrondit
+        # l'article ET la question. Ecart simule avec ces graines : 1,44e-5,
+        # au-dessus de 1e-5. L'ordre, lui, est verifie strictement plus haut.
         for chunk in chunks:
             attendu = self.SIMILARITES[chunk.article_id][0]
-            assert chunk.relevance_score == pytest.approx(attendu, abs=1e-5)
+            assert chunk.relevance_score == pytest.approx(attendu, abs=1e-4)
 
     @pytest.mark.asyncio
     async def test_candidate_budget_is_bounded(self, db_session):

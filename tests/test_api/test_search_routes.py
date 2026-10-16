@@ -13,7 +13,6 @@ Author: JuriX Team
 Version: 1.0.0
 """
 
-import json
 from datetime import date, datetime
 
 import numpy as np
@@ -22,6 +21,7 @@ from fastapi import status
 
 from app.main import app
 from app.models.law import Article, Law
+from app.services.embedding_service import EmbeddingService
 from app.services.legal_domain_classifier import CIVIL, PENAL
 
 # NOTE: les fixtures db_engine / db_session locales (SQLite en memoire) ont ete
@@ -88,7 +88,9 @@ async def sample_laws(db_session, category_ids):
             law_id=1,
             number="1",
             content="Article 1er.",
-            embedding=json.dumps(np.random.rand(768).tolist()),
+            # Une LISTE de la dimension de la colonne : les convertisseurs
+            # pgvector refusent une chaine JSON.
+            embedding=np.random.rand(EmbeddingService.EMBEDDING_DIM).tolist(),
             order=1
         ),
     ]
@@ -494,6 +496,7 @@ class TestHealthEmbeddings:
 
         assert data["embedding_service"] == "ready"
         assert data["vectors"] == {"current": 1, "foreign": 0, "missing": 0}
+        assert data["semantic_recent"]["echecs"] == 0
         assert data["status"] == "healthy"
 
     @pytest.mark.asyncio
@@ -504,6 +507,29 @@ class TestHealthEmbeddings:
         data = await self._rapport(client)
 
         assert data["vectors"]["foreign"] == 1
+        assert data["status"] == "degraded"
+
+    @pytest.mark.asyncio
+    async def test_des_echecs_repetes_du_volet_semantique_degradent_la_sante(
+        self, client, db_session
+    ):
+        """
+        Cle revoquee ou compte bride apres le demarrage : la sonde initiale
+        est passee, chaque question retombe sur le plein texte.
+        """
+        from app.services import search_service
+        from app.services.embedding_service import EmbeddingServiceError, suivi_semantique
+
+        empreinte = search_service._embedding_service_instance.provider.fingerprint
+        await self._article(db_session, empreinte)
+        for _ in range(3):
+            suivi_semantique.noter(EmbeddingServiceError("Voyage HTTP 429 : rate limit"))
+
+        data = await self._rapport(client)
+
+        assert data["embedding_service"] == "ready"
+        assert data["semantic_recent"]["derniere_erreur"] == "HTTP 429"
+        assert data["semantic_recent"]["degrade"] is True
         assert data["status"] == "degraded"
 
     @pytest.mark.asyncio
@@ -530,17 +556,17 @@ class TestHealthEmbeddings:
         assert data["status"] == "degraded"
 
     @pytest.mark.asyncio
-    async def test_modele_absent_de_bout_en_bout(self, client, tmp_path, monkeypatch):
+    async def test_cle_voyage_absente_de_bout_en_bout(self, client, monkeypatch):
         """
-        Sans doublure : configuration gemma, dossier du modele VIDE. Le
-        demarrage le signale, la sante le dit.
+        Sans doublure : configuration voyage, cle VIDE. Le demarrage le
+        signale, la sante le dit.
         """
         from app.core.config import settings
         from app.services import search_service
         from app.services.embedding_service import get_embedding_service
 
-        monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "gemma")
-        monkeypatch.setattr(settings, "GEMMA_MODEL_DIR", str(tmp_path))
+        monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "voyage")
+        monkeypatch.setattr(settings, "VOYAGE_API_KEY", "")
         search_service._embedding_service_instance = None
         search_service._singletons_initialized = False
         get_embedding_service.cache_clear()

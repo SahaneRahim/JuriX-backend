@@ -34,14 +34,15 @@ from app.services.rag_service import RAGService
 from app.services.search_service import SearchService
 from app.utils.text_chunker import extract_articles
 
-# Ces deux tests appellent l'API Gemini pour de vrai (embeddings puis RAG) :
-# ils consomment du quota et dependent du reseau. Ils ne s'executent donc que
-# sur demande explicite, JURIX_E2E=1, et jamais dans la suite ordinaire.
+# Ces deux tests appellent les vraies API (embeddings Voyage, puis le modele du
+# chat) : ils consomment du quota et dependent du reseau. Ils ne s'executent
+# donc que sur demande explicite, JURIX_E2E=1, et jamais dans la suite
+# ordinaire.
 # Chaque etage a par ailleurs sa propre suite unitaire ; ce fichier ne verifie
 # que leur enchainement.
 pytestmark = pytest.mark.skipif(
     os.getenv("JURIX_E2E") != "1",
-    reason="Chaine complete avec appels Gemini reels : lancer avec JURIX_E2E=1",
+    reason="Chaine complete avec appels reels (Voyage, chat) : lancer avec JURIX_E2E=1",
 )
 
 
@@ -82,6 +83,7 @@ async def test_full_pipeline_integration(
     sample_legal_document,
     async_db_session,
     category_ids,
+    request,
 ):
     """
     Test complete pipeline: upload → process → search → chat.
@@ -96,6 +98,10 @@ async def test_full_pipeline_integration(
     language_detector = LanguageDetector()
     domain_classifier = LegalDomainClassifier()
     embedding_service = EmbeddingService(use_cache=False)
+    # La connexion TLS gardee vers Voyage, fermee en fin de test : laissee au
+    # ramasse-miettes, elle leverait un ResourceWarning, erreur sous
+    # filterwarnings = error.
+    request.addfinalizer(embedding_service.fermer)
     search_service = SearchService(async_db_session)
     rag_service = RAGService(async_db_session)
 

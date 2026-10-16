@@ -15,7 +15,10 @@ les chunks par `chunk_refiner`, ce qui renseigne `kind`, `embed` et `embed_text`
 — nuls sur la totalite du corpus, qui est anterieur a son cablage.
 
 Les embeddings NE SONT PAS regeneres ici. Enchainer ensuite :
-    python scripts/regenerate_embeddings.py --all --force
+    python scripts/regenerate_embeddings.py --all
+Sans --force : les articles re-decoupes sont recrees sous de nouveaux ids, sans
+vecteur, et --all les trouve seul. --force revectoriserait TOUT le corpus par
+l'API Voyage (environ 10 M de jetons), vecteurs a jour compris.
 
 Usage:
     python scripts/maintenance/rechunk_laws.py --dry-run
@@ -163,7 +166,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("Chunks sans `kind` restants : %s (doit valoir 0)", remaining)
     if failures:
         logger.error("%d loi(s) en echec", failures)
-    logger.info("Etape suivante : python scripts/regenerate_embeddings.py --all --force")
+    logger.info("Etape suivante : python scripts/regenerate_embeddings.py --all (sans --force)")
     logger.info("%s", "=" * 78)
     return 1 if failures else 0
 

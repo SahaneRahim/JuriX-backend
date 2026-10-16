@@ -13,13 +13,22 @@ echo "== 1. Le .env : present, et sans secret oublie"
 [ -f .env ] || { echo "Pas de .env : cp env.production.exemple .env, puis le renseigner (README §4)"; exit 1; }
 valeur() { grep -E "^$1=" .env | tail -1 | cut -d= -f2- || true; }
 manquants=()
-for cle in JURIX_DOMAINE POSTGRES_PASSWORD SECRET_KEY MISTRAL_API_KEY GROQ_API_KEY; do
+# VOYAGE_API_KEY : sans elle, l'API demarre quand meme et repond en plein
+# texte seul, la recherche semantique coupee EN SILENCE. Seul ce controle
+# l'empeche.
+for cle in JURIX_DOMAINE POSTGRES_PASSWORD SECRET_KEY MISTRAL_API_KEY GROQ_API_KEY VOYAGE_API_KEY; do
     case "$(valeur "$cle")" in
         ""|a-generer|a-renseigner|jurix.exemple.cm) manquants+=("$cle") ;;
     esac
 done
 if [ "${#manquants[@]}" -gt 0 ]; then
     echo ".env incomplet : ${manquants[*]}"
+    exit 1
+fi
+# Un .env d'avant la bascule (EMBEDDING_PROVIDER=gemma, GEMMA_*) : la
+# composition fige voyage, mais la ligne trompe qui lit le fichier.
+if grep -qE '^(EMBEDDING_PROVIDER=gemma|GEMMA_)' .env; then
+    echo ".env d'avant la bascule vers Voyage : retirer EMBEDDING_PROVIDER=gemma et les GEMMA_*"
     exit 1
 fi
 if [ "$(valeur SECRET_KEY | tr -d '\n' | wc -c)" -lt 32 ]; then
@@ -117,6 +126,23 @@ else
     peuplee=1
 fi
 
+# La migration a8b9c0d1e2f3 (embeddings Voyage, halfvec(1024)) VIDE les
+# vecteurs d'une base qui ne l'a pas encore, au demarrage de l'API, et la VM
+# n'a pas de quoi les recharger sans tout recalculer par l'API (environ 10 M de
+# jetons). Ce cas ne passe que sur demande explicite.
+if [ "$lois" != "0" ]; then
+    type_vecteurs=$(requete "SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'public.articles'::regclass AND attname = 'embedding'")
+    vecteurs=$(requete "SELECT count(embedding) FROM articles")
+    if [ "$type_vecteurs" != "halfvec(1024)" ] && [ "$vecteurs" != "0" ] \
+            && [ "${JURIX_PURGER_VECTEURS:-}" != "1" ]; then
+        echo "ARRET : $vecteurs vecteurs en $type_vecteurs, que la migration vers Voyage viderait."
+        echo "Pour l'accepter : JURIX_PURGER_VECTEURS=1 bash demarrer.sh, puis recalculer :"
+        echo "  docker compose exec api python scripts/regenerate_embeddings.py --all"
+        echo "  docker compose exec api python scripts/regenerate_embeddings.py --reindex"
+        exit 1
+    fi
+fi
+
 echo "== 4. API (reconstruite si le code a change) et Caddy"
 # Une sauvegarde AVANT une mise a jour : l'API applique les migrations a son
 # demarrage, et la sauvegarde nocturne peut avoir jusqu'a 24 h.
@@ -131,7 +157,7 @@ docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile </dev/nu
 # jour. Seules celles de JuriX sont visees.
 docker image prune -f --filter label=com.docker.compose.project=jurix >/dev/null
 
-echo "== 5. Attente de l'API (chargement du modele, migrations)"
+echo "== 5. Attente de l'API (migrations)"
 prete=0
 for _ in $(seq 1 60); do
     if docker compose exec -T api curl -fsS http://localhost:8000/health </dev/null >/dev/null 2>&1; then
@@ -142,6 +168,20 @@ for _ in $(seq 1 60); do
 done
 [ "$prete" = 1 ] || { echo "L'API ne repond pas : docker compose logs api"; exit 1; }
 echo "API prete"
+
+# /health ne dit rien de la recherche semantique : une cle Voyage refusee, ou
+# des vecteurs purges, laisseraient le site en plein texte seul, en silence.
+sante=$(docker compose exec -T api curl -fsS http://localhost:8000/api/v1/search/health </dev/null 2>/dev/null || true)
+if printf '%s' "$sante" | grep -q '"embedding_service":"ready"' \
+        && printf '%s' "$sante" | grep -q '"status":"healthy"'; then
+    echo "Recherche semantique prete"
+else
+    echo "ATTENTION : recherche semantique degradee ou coupee :"
+    echo "  $sante"
+    echo "  Cle : VOYAGE_API_KEY dans .env, puis docker compose up -d api"
+    echo "  Vecteurs manquants : docker compose exec api python scripts/regenerate_embeddings.py --all"
+    echo "                       docker compose exec api python scripts/regenerate_embeddings.py --reindex"
+fi
 
 echo "== 6. Compte administrateur"
 # La base est restauree sans les comptes de developpement. Rien n'est fait s'il

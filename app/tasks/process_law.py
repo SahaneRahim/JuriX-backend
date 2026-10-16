@@ -350,9 +350,9 @@ def _extract_pdf_text(file_path, cache_seulement: bool = False) -> tuple:
 
     Args:
         cache_seulement: ne rien convertir, relire l'extraction deja faite. La
-            passe d'indexation (scripts/ingest_corpus.py) l'impose : charger
-            Docling a cote d'EmbeddingGemma doublerait la memoire, et un
-            document que la passe d'extraction n'a pas fini doit attendre.
+            passe d'indexation (scripts/ingest_corpus.py) l'impose : un
+            document que la passe d'extraction n'a pas fini doit attendre, et
+            l'indexation ne doit pas charger Docling.
 
     Returns:
         (texte, erreurs) — `erreurs` nomme les pages que le moteur n'a pas pu
@@ -629,8 +629,8 @@ def _split_and_save_articles(
 
 def _generate_article_embeddings(law_id: int) -> int:
     """
-    Génère les embeddings pour tous les articles d'une loi via Gemini API.
-    Cache les embeddings dans la table embedding_cache PostgreSQL.
+    Génère les embeddings pour tous les articles d'une loi, par le
+    fournisseur configuré (Voyage par défaut).
 
     Returns:
         Nombre d'articles avec embeddings générés
@@ -645,6 +645,7 @@ def _generate_article_embeddings(law_id: int) -> int:
 
     logger.info(f"🔢 Generating embeddings for law {law_id} chunks...")
 
+    embedding_service = None
     try:
         # use_cache=False : le cache d'embeddings sert les QUESTIONS, qui se
         # repetent. Un article ne se re-encode jamais — embed_text porte la
@@ -652,7 +653,9 @@ def _generate_article_embeddings(law_id: int) -> int:
         # articles.embedding. Mesure : le cache aurait ajoute 0,2 a 0,4 Go a
         # la base, plus que les vecteurs eux-memes, sans un seul succes.
         embedding_service = EmbeddingService(use_cache=False)
-        max_len = EmbeddingService.MAX_TEXT_LENGTH
+        # Limite du fournisseur, lue sur l'instance : 78 000 caracteres pour
+        # Voyage, la coupe des vecteurs deja calcules du corpus.
+        max_len = embedding_service.MAX_TEXT_LENGTH
 
         with SyncSessionLocal() as session:
             # Seuls les chunks marques embed sont vectorises. Les visas, les
@@ -728,6 +731,12 @@ def _generate_article_embeddings(law_id: int) -> int:
     except Exception as e:
         logger.error(f"❌ Error generating embeddings: {e}", exc_info=True)
         return 0
+    finally:
+        # Un service par loi : sa connexion gardee vers le fournisseur ne doit
+        # pas survivre a la loi.
+        fermer = getattr(embedding_service, "fermer", None)
+        if fermer is not None:
+            fermer()
 
 
 def _update_law_metadata(

@@ -18,7 +18,8 @@ sqlalchemy[asyncio]>=2.0.23,<3.0.0
 alembic>=1.12.1,<2.0.0
 psycopg2-binary>=2.9.9,<3.0.0
 asyncpg>=0.29.0,<1.0.0
-pgvector>=0.2.3,<1.0.0
+# 0.3 au moins : HALFVEC, le type de la colonne articles.embedding.
+pgvector>=0.3.0,<1.0.0
 
 # ── Security ──────────────────────────────────────────────────────────────────
 python-jose[cryptography]>=3.3.0,<4.0.0
@@ -57,14 +58,6 @@ fasttext-wheel>=0.9.2
 # 165 Mo dans l'image pour rien. Le classement de domaine est desormais
 # fait par des regles, dans app/services/legal_domain_classifier.py.
 
-# ── Embeddings locaux — EmbeddingGemma par ONNX ──────────────────────────────
-# Bornes ETROITES, et ce n'est pas de la prudence de style : une autre version
-# d'onnxruntime ou du tokenizer produit d'autres vecteurs. Les documents deja
-# stockes et les nouvelles requetes vivraient alors dans deux espaces
-# differents, sans la moindre erreur.
-onnxruntime>=1.30,<1.31
-tokenizers>=0.23,<0.24
-
 # ── LLM — Gemini API ─────────────────────────────────────────────────────────
 # SDK google-genai (nouveau). L'ancien google-generativeai n'est plus utilisé :
 # gemini_service.py et embedding_service.py importaient deux SDK incompatibles,
@@ -73,4 +66,7 @@ google-genai>=1.0.0,<2.0.0
 
 # ── Utils ─────────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0,<2.0.0
+# Aussi le client des embeddings Voyage (POST /v1/embeddings) : pas de SDK
+# voyageai, qui tirerait aiohttp et tokenizers, et echapperait a la garde
+# reseau des tests (transport_http).
 httpx>=0.25.2,<1.0.0

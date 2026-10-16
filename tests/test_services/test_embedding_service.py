@@ -14,82 +14,72 @@ Total: 18 tests
 Author: JuriX Team
 """
 
+import hashlib
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
+import httpx
 import numpy as np
 import pytest
 
+from app.services import embedding_service
 from app.services.embedding_service import EmbeddingService
 
-# ==================== DOUBLURE GEMINI ====================
+# ==================== DOUBLURE VOYAGE ====================
 #
 # Ces tests portent sur la logique d'EmbeddingService — validation, normalisation
-# L2, cache, similarite cosinus — et non sur l'API Gemini. Sans doublure ils
-# appelaient le vrai service et echouaient en 400 INVALID_ARGUMENT (ou auraient
-# consomme du quota si la cle avait ete valide).
+# L2, cache, similarite cosinus — et non sur l'API. Ils passent par le fournisseur
+# de production, Voyage, dont le transport HTTP est double : aucun appel reseau,
+# aucun jeton consomme.
 #
-# L'embedding est deterministe : derive du hash du texte, donc deux appels sur le
-# meme texte donnent le meme vecteur et deux textes differents des vecteurs
+# L'embedding est deterministe : derive d'une empreinte du texte, donc deux appels
+# sur le meme texte donnent le meme vecteur et deux textes differents des vecteurs
 # differents. C'est exactement ce que les tests de similarite supposent.
 
 def _fake_embedding(text: str, dim: int = None) -> List[float]:
     """
     Vecteur deterministe, NON normalise et d'amplitude quelconque.
 
-    Non normalise a dessein : l'API ne renvoie un vecteur unitaire que pour la
-    dimension native. En dessous, la troncature Matryoshka sort avec une norme
-    arbitraire, et c'est au service de renormaliser. Une doublure qui renverrait
-    deja des vecteurs unitaires ne prouverait rien.
+    Non normalise a dessein : c'est au service de normaliser, quelle que soit
+    la sortie du fournisseur. Une doublure qui renverrait deja des vecteurs
+    unitaires ne prouverait rien.
     """
     dim = dim if dim is not None else EmbeddingService.EMBEDDING_DIM
-    rng = np.random.default_rng(abs(hash(text)) % (2**32))
+    graine = int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:4], "big")
+    rng = np.random.default_rng(graine)
     return (rng.random(dim) * 7.0).tolist()
 
 
 @pytest.fixture(autouse=True)
-def _stub_gemini(monkeypatch):
-    """Remplace le client Gemini par une doublure, pour tout ce module."""
+def _stub_voyage(monkeypatch):
+    """Double le transport HTTP de Voyage, pour tout ce module."""
+    corps_recus = []
 
-    class _Emb:
-        def __init__(self, values):
-            self.values = values
+    def _repondre(requete: httpx.Request) -> httpx.Response:
+        corps = json.loads(requete.content)
+        corps_recus.append(corps)
+        # La doublure HONORE output_dimension : c'est ce que le service demande.
+        return httpx.Response(200, json={"data": [
+            {"index": i, "embedding": _fake_embedding(t, corps["output_dimension"])}
+            for i, t in enumerate(corps["input"])
+        ]})
 
-    class _Result:
-        def __init__(self, embeddings):
-            self.embeddings = embeddings
-
-    class _Models:
-        def embed_content(self, model=None, contents=None, config=None):
-            items = contents if isinstance(contents, list) else [contents]
-            # La doublure HONORE output_dimensionality : c'est ce que le service
-            # doit demander depuis la bascule en 1536.
-            dim = getattr(config, "output_dimensionality", None)
-            _Models.last_config = config
-            return _Result([_Emb(_fake_embedding(c, dim)) for c in items])
-
-    class _Client:
-        def __init__(self, *a, **k):
-            self.models = _Models()
-
-    monkeypatch.setattr("app.services.embedding_service.genai.Client", _Client)
-    return _Models
+    monkeypatch.setattr(embedding_service, "transport_http", httpx.MockTransport(_repondre))
+    return corps_recus
 
 
 # ==================== FIXTURES ====================
 
 @pytest.fixture
-def service(_stub_gemini):
-    # Portee fonction et dependance explicite a la doublure : en portee module,
-    # le service etait construit AVANT que le patch de genai.Client ne s'applique,
-    # et gardait donc un vrai client.
+def service(_stub_voyage):
     """Service partage par les tests, cache desactive pour rester deterministe."""
     return EmbeddingService(use_cache=False)  # Cache désactivé pour tests déterministes
 
 
 @pytest.fixture
-def service_with_cache(_stub_gemini):
+def service_with_cache(_stub_voyage):
     """Service avec cache active. Le cache est une table PostgreSQL
     (embedding_cache), plus Redis."""
     try:
@@ -251,8 +241,8 @@ class TestEdgeCases:
             service.generate_embedding("   ")  # Whitespace only
 
     def test_very_long_text(self, service):
-        """Test gestion de textes très longs (>10,000 chars)."""
-        long_text = "Article " * 2000  # ~14,000 chars
+        """Au-dela de la limite du fournisseur, le texte est refuse."""
+        long_text = "A" * (service.MAX_TEXT_LENGTH + 1)
 
         with pytest.raises(ValueError, match="Texte trop long"):
             service.generate_embedding(long_text)
@@ -360,7 +350,7 @@ class TestHealthCheck:
         assert "model" in health
         assert "dimensions" in health
         # "device" appartenait au modele sentence-transformers local ; le service
-        # utilise desormais l'API Gemini, qui n'a pas de notion de peripherique.
+        # passe par une API, qui n'a pas de notion de peripherique.
         assert "model" in health
         assert "cache_enabled" in health
 
@@ -370,8 +360,8 @@ class TestHealthCheck:
         assert health["model"] == service.provider.model
         assert health["dimensions"] == EmbeddingService.EMBEDDING_DIM
         # "device" appartenait au modele sentence-transformers charge en local.
-        # Le service passe par l'API Gemini : ce qui compte est le fournisseur.
-        assert health["provider"] == "Gemini API"
+        # Le service passe par l'API Voyage : ce qui compte est le fournisseur.
+        assert health["provider"] == "Voyage AI"
         assert isinstance(health["cache_enabled"], bool)
 
     def test_health_check_without_cache(self, service):

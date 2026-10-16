@@ -315,12 +315,19 @@ def embeddings_doubles(monkeypatch):
     """Aucun modele ni reseau : des vecteurs unitaires deterministes."""
     import app.services.embedding_service as module
 
+    # Lus AVANT le remplacement : ensuite, module.EmbeddingService est la
+    # doublure elle-meme. Un vecteur d'une autre dimension que la colonne
+    # serait refuse au commit, et process_law avalerait l'erreur.
+    dim = module.EmbeddingService.EMBEDDING_DIM
+    max_len = module.EmbeddingService.MAX_TEXT_LENGTH
+
     class _Fournisseur:
         label = "doublure"
         fingerprint = "doublure|ingestion"
 
     class _Service:
-        MAX_TEXT_LENGTH = 10000
+        MAX_TEXT_LENGTH = max_len
+        EMBEDDING_DIM = dim
         provider = _Fournisseur()
 
         def __init__(self, *args, **kwargs):
@@ -330,7 +337,7 @@ def embeddings_doubles(monkeypatch):
             rng = np.random.default_rng(0)
             out = []
             for _ in texts:
-                v = rng.normal(size=768)
+                v = rng.normal(size=dim)
                 out.append((v / np.linalg.norm(v)).astype(np.float32))
             return out
 

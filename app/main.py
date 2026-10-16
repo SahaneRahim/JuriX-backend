@@ -160,12 +160,22 @@ async def lifespan(app: FastAPI):
         )
     logger.info(f"🚀 {settings.APP_NAME} v{settings.VERSION} ({settings.ENVIRONMENT})")
 
-    # Modele d'embeddings charge AVANT d'accepter des requetes : une
-    # installation incomplete se voit ici, pas a la premiere question. Un echec
+    # Fournisseur d'embeddings sonde AVANT d'accepter des requetes : une cle
+    # absente ou refusee se voit ici, pas a la premiere question. Un echec
     # n'empeche pas le demarrage — plein texte, chat et comptes fonctionnent
-    # sans embeddings — mais il est journalise et la sante passe en degraded.
-    # Hors de la boucle : le chargement prend quelques secondes de calcul.
-    await asyncio.to_thread(precharger_les_embeddings)
+    # sans embeddings — mais il est journalise et la sante le montre. Un echec
+    # passager (reseau pas encore pret) garde le service : chaque question
+    # retentera. Hors de la boucle : c'est un appel HTTPS synchrone. Borne a
+    # 20 s : httpx ne borne pas la resolution DNS, et un DNS muet au
+    # redemarrage de la VM ne doit pas retenir l'API.
+    try:
+        await asyncio.wait_for(asyncio.to_thread(precharger_les_embeddings), timeout=20)
+    except TimeoutError as e:
+        logger.warning("⚠️ Sonde du fournisseur d'embeddings sans reponse en 20 s : demarrage sans elle")
+        # La sante le montre ; la sonde, si elle finit, ecrira son issue.
+        from app.services.embedding_service import suivi_semantique
+
+        suivi_semantique.noter_sonde(e)
 
     # Purge des caches expires, en tache de fond.
     #
@@ -183,6 +193,13 @@ async def lifespan(app: FastAPI):
             tache.cancel()
             with suppress(asyncio.CancelledError):
                 await tache
+        # La connexion gardee vers le fournisseur d'embeddings (Voyage).
+        from app.services import search_service
+
+        fournisseur = getattr(search_service._embedding_service_instance, "provider", None)
+        fermer = getattr(fournisseur, "fermer", None)
+        if fermer is not None:
+            fermer()
         # close_db() existait mais n'etait jamais appele : le pool de
         # connexions asyncpg n'etait jamais libere a l'arret. Dans le `finally`
         # pour qu'il s'execute meme si l'arret vient d'une exception.

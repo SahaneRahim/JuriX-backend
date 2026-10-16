@@ -152,11 +152,13 @@ async def search(
         ) from e
 
     except SearchServiceError as e:
-        # Erreurs service (FTS PostgreSQL, pgvector, etc.)
+        # Erreurs service (FTS PostgreSQL, pgvector, fournisseur d'embeddings).
+        # Le detail reste au journal : la route est publique, et le message
+        # d'un refus du fournisseur n'a rien a faire chez le client.
         logger.error(f"❌ Search service error: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur lors de la recherche: {str(e)}",
+            detail="Erreur lors de la recherche",
         ) from e
 
     except Exception as e:
@@ -503,6 +505,20 @@ async def search_health(db: AsyncSession = Depends(get_db)) -> dict:
         report["status"] = "degraded"
     else:
         report["embedding_service"] = "ready"
+
+    # Ce que les recherches ont vu depuis : une cle revoquee, un compte bride
+    # (429) ou un fournisseur en panne passent la sonde du demarrage, puis
+    # font retomber chaque question sur le plein texte. Motif court seulement :
+    # la route est publique.
+    try:
+        from app.services.embedding_service import suivi_semantique
+
+        recent = suivi_semantique.etat()
+        report["semantic_recent"] = recent
+        if recent["degrade"]:
+            report["status"] = "degraded"
+    except Exception as e:
+        report["semantic_recent"] = f"error: {type(e).__name__}"
 
     # Provenance des vecteurs. « foreign » : produits par un AUTRE fournisseur
     # que celui qui encode les questions — leurs cosinus ne veulent rien dire,

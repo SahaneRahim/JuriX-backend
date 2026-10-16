@@ -113,9 +113,9 @@ def test_une_vraie_cle_est_acceptee():
 @pytest.mark.asyncio
 async def test_le_demarrage_precharge_le_modele_d_embeddings(monkeypatch):
     """
-    Le modele d'embeddings est charge AVANT que l'API n'accepte de requete.
+    Le fournisseur d'embeddings est sonde AVANT que l'API n'accepte de requete.
 
-    Sans ce prechargement, un modele absent ou corrompu ne se revelait qu'a la
+    Sans cette sonde, une cle absente ou refusee ne se revelait qu'a la
     premiere question, et la recherche hybride repondait en plein texte seul
     sans que rien ne le signale.
     """

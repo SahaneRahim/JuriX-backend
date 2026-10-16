@@ -12,7 +12,7 @@ interroge TOUJOURS Gemini, quel que soit EMBEDDING_PROVIDER : la propriete
 verifiee est celle de gemini-embedding-001.
 
 Usage:
-    python -m scripts.eval.validate_slicing --dim 768 --samples 20
+    python -m scripts.eval.validate_slicing --dim 1024 --samples 20
 """
 
 import argparse
@@ -55,7 +55,7 @@ TEXTS = [
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dim", type=int, default=768)
+    parser.add_argument("--dim", type=int, default=1024)
     parser.add_argument("--samples", type=int, default=20)
     parser.add_argument("--threshold", type=float, default=0.999)
     args = parser.parse_args(argv)
@@ -67,7 +67,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     texts = TEXTS[: args.samples]
     # Gemini explicitement, et la reference a SA dimension native. Laissee a
-    # EMBEDDING_DIM (768 depuis la bascule), elle comparerait 768 a 768 et
+    # EMBEDDING_DIM (1024 depuis Voyage), elle comparerait 1024 a 1024 et
     # conclurait toujours « decoupage valide », sans rien avoir verifie.
     native = EmbeddingService(use_cache=False, provider=GeminiProvider())
     native.EMBEDDING_DIM = GeminiProvider.native_dim

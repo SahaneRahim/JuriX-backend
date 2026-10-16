@@ -3,13 +3,13 @@ Mesure la recuperation sur le jeu d'evaluation.
 
 Trois questions distinctes, trois chemins :
 
-1. LA DIMENSION (--dims). Compare 768, 512 et 256 en FORCE BRUTE, en numpy,
+1. LA DIMENSION (--dims). Compare 1024, 512 et 256 en FORCE BRUTE, en numpy,
    sur les memes chunks : la question est la qualite de l'EMBEDDING, pas celle
    de l'index. Les vecteurs des dimensions inferieures sont obtenus en
-   tronquant puis renormalisant les vecteurs stockes : EmbeddingGemma est
-   entraine en Matryoshka (768, 512, 256, 128), gemini-embedding-001 aussi —
-   ce que scripts/eval/validate_slicing.py verifie contre son API. Cout : zero
-   encodage supplementaire pour le corpus.
+   tronquant puis renormalisant les vecteurs stockes : voyage-4-large est
+   entraine en Matryoshka (2048, 1024, 512, 256), gemini-embedding-001 aussi —
+   ce que scripts/eval/validate_slicing.py verifie contre l'API Gemini. Cout :
+   zero encodage supplementaire pour le corpus.
 
 2. LE MODE ET LE RE-RANKING (--modes, --rerank). Passe par le vrai
    SearchService, donc par l'index et le cache : c'est le systeme reel qui est
@@ -23,7 +23,7 @@ resultat, et la conclusion « aucune difference mesurable, prends le moins
 cher » est une conclusion valide.
 
 Usage:
-    python -m scripts.eval.run_eval --dims 768 512 256
+    python -m scripts.eval.run_eval --dims 1024 512 256
     python -m scripts.eval.run_eval --modes text semantic hybrid --rerank none stage1
     python -m scripts.eval.run_eval --sweep rrf
 """
@@ -69,6 +69,10 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="chunks demandes par question")
     parser.add_argument("--label", default="run")
     parser.add_argument("--allow-unreviewed", action="store_true")
+    parser.add_argument(
+        "--comme-le-chat", action="store_true",
+        help="mots-cles en plein texte, question entiere en semantique, comme le chat",
+    )
     parser.add_argument("--skip-snapshot-check", action="store_true")
     return parser.parse_args(argv)
 
@@ -154,9 +158,18 @@ async def _embed_questions(questions: List[str]) -> np.ndarray:
     service = get_embedding_service()
     vectors = []
     for question in questions:
-        vectors.append(await service.generate_embedding_async(
-            question, task_type=EmbeddingService.TASK_QUERY
-        ))
+        # Trois essais : une question n'en a qu'un, borne a quelques secondes,
+        # et un seul echec passager ferait tomber toute la mesure.
+        for essai in range(3):
+            try:
+                vectors.append(await service.generate_embedding_async(
+                    question, task_type=EmbeddingService.TASK_QUERY
+                ))
+                break
+            except Exception:
+                if essai == 2:
+                    raise
+                await asyncio.sleep(2 * (essai + 1))
     return np.array(vectors, dtype=np.float32)
 
 
@@ -167,22 +180,85 @@ def _brute_force_rankings(article_ids: np.ndarray, corpus: np.ndarray,
     return [[int(article_ids[i]) for i in row] for row in order]
 
 
+def _rattacher_l_or(items: List[Dict[str, Any]]) -> List[int]:
+    """
+    Identifiant de l'article attendu, rattache par (loi, numero) s'il n'existe
+    plus.
+
+    Redecouper une loi supprime ses articles et les recree sous de NOUVEAUX
+    ids : le 14/10/2026, 17 des identifiants attendus avaient disparu (34
+    questions sur 102). Sans ce rattachement, ces questions comptaient comme
+    des echecs pour toute configuration, et les ecarts mesures etaient dilues.
+    """
+    with SyncSessionLocal() as session:
+        existants = {
+            r[0] for r in session.execute(
+                text("SELECT id FROM articles WHERE id = ANY(:ids)"),
+                {"ids": [int(i["expected_article_id"]) for i in items]},
+            )
+        }
+        gold, rattaches, perdus = [], 0, 0
+        for item in items:
+            attendu = int(item["expected_article_id"])
+            if attendu not in existants:
+                trouve = session.execute(
+                    text("SELECT min(id) FROM articles WHERE law_id = :loi AND number = :numero"),
+                    {"loi": int(item["expected_law_id"]),
+                     "numero": str(item["expected_article_number"])},
+                ).scalar()
+                if trouve is None:
+                    perdus += 1
+                else:
+                    attendu, rattaches = int(trouve), rattaches + 1
+            gold.append(attendu)
+    if rattaches or perdus:
+        logger.warning(
+            "Or rattache par (loi, numero) : %s question(s) ; introuvable : %s",
+            rattaches, perdus,
+        )
+    return gold
+
+
 # ==================== 2. LE SYSTEME REEL ====================
 
 
 async def _system_rankings(items: List[Dict[str, Any]], mode: str, rerank: str,
-                           limit: int) -> List[List[int]]:
+                           limit: int, comme_le_chat: bool = False) -> List[List[int]]:
+    """
+    comme_le_chat : la requete du chat, mots-cles en plein texte et question
+    entiere en semantique (RAGService._retrieve_chunks), et non la question
+    pour les deux.
+
+    Une recherche dont le volet semantique a echoue (fournisseur lent ou en
+    panne) est rejouee : la compter telle quelle biaiserait la mesure sans le
+    moindre signal.
+    """
+    from app.services.rag_service import RAGService
+
     rankings = []
+    degradees = 0
     async with AsyncSessionLocal() as session:
         service = SearchService(session, use_cache=False)
         for item in items:
-            response = await service.search(SearchRequest(
-                query=item["question"], mode=mode, limit=limit,
-            ))
+            question = item["question"]
+            requete = SearchRequest(
+                query=RAGService.extract_keywords(question) if comme_le_chat else question,
+                semantic_query=question if comme_le_chat else None,
+                mode=mode, limit=limit,
+            )
+            for essai in range(3):
+                response = await service.search(requete)
+                if not service.semantique_degradee:
+                    break
+                await asyncio.sleep(2 * (essai + 1))
+            else:
+                degradees += 1
             chunks = response.chunks
             if rerank == "stage1":
                 chunks = rerank_chunks(item["question"], chunks)
             rankings.append([c.article_id for c in chunks if c.article_id is not None])
+    if degradees:
+        logger.warning("%s question(s) mesuree(s) sans volet semantique, apres 3 essais", degradees)
     return rankings
 
 
@@ -217,7 +293,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not items:
         raise SystemExit(f"Aucun item dans le lot '{args.split}'")
 
-    gold = [item["expected_article_id"] for item in items]
+    gold = _rattacher_l_or(items)
     questions = [item["question"] for item in items]
     logger.info("%s questions (lot %s)", len(items), args.split)
 
@@ -253,7 +329,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     module.SearchService.TEXT_WEIGHT = weight
                     module.SearchService.SEMANTIC_WEIGHT = 1.0 - weight
                     rankings = asyncio.run(
-                        _system_rankings(items, "hybrid", "stage1", args.limit)
+                        _system_rankings(items, "hybrid", "stage1", args.limit, args.comme_le_chat)
                     )
                     rows.append({
                         "config": f"hybrid/k={rrf_k}/text={weight:.1f}",
@@ -266,7 +342,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif not args.dims:
         for mode in args.modes:
             for rerank in args.rerank:
-                rankings = asyncio.run(_system_rankings(items, mode, rerank, args.limit))
+                rankings = asyncio.run(
+                    _system_rankings(items, mode, rerank, args.limit, args.comme_le_chat)
+                )
                 rows.append({
                     "config": f"{mode}/rerank={rerank}",
                     "metrics": summarise(rankings, gold, ks=args.k),

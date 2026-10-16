@@ -13,6 +13,7 @@ pures fonctions de texte.
 import numpy as np
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import undefer
 
 from app.models.law import Article, Law
 from app.services.embedding_service import EmbeddingService
@@ -260,7 +261,7 @@ class TestEmbeddingGeneration:
     def _stub_service(self, monkeypatch):
         """Doublure d'EmbeddingService : aucun appel reseau."""
         dim = EmbeddingService.EMBEDDING_DIM
-        calls = {"texts": None}
+        calls = {"texts": None, "fermetures": 0}
 
         class _Provider:
             label = "doublure"
@@ -273,6 +274,9 @@ class TestEmbeddingGeneration:
 
             def __init__(self, *a, **k):
                 pass
+
+            def fermer(self):
+                calls["fermetures"] += 1
 
             def generate_batch_embeddings(self, texts, **kwargs):
                 calls["texts"] = texts
@@ -289,14 +293,19 @@ class TestEmbeddingGeneration:
         return calls
 
     @pytest.mark.asyncio
-    async def test_writes_vectors_for_every_article(self, db_session, law_row):
+    async def test_writes_vectors_for_every_article(self, db_session, law_row, _stub_service):
         pl._split_and_save_articles(law_row.id, SAMPLE_TEXT)
 
         written = pl._generate_article_embeddings(law_row.id)
 
         assert written > 0
+        # Un service par loi : sa connexion gardee ne survit pas a la loi.
+        assert _stub_service["fermetures"] == 1
+        # undefer : la colonne est differee, et une lecture paresseuse est
+        # impossible en asynchrone (MissingGreenlet).
         rows = (await db_session.execute(
             select(Article).where(Article.law_id == law_row.id)
+            .options(undefer(Article.embedding))
         )).scalars().all()
 
         # Seuls les chunks marques embed sont vectorises : les visas et les
@@ -335,7 +344,11 @@ class TestEmbeddingGeneration:
         la loi ENTIERE ; l'exception etait avalee et la loi publiee sans un
         seul vecteur.
         """
-        long_text = SAMPLE_TEXT + "\n\nArticle 4. Long\n" + ("mot " * 6000)
+        # Relatif a la limite : un texte fixe passerait sous une limite relevee
+        # (78 000 caracteres pour Voyage), sans plus exercer la troncature.
+        long_text = SAMPLE_TEXT + "\n\nArticle 4. Long\n" + (
+            "mot " * (EmbeddingService.MAX_TEXT_LENGTH // 4 + 500)
+        )
         pl._split_and_save_articles(law_row.id, long_text)
 
         written = pl._generate_article_embeddings(law_row.id)

@@ -1,5 +1,5 @@
 """
-La garde reseau de la suite : aucun appel reel a Groq ni a Mistral.
+La garde reseau de la suite : aucun appel reel a Groq, a Mistral ni a Voyage.
 
 Avant elle, une suite complete envoyait de vrais appels a Groq (classement
 des lois dans le pipeline, routes du classifieur) avec la cle du .env. Le
@@ -19,7 +19,8 @@ import os
 import pytest
 
 from app.core.config import settings
-from app.services import groq_service, mistral_service
+from app.services import embedding_service, groq_service, mistral_service
+from app.services.embedding_service import EmbeddingService, VoyageProvider
 from app.services.groq_service import GroqService
 from app.services.mistral_service import MistralService
 from tests.conftest import CLE_FACTICE
@@ -36,7 +37,9 @@ def _garde(module):
     return module.transport_http.handler.__self__
 
 
-@pytest.mark.parametrize("cle", ["GEMINI_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY"])
+@pytest.mark.parametrize(
+    "cle", ["GEMINI_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY", "VOYAGE_API_KEY"]
+)
 def test_les_cles_sont_factices(cle):
     assert getattr(settings, cle) == CLE_FACTICE
 
@@ -70,6 +73,23 @@ async def test_un_appel_mistral_reel_est_refuse():
         await MistralService(api_key="x").generate("bonjour")
 
     assert garde.appels == ["POST https://api.mistral.ai/v1/chat/completions"]
+    garde.appels.clear()
+
+
+def test_un_appel_voyage_reel_est_refuse():
+    """
+    Le .env porte une vraie cle Voyage : sans garde, tout test qui atteint le
+    fournisseur consommerait des jetons — et resterait vert, la recherche
+    hybride avalant l'echec du volet semantique.
+    """
+    garde = _garde(embedding_service)
+
+    with pytest.raises(pytest.fail.Exception, match="voyage_live"):
+        VoyageProvider(api_key="x").embed(
+            ["une question"], EmbeddingService.TASK_QUERY, EmbeddingService.EMBEDDING_DIM
+        )
+
+    assert garde.appels == ["POST https://api.voyageai.com/v1/embeddings"]
     garde.appels.clear()
 
 

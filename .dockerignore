@@ -2,7 +2,8 @@
 #
 # .env en tete : le COPY . . du Dockerfile l'embarquait dans une couche, donc
 # les cles Gemini et LlamaParse etaient lisibles par quiconque peut telecharger
-# l'image. Les secrets se passent par variables d'environnement au deploiement.
+# l'image. Les secrets (Mistral, Groq, Voyage...) se passent par variables
+# d'environnement au deploiement.
 .env
 .env.*
 !.env.example
@@ -40,7 +41,6 @@ scripts/eval/
 
 # Modeles telecharges dans l'image elle-meme (voir le Dockerfile)
 models/fasttext/*.bin
-models/embeddinggemma-300m-onnx/
 
 # Deploiement : le .env de production (les secrets), le front construit, les
 # PDF et les sauvegardes vivent sous deploiement/oracle sur la VM. Le COPY . .

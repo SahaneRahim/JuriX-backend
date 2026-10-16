@@ -120,15 +120,16 @@ _pg_probleme: str | None = None
 
 # Cles des API externes, remplacees par une cle factice pendant toute la suite.
 CLE_FACTICE = "test-key-not-a-real-credential"
-_CLES_API = ("GEMINI_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY")
+_CLES_API = ("GEMINI_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY", "VOYAGE_API_KEY")
 _CLES_REELLES: dict = {}
 
 # Marqueur d'un test qui appelle le vrai service : nom du service, module qui
 # porte son `transport_http`, et cle sans laquelle le test est ignore.
-_MARQUEURS_API_REELLE = {"groq_live": "Groq", "mistral_live": "Mistral"}
+_MARQUEURS_API_REELLE = {"groq_live": "Groq", "mistral_live": "Mistral", "voyage_live": "Voyage"}
 _MODULES_GARDES = {
     "groq_live": ("app.services.groq_service", "GROQ_API_KEY"),
     "mistral_live": ("app.services.mistral_service", "MISTRAL_API_KEY"),
+    "voyage_live": ("app.services.embedding_service", "VOYAGE_API_KEY"),
 }
 
 
@@ -176,10 +177,6 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "docling: execute le vrai Docling (modeles dans le cache Hugging Face requis)",
-    )
-    config.addinivalue_line(
-        "markers",
-        "gemma: execute le vrai modele EmbeddingGemma local (onnxruntime et fichiers requis)",
     )
     for marqueur, service in _MARQUEURS_API_REELLE.items():
         config.addinivalue_line(
@@ -282,10 +279,10 @@ class _EmbeddingsDeterministes:
     Remplace le service d'embeddings reel derriere SearchService.
 
     POURQUOI. Un SearchService construit dans un test prend le singleton du
-    module, donc le VRAI service : hier un client Gemini (avec la vraie cle du
-    .env, donc des appels payants), demain le modele local (1,5 Go en memoire).
-    La recherche hybride avalant les echecs semantiques, ces tests restaient
-    verts dans tous les cas sans rien prouver.
+    module, donc le VRAI service : un client Voyage, dont chaque appel
+    consomme du quota — la garde reseau le refuserait. La recherche hybride
+    avalant les echecs semantiques, ces tests restaient verts dans tous les
+    cas sans rien prouver.
 
     Les vecteurs sont deterministes — derives d'une empreinte stable du texte,
     jamais de hash(), qui change d'une execution a l'autre — et unitaires, comme
@@ -326,17 +323,15 @@ class _EmbeddingsDeterministes:
 @pytest.fixture(autouse=True)
 def _epingler_le_fournisseur_d_embeddings(request):
     """
-    Les tests construisent un EmbeddingService sur Gemini, sauf ceux marques
-    `gemma`.
+    Les tests construisent un EmbeddingService sur Voyage, le defaut de
+    production, quel que soit le .env.
 
-    Le defaut de production est EmbeddingGemma, en local. Sans cet
-    epinglage, tout test qui construit un service par defaut exigerait le
-    modele sur disque — 300 Mo, absents d'une machine d'integration — et le
-    chargerait en memoire. Sur Gemini, la cle de test est fausse et les
-    tests doublent le client : rien ne part sur le reseau.
-
-    Les tests qui portent sur le choix du fournisseur le reglent eux-memes ;
-    ceux du vrai modele sont marques `gemma`.
+    Rien ne part sur le reseau : la cle est factice, et la garde pose sur
+    `embedding_service.transport_http` un transport qui refuse tout appel. Un
+    test qui genere un vecteur double ce transport (httpx.MockTransport), ou
+    injecte un fournisseur ; ceux qui appellent le vrai Voyage sont marques
+    `voyage_live`. Les tests qui portent sur le choix du fournisseur le
+    reglent eux-memes.
 
     Affectation directe et non `monkeypatch` : une fixture automatique qui le
     demanderait l'instancierait AVANT la doublure ci-dessous, donc le
@@ -344,14 +339,20 @@ def _epingler_le_fournisseur_d_embeddings(request):
     search_service seraient alors defaits apres la restauration, et la
     doublure fuirait d'un test a l'autre.
     """
-    if request.node.get_closest_marker("gemma"):
-        yield
-        return
     from app.core.config import settings
 
     avant = settings.EMBEDDING_PROVIDER
     avant_classement = settings.INTENT_CLASSIFIER
-    settings.EMBEDDING_PROVIDER = "gemini"
+    # Le modele et les delais aussi : un .env qui les changerait (voyage-4-lite,
+    # documente dans .env.example) changerait l'empreinte et le corps attendus.
+    avant_voyage = {
+        nom: getattr(settings, nom)
+        for nom in ("VOYAGE_EMBEDDING_MODEL", "VOYAGE_TIMEOUT_QUESTION_S", "VOYAGE_TIMEOUT_DOCUMENT_S")
+    }
+    settings.EMBEDDING_PROVIDER = "voyage"
+    settings.VOYAGE_EMBEDDING_MODEL = "voyage-4-large"
+    settings.VOYAGE_TIMEOUT_QUESTION_S = 3.0
+    settings.VOYAGE_TIMEOUT_DOCUMENT_S = 120.0
     # Le classement d'intention passe par le modele PASSE EN PARAMETRE (mode
     # « llm »), que les tests du routage doublent. En mode « groq », chaque
     # question du chat appellerait Groq, que la garde reseau interdit ; les
@@ -362,32 +363,29 @@ def _epingler_le_fournisseur_d_embeddings(request):
     finally:
         settings.EMBEDDING_PROVIDER = avant
         settings.INTENT_CLASSIFIER = avant_classement
+        for nom, valeur in avant_voyage.items():
+            setattr(settings, nom, valeur)
 
 
 @pytest.fixture(autouse=True)
 def _doubler_le_service_d_embeddings(request):
-    """
-    Installe la doublure avant chaque test, et restaure l'etat ensuite.
-
-    Les tests marques `gemma` sont exemptes : ils existent precisement pour
-    executer le vrai modele.
-    """
-    if request.node.get_closest_marker("gemma"):
-        yield
-        return
-
+    """Installe la doublure avant chaque test, et restaure l'etat ensuite."""
     from app.services import search_service
-    from app.services.embedding_service import EmbeddingService
+    from app.services.embedding_service import EmbeddingService, suivi_semantique
 
     avant = (search_service._embedding_service_instance, search_service._singletons_initialized)
     search_service._embedding_service_instance = _EmbeddingsDeterministes(
         EmbeddingService.EMBEDDING_DIM
     )
     search_service._singletons_initialized = True
+    # Les echecs du volet semantique d'un test ne doivent pas degrader la
+    # sante vue par le suivant.
+    suivi_semantique.vider()
     try:
         yield
     finally:
         search_service._embedding_service_instance, search_service._singletons_initialized = avant
+        suivi_semantique.vider()
 
 
 # ==================== DOUBLURE DU CLASSEMENT DES LOIS ====================
@@ -480,11 +478,14 @@ class _AppelsInterdits:
 
 def _vider_les_singletons_llm():
     """Un singleton construit avec une cle la garde : il faut le reconstruire."""
+    from app.services.embedding_service import get_embedding_service
     from app.services.gemini_service import get_gemini_service
     from app.services.groq_service import get_groq_service
     from app.services.mistral_service import get_mistral_service
 
-    for fabrique in (get_gemini_service, get_groq_service, get_mistral_service):
+    for fabrique in (
+        get_gemini_service, get_groq_service, get_mistral_service, get_embedding_service,
+    ):
         fabrique.cache_clear()
 
 
@@ -493,8 +494,9 @@ def api_reelle():
     """
     Remet les vraies cles du .env, pour un test qui appelle le vrai service.
 
-    Demandee d'office par les tests marques `groq_live` ou `mistral_live`. Les
-    cles factices et des singletons neufs sont remis en sortie.
+    Demandee d'office par les tests marques `groq_live`, `mistral_live` ou
+    `voyage_live`. Les cles factices et des singletons neufs sont remis en
+    sortie.
     """
     from app.core.config import settings
 
@@ -513,11 +515,11 @@ def api_reelle():
 @pytest.fixture(autouse=True)
 def _garde_reseau_llm(request):
     """
-    Aucun appel reel a Groq ni a Mistral, sauf demande explicite.
+    Aucun appel reel a Groq, a Mistral ni a Voyage, sauf demande explicite.
 
     Chaque service lit son `transport_http` a chaque appel : la garde y est
     posee pour la duree du test, puis l'etat d'avant est remis. Un test marque
-    `groq_live` (ou `mistral_live`) leve la garde de CE service seulement, et
+    `groq_live` (ou `mistral_live`, `voyage_live`) leve la garde de CE service seulement, et
     recoit les vraies cles.
 
     Un appel refuse fait echouer le test sur-le-champ. S'il a ete avale (un

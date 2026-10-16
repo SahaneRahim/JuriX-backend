@@ -397,6 +397,30 @@ class TestContextRetrieval:
         assert chunks == mock_search_results
 
     @pytest.mark.asyncio
+    async def test_le_plein_texte_cherche_les_mots_cles_le_semantique_la_question(
+        self,
+        rag_service,
+        mock_search_results
+    ):
+        """
+        Mesure par le chemin du chat (102 questions, voyage-4-large) : la
+        question entiere vectorisee bat ses mots-cles. Le plein texte, lui,
+        garde les mots-cles.
+        """
+        mock_search_response = MagicMock()
+        mock_search_response.chunks = mock_search_results
+        mock_search_response.results = []
+        rag_service.search_service.search.return_value = mock_search_response
+        question = "Quelle est la responsabilité des dirigeants d'une société ?"
+
+        await rag_service._retrieve_chunks(question, "fr")
+
+        search_request = rag_service.search_service.search.call_args[0][0]
+        assert search_request.semantic_query == question
+        assert search_request.query == RAGService.extract_keywords(question)
+        assert search_request.query != question
+
+    @pytest.mark.asyncio
     async def test_retrieve_context_respects_language_filter(
         self,
         rag_service,

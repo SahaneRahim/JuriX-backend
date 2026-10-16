@@ -45,9 +45,9 @@ if ! swapon --show | grep -q /swapfile; then
 fi
 
 echo "== 4. Dossiers des donnees"
-# Le dossier du modele existe AVANT tout `docker compose up` : sinon Docker le
-# cree, en root, et l'envoi du modele echoue ensuite sur un refus d'acces.
-mkdir -p donnees/uploads modeles/embeddinggemma-300m-onnx sauvegardes front
+# Avant tout `docker compose up` : sinon Docker cree les dossiers montes, en
+# root, et les envois echouent ensuite sur un refus d'acces.
+mkdir -p donnees/uploads sauvegardes front
 # L'API tourne sous l'utilisateur 1000 dans son conteneur : elle doit pouvoir
 # ecrire les PDF envoyes.
 sudo chown -R 1000:1000 donnees

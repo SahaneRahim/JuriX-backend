@@ -14,45 +14,32 @@ Chaque test correspond a un mecanisme qui n'existait pas :
 
 import json
 
+import httpx
 import numpy as np
 import pytest
 
+from app.services import embedding_service as module
 from app.services.embedding_service import EmbeddingService, EmbeddingServiceError
-
-
-class _Emb:
-    def __init__(self, values):
-        self.values = values
-
-
-class _Result:
-    def __init__(self, embeddings):
-        self.embeddings = embeddings
 
 
 @pytest.fixture
 def recorder(monkeypatch):
-    """Doublure Gemini qui enregistre la configuration recue."""
-    state = {"configs": [], "n_returned": None, "dim": None, "scale": 9.0}
+    """Doublure HTTP de Voyage qui enregistre le corps de chaque requete."""
+    state = {"payloads": [], "n_returned": None, "dim": None, "scale": 9.0}
 
-    class _Models:
-        def embed_content(self, model=None, contents=None, config=None):
-            state["configs"].append(config)
-            items = contents if isinstance(contents, list) else [contents]
-            dim = state["dim"] or getattr(config, "output_dimensionality", None)
-            n = state["n_returned"] if state["n_returned"] is not None else len(items)
-            rng = np.random.default_rng(7)
-            # Vecteurs NON unitaires : c'est le service qui doit normaliser.
-            return _Result([
-                _Emb((rng.random(dim) * state["scale"]).tolist())
-                for _ in range(n)
-            ])
+    def _repondre(requete: httpx.Request) -> httpx.Response:
+        payload = json.loads(requete.content)
+        state["payloads"].append(payload)
+        dim = state["dim"] or payload["output_dimension"]
+        n = state["n_returned"] if state["n_returned"] is not None else len(payload["input"])
+        rng = np.random.default_rng(7)
+        # Vecteurs NON unitaires : c'est le service qui doit normaliser.
+        return httpx.Response(200, json={"data": [
+            {"index": i, "embedding": (rng.random(dim) * state["scale"]).tolist()}
+            for i in range(n)
+        ]})
 
-    class _Client:
-        def __init__(self, *a, **k):
-            self.models = _Models()
-
-    monkeypatch.setattr("app.services.embedding_service.genai.Client", _Client)
+    monkeypatch.setattr(module, "transport_http", httpx.MockTransport(_repondre))
     return state
 
 
@@ -63,14 +50,13 @@ def service(recorder):
 
 class TestDimension:
 
-    def test_output_dimensionality_is_requested(self, service, recorder):
+    def test_output_dimension_is_requested(self, service, recorder):
         service.generate_embedding("Article premier du code civil")
 
-        config = recorder["configs"][-1]
-        assert config.output_dimensionality == EmbeddingService.EMBEDDING_DIM
+        assert recorder["payloads"][-1]["output_dimension"] == EmbeddingService.EMBEDDING_DIM
         # Valeur absolue et non derivee : le but est de remarquer un changement
         # accidentel de dimension, pas de le suivre.
-        assert EmbeddingService.EMBEDDING_DIM == 768
+        assert EmbeddingService.EMBEDDING_DIM == 1024
 
     def test_embedding_has_configured_dimension(self, service):
         embedding = service.generate_embedding("Article premier")
@@ -147,7 +133,7 @@ class TestCacheKey:
     def test_key_is_case_sensitive(self, service):
         """
         La cle minusculait le texte : "Article PREMIER" et "article premier"
-        partageaient une entree alors que Gemini les encode differemment.
+        partageaient une entree alors que le modele les encode differemment.
         """
         upper = service._cache_key("Article PREMIER", EmbeddingService.TASK_DOCUMENT)
         lower = service._cache_key("article premier", EmbeddingService.TASK_DOCUMENT)
@@ -187,7 +173,7 @@ class TestOffLoop:
     async def test_generate_embedding_async_runs_off_the_event_loop(self, service):
         """
         La recherche semantique appelait generate_embedding depuis une
-        coroutine : la boucle etait gelee pour l'aller-retour Gemini, le
+        coroutine : la boucle etait gelee pour l'aller-retour reseau, le
         time.sleep du backoff et les E/S psycopg2 du cache.
         """
         import threading
@@ -195,13 +181,13 @@ class TestOffLoop:
         loop_thread = threading.get_ident()
         seen = {}
 
-        original = service.generate_embedding
+        original = service._produire
 
         def _spy(*args, **kwargs):
             seen["thread"] = threading.get_ident()
             return original(*args, **kwargs)
 
-        service.generate_embedding = _spy
+        service._produire = _spy
 
         embedding = await service.generate_embedding_async("Une question")
 
@@ -213,7 +199,16 @@ class TestOffLoop:
         """Son seul appelant encode une question, pas un document."""
         await service.generate_embedding_async("Une question")
 
-        assert recorder["configs"][-1].task_type == EmbeddingService.TASK_QUERY
+        assert recorder["payloads"][-1]["input_type"] == "query"
+
+    def test_batch_encodes_documents(self, service, recorder):
+        """
+        L'autre moitie de l'asymetrie de la recherche : une inversion encoderait
+        les articles comme des questions, sans erreur.
+        """
+        service.generate_batch_embeddings(["Article premier", "Article 2"])
+
+        assert recorder["payloads"][-1]["input_type"] == "document"
 
 
 class TestRequestTimeout:
@@ -228,11 +223,13 @@ class TestRequestTimeout:
     """
 
     def test_embedding_client_has_a_timeout(self):
-        # Sans la doublure `recorder` : c'est le VRAI client qu'on inspecte.
-        # Sa construction n'ouvre aucune connexion.
+        # Sans doublure : c'est le VRAI client Gemini qu'on inspecte. Sa
+        # construction n'ouvre aucune connexion. Les delais de Voyage sont
+        # verifies dans test_embedding_voyage.py.
         from app.core.config import settings
+        from app.services.embedding_service import GeminiProvider
 
-        service = EmbeddingService(use_cache=False)
+        service = EmbeddingService(use_cache=False, provider=GeminiProvider(api_key="x"))
         configured = service.client._api_client._http_options.timeout
 
         assert configured == settings.GEMINI_TIMEOUT_S * 1000  # millisecondes
@@ -285,10 +282,11 @@ class TestDailyQuota:
         assert _is_daily_quota_error(Exception("500 INTERNAL")) is False
         assert _is_daily_quota_error(Exception("401 UNAUTHENTICATED")) is False
 
-    def test_batch_raises_immediately_without_retrying(self, service, recorder, monkeypatch):
+    def test_batch_raises_immediately_without_retrying(self, monkeypatch):
         """Aucune tentative supplementaire : on leve au premier 429 journalier."""
-        import app.services.embedding_service as module
-        from app.services.embedding_service import QuotaExhaustedError
+        from app.services.embedding_service import GeminiProvider, QuotaExhaustedError
+
+        service = EmbeddingService(use_cache=False, provider=GeminiProvider(api_key="x"))
 
         calls = {"n": 0}
 

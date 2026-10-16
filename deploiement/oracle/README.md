@@ -6,7 +6,7 @@ disque, gratuite tant qu'on reste dans ces limites.
 
 ```
 navigateur ──https──> Caddy (ports 80/443, certificat automatique)
-                        ├── /api/*, /health ──> api (FastAPI + EmbeddingGemma)
+                        ├── /api/*, /health ──> api (FastAPI) ──https──> Voyage AI (embeddings)
                         │                          └──> db (PostgreSQL 16 + pgvector)
                         └── tout le reste ──────> front statique (SvelteKit)
 ```
@@ -14,12 +14,15 @@ navigateur ──https──> Caddy (ports 80/443, certificat automatique)
 - **Un seul domaine** — le sous-domaine, par exemple `jurix.exemple.cm` — sert
   le front et l'API (sous `/api/v1`). Pas de CORS, un seul certificat.
 - **Aucun port de la base n'est exposé** : seule l'API la voit.
-- Mistral et Groq restent des API externes ; rien ne tourne pour eux ici.
+- Mistral, Groq et Voyage AI (les embeddings de la recherche sémantique)
+  restent des API externes ; rien ne tourne pour eux ici. L'API a donc besoin
+  du HTTPS sortant, ouvert par défaut.
 - L'ingestion de nouveaux PDF (Docling, OCR) se fait sur la machine de
   développement, pas sur la VM.
 
-Besoins mesurés : ~1,5 à 2 Go pour l'API (le modèle d'embeddings est en
-mémoire), ~2 à 3 Go pour PostgreSQL, soit 4 à 5 Go sur 12.
+Besoins : ~2 à 3 Go pour PostgreSQL, et bien moins pour l'API depuis qu'elle ne
+garde plus de modèle d'embeddings en mémoire (EmbeddingGemma prenait ~1,5 Go) :
+à mesurer par `docker stats` après le premier déploiement.
 
 ## 1. Le compte Oracle (une fois, par toi)
 
@@ -81,19 +84,25 @@ git archive HEAD | ssh -i ~/.ssh/jurix_oracle ubuntu@$IP "mkdir -p jurix && tar 
 ssh -i ~/.ssh/jurix_oracle ubuntu@$IP "bash jurix/deploiement/oracle/installer.sh"
 
 # b. Les secrets, SUR la VM uniquement : domaine, mot de passe de la base et
-#    SECRET_KEY (openssl rand -hex 32 / -hex 24), clés Mistral et Groq,
-#    ADMIN_EMAIL et ADMIN_PASSWORD (le compte administrateur de la production)
+#    SECRET_KEY (openssl rand -hex 32 / -hex 24), clés Mistral, Groq et Voyage
+#    (compte Voyage AVEC moyen de paiement), ADMIN_EMAIL et ADMIN_PASSWORD
+#    (le compte administrateur de la production)
 ssh -i ~/.ssh/jurix_oracle ubuntu@$IP
 cd jurix/deploiement/oracle && cp env.production.exemple .env && nano .env
 exit
 
-# c. Tout le reste : front, modèle, PDF (5,6 Go, reprenable), base, démarrage
+# c. Tout le reste : front, PDF (5,6 Go, reprenable), base, démarrage
 deploiement/oracle/deployer.sh ubuntu@$IP --avec-donnees
 ```
 
 Prérequis sur la machine de développement : le dépôt du front à côté de celui-ci
 (ou `JURIX_FRONT`), avec ses `node_modules` ; le conteneur `jurix-pg` démarré ;
-le modèle dans `~/modeles` (ou `JURIX_MODELE`).
+`jurix_dev` à la dernière migration, ses vecteurs Voyage chargés
+(`deployer.sh` refuse de l'envoyer sinon : la migration viderait les vecteurs
+sur la VM, qui n'a pas de quoi les recharger sans tout recalculer).
+
+Une clé changée dans `.env` ne prend effet qu'avec `docker compose up -d api`,
+qui recrée le conteneur : `docker compose restart` ne relit pas le fichier.
 
 Connexion Google (facultative) : `GOOGLE_CLIENT_ID` dans le `.env` de la VM
 (`deployer.sh` le reprend pour construire le front), et, dans la console Google
@@ -115,7 +124,10 @@ pas encore sur la VM, Caddy réessaie de lui-même, à intervalles croissants
 (jusqu'à plusieurs heures) : une fois le DNS en place, `docker compose restart
 caddy` relance la demande tout de suite.
 
-Vérifier : `https://jurix.exemple.cm` et `https://jurix.exemple.cm/health`.
+Vérifier : `https://jurix.exemple.cm`, `https://jurix.exemple.cm/health`, et
+`https://jurix.exemple.cm/api/v1/search/health` : `status` à `healthy` et
+`embedding_service` à `ready` (`demarrer.sh` le contrôle aussi et prévient,
+sinon la recherche sémantique serait coupée sans bruit).
 
 ## 5. Mettre à jour
 
@@ -126,8 +138,26 @@ JURIX_DOMAINE=jurix.exemple.cm deploiement/oracle/deployer.sh ubuntu@$IP
 Envoie l'état **commité** du backend (`git archive` : jamais un `.env` local),
 et efface sur la VM les fichiers retirés du dépôt. Reconstruit le front, fait
 une sauvegarde de la base, puis relance avec `docker compose up -d --build` (les
-migrations s'appliquent au démarrage de l'API). Les données de la VM (base,
-PDF, sauvegardes, `.env`) ne sont pas touchées.
+migrations s'appliquent au démarrage de l'API). Les données de la VM (PDF,
+sauvegardes, `.env`) ne sont pas touchées ; la base, seulement par les
+migrations.
+
+### Une VM déployée avant la bascule vers Voyage
+
+La migration `a8b9c0d1e2f3` vide les vecteurs EmbeddingGemma de la base
+(incompatibles avec Voyage). `demarrer.sh` refuse donc de lancer une base qui
+en porte encore, sauf demande explicite. Dans l'ordre :
+
+1. Sur la VM, dans `.env` : ajouter `VOYAGE_API_KEY`, retirer
+   `EMBEDDING_PROVIDER=gemma` et les `GEMMA_*` (`demarrer.sh` refuse sinon).
+2. Depuis le poste : `JURIX_PURGER_VECTEURS=1 JURIX_DOMAINE=… deploiement/oracle/deployer.sh ubuntu@$IP`
+   (la variable est transmise à `demarrer.sh`).
+3. Sur la VM, recalculer les vecteurs par l'API Voyage (environ 10 M de jetons,
+   quelques minutes), puis reconstruire l'index :
+   `docker compose exec api python scripts/regenerate_embeddings.py --all`, puis
+   `… --reindex`.
+4. Vérifier `/api/v1/search/health`, puis supprimer l'ancien modèle :
+   `sudo rm -rf modeles/`.
 
 ## 6. Sauvegardes
 
@@ -164,11 +194,12 @@ free -h ; df -h                      # mémoire et disque
   est fermé (liste de sécurité Oracle **et** pare-feu de la VM, que
   `installer.sh` ouvre).
 - **La VM s'arrête seule** : Oracle récupère les VM gratuites « inactives » (sur
-  7 jours, processeur, réseau ET mémoire sous 20 %). JuriX garde en permanence
-  le modèle et PostgreSQL en mémoire (30 à 40 %) : elle ne devrait pas être
-  jugée inactive.
+  7 jours, processeur, réseau ET mémoire sous 20 %). Sans le modèle
+  d'embeddings, qui occupait ~1,5 Go en permanence, la mémoire utilisée peut
+  passer sous ce seuil : surveiller la métrique mémoire dans la console Oracle
+  la première semaine.
 - **Déménager** : tout est dans Docker. Sur la nouvelle machine : y copier le
-  dossier `jurix/` entier (le code et ce dossier, avec `.env`, `modeles/`,
+  dossier `jurix/` entier (le code et ce dossier, avec `.env` et
   `donnees/`), placer la dernière sauvegarde sous `sauvegardes/initial.dump`,
   lancer `installer.sh`, **se reconnecter** (le groupe `docker` ne vaut que
   pour une nouvelle session), puis `bash demarrer.sh` : la base, vide, est
