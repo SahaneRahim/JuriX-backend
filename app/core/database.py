@@ -40,6 +40,10 @@ class Base(DeclarativeBase):
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG if hasattr(settings, 'DEBUG') else False,  # Log SQL queries in debug mode
+    connect_args={
+        "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+    },
     # 5 + 5, et non 20 + 10. L'ancien dimensionnement demandait jusqu'a 30
     # connexions asynchrones (plus 10 synchrones) pour un service qui n'en
     # utilise jamais trois. Derriere un pooler externe — le mode transaction de
