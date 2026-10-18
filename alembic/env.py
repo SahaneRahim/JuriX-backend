@@ -2,6 +2,10 @@ import os
 import sys
 from logging.config import fileConfig
 
+# Nettoyer les espaces accidentels dans PGSSLMODE (ex: " require")
+if "PGSSLMODE" in os.environ:
+    os.environ["PGSSLMODE"] = os.environ["PGSSLMODE"].strip()
+
 from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine import make_url
 

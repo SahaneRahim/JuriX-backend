@@ -11,11 +11,12 @@ try:
     def _hf_zero_gpu_ready():
         """Fonction requise par le runtime ZeroGPU d'Hugging Face."""
         return True
-
-    _hf_zero_gpu_ready()
-    print("✅ ZeroGPU initialisé avec succès.")
 except Exception as e:
     print(f"ℹ️ ZeroGPU note: {e}")
+
+# Nettoyer les espaces accidentels dans PGSSLMODE (ex: " require")
+if "PGSSLMODE" in os.environ:
+    os.environ["PGSSLMODE"] = os.environ["PGSSLMODE"].strip()
 
 # 1. Vérifier et télécharger le modèle de détection de langue fastText si absent
 model_dir = Path("models/fasttext")

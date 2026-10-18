@@ -1,6 +1,11 @@
 """Configuration application - Toutes les variables d'environnement."""
 
+import os
 from typing import Literal, Optional
+
+# Nettoyer les espaces accidentels dans PGSSLMODE (ex: " require")
+if "PGSSLMODE" in os.environ:
+    os.environ["PGSSLMODE"] = os.environ["PGSSLMODE"].strip()
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
