@@ -3,6 +3,20 @@ import subprocess
 import urllib.request
 from pathlib import Path
 
+# 0. Initialisation ZeroGPU (Requis par Hugging Face sur les Spaces gratuits)
+try:
+    import spaces
+
+    @spaces.GPU(duration=10)
+    def _hf_zero_gpu_ready():
+        """Fonction requise par le runtime ZeroGPU d'Hugging Face."""
+        return True
+
+    _hf_zero_gpu_ready()
+    print("✅ ZeroGPU initialisé avec succès.")
+except Exception as e:
+    print(f"ℹ️ ZeroGPU note: {e}")
+
 # 1. Vérifier et télécharger le modèle de détection de langue fastText si absent
 model_dir = Path("models/fasttext")
 model_path = model_dir / "lid.176.bin"
