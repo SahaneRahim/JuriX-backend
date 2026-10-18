@@ -1,3 +1,13 @@
+---
+title: JuriX API
+emoji: ⚖️
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+app_file: app.py
+pinned: false
+---
+
 # JuriX Backend
 
 API de la plateforme juridique camerounaise JuriX.
