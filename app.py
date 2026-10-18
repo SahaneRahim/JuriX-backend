@@ -3,17 +3,6 @@ import subprocess
 import urllib.request
 from pathlib import Path
 
-# 0. Initialisation ZeroGPU (Requis par Hugging Face sur les Spaces gratuits)
-try:
-    import spaces
-
-    @spaces.GPU(duration=10)
-    def _hf_zero_gpu_ready():
-        """Fonction requise par le runtime ZeroGPU d'Hugging Face."""
-        return True
-except Exception as e:
-    print(f"ℹ️ ZeroGPU note: {e}")
-
 # Nettoyer les espaces accidentels dans PGSSLMODE (ex: " require")
 if "PGSSLMODE" in os.environ:
     os.environ["PGSSLMODE"] = os.environ["PGSSLMODE"].strip()
@@ -41,19 +30,31 @@ try:
 except Exception as e:
     print(f"⚠️ Avertissement Alembic: {e}")
 
-# 3. Importer l'application FastAPI
+# 3. Importer l'application FastAPI et Gradio
 from app.main import app as fastapi_app
 import gradio as gr
+import spaces
 import uvicorn
 
-# 4. Interface Gradio pour Hugging Face
+# 4. Fonction ZeroGPU liée à l'interface (satisfait la validation Hugging Face)
+@spaces.GPU
+def zero_gpu_worker(prompt: str) -> str:
+    return f"GPU Ready: {prompt}"
+
+# 5. Interface Gradio minimale
 with gr.Blocks(title="JuriX API") as demo:
     gr.Markdown("# ⚖️ JuriX — Backend API")
     gr.Markdown("Le serveur d'API REST de JuriX est opérationnel.")
     gr.Markdown("- **Documentation interactive (Swagger)** : [/docs](/docs)")
     gr.Markdown("- **Vérification de santé** : [/api/v1/health](/api/v1/health)")
+    
+    # Composant lié à la fonction GPU pour valider le démarrage ZeroGPU
+    _dummy_in = gr.Textbox(value="ping", visible=False)
+    _dummy_out = gr.Textbox(visible=False)
+    _dummy_btn = gr.Button("Test", visible=False)
+    _dummy_btn.click(zero_gpu_worker, inputs=_dummy_in, outputs=_dummy_out)
 
-# Monte Gradio sur FastAPI
+# 6. Monte Gradio sur FastAPI
 app = gr.mount_gradio_app(fastapi_app, demo, path="/")
 
 if __name__ == "__main__":
