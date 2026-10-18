@@ -215,16 +215,18 @@ app = FastAPI(
 
 # CORS — allow localhost in dev, Vercel domain in prod
 # Set ALLOWED_ORIGINS in your env for production (comma-separated)
-_extra_origins = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
+_extra_origins = [o.strip().rstrip('/') for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
 _cors_origins = [
     "http://localhost:5173",
     "http://localhost:4173",
     "http://127.0.0.1:5173",
+    "https://juri-x-frontend.vercel.app",
 ] + _extra_origins
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
