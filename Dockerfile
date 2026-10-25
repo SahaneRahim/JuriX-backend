@@ -92,4 +92,15 @@ ENV PYTHONUNBUFFERED=1 \
 # requete comprise. Or le WebSocket de l'envoi par lots porte le jeton
 # d'administration dans l'URL (?token=...) : il finissait en clair dans
 # `docker compose logs`. L'application journalise elle-meme ce qui compte.
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level info --no-access-log"]
+#
+# --proxy-headers --forwarded-allow-ips='*' : uvicorn ne croit X-Forwarded-Proto
+# que de 127.0.0.1 par defaut, or le proxy de Railway (comme Caddy sur la VM
+# Oracle) le joint depuis une autre adresse. Il se croyait donc en HTTP, et ses
+# redirections (barre oblique finale) partaient vers http:// — mesure :
+# GET /api/v1/laws -> 307 vers http://, puis 301 vers https, 3,45 s avant le
+# premier octet. Meme reglage que FORWARDED_ALLOW_IPS dans
+# deploiement/oracle/docker-compose.yml. Sans danger : le conteneur n'est
+# joignable que par le proxy de l'hebergeur, et l'adresse du client que lit
+# l'etranglement par IP vient de l'en-tete lui-meme (adresse_du_client), pas de
+# ce reglage. Guillemets simples : le shell ne doit pas developper l'etoile.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level info --no-access-log --proxy-headers --forwarded-allow-ips='*'"]

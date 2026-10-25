@@ -34,6 +34,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.search import ChunkResult, SearchFilters
+from app.services.prompts import CONTEXT_MAX_CHARS_PER_CHUNK
 from app.services.search_vectors import (
     RANK_WEIGHTS,
     REINDEX_ARTICLES_SQL,
@@ -48,6 +49,27 @@ CACHE_TTL_SECONDS = 300
 
 # Nombre maximal de resultats retournes par la branche LOI
 MAX_FTS_RESULTS = 20
+
+# Texte porte par une ligne NIVEAU LOI (branche titre, passe floue sur les
+# titres) : un extrait borne, et non plus le texte integral. Les deux requetes
+# selectionnaient `l.content` tel quel, jusqu'a 1,76 M de caracteres par ligne
+# (mesure) : vingt lois pesaient de 1 a 8,6 Mo, tires de la base a chaque
+# recherche, re-classes en Python caractere par caractere (0,2 a 3 s), ecrits
+# dans query_cache, puis envoyes a un front qui en lisait 200.
+#
+# CONTEXT_MAX_CHARS_PER_CHUNK + 1, et non une valeur ronde : le chat ne lit
+# jamais plus de CONTEXT_MAX_CHARS_PER_CHUNK caracteres d'un extrait
+# (prompts.build_context_string). Avec ce caractere de plus,
+# _truncate_on_boundary voit encore un texte trop long, et coupe au meme
+# endroit, avec la meme marque « […] », que sur le texte entier : le contexte
+# du chat ne change pas d'un octet. Borne a CONTEXT_MAX_CHARS_PER_CHUNK pile,
+# l'extrait passerait tel quel, coupe en pleine phrase et sans marque.
+LAW_CHUNK_MAX_CHARS = CONTEXT_MAX_CHARS_PER_CHUNK + 1
+
+# Passe trigramme sur le TEXTE des articles (mode texte seul, quand le plein
+# texte n'a rien trouve). Voir _trigram_articles_query pour les deux bornes.
+TRIGRAM_FALLBACK_TIMEOUT_MS = 1000
+TRIGRAM_LONGUEUR_MARGE = 4
 
 # Budget de chunks pour la branche ARTICLE. Plus large que la branche loi :
 # 20 articles couvrent bien moins de documents distincts que 20 lois, et la
@@ -68,7 +90,9 @@ MAX_CHUNKS_PER_LAW = 3
 # forme (sans `chunks`) continueraient a etre servies pendant tout le TTL.
 # Aussi quand l'espace des vecteurs change, ce qui change les resultats
 # semantiques et hybrides. v5 : passage a Voyage (voyage-4-large, 1024).
-CACHE_SCHEMA_VERSION = "v5"
+# v6 : lignes niveau loi bornees a LAW_CHUNK_MAX_CHARS (le re-ranking les note
+# autrement) et `results[].content` reduit a un apercu dans le cache.
+CACHE_SCHEMA_VERSION = "v6"
 
 
 def _make_cache_key(
@@ -186,6 +210,7 @@ async def search_articles_pg(
     filters: Optional[SearchFilters] = None,
     limit: int = 15,
     offset: int = 0,
+    repli_trigramme: bool = True,
 ) -> List[ChunkResult]:
     """
     Recherche full-text dans les articles via PostgreSQL tsvector + pg_trgm.
@@ -209,6 +234,10 @@ async def search_articles_pg(
             branche article renvoyait quelque chose.
         limit: Nombre max de chunks
         offset: Decalage pour pagination
+        repli_trigramme: tenter la passe trigramme sur le texte des articles
+            quand le plein texte ne rend rien. False en mode hybride : le volet
+            semantique y rattrape deja les fautes de frappe, et cette passe
+            coutait 5 a 13 s par faute (mesure : 15,9 s pour « licensiement »).
 
     Returns:
         Liste de ChunkResult triee par pertinence decroissante
@@ -247,7 +276,7 @@ async def search_articles_pg(
             vus = {c.article_id for c in results}
             results = (results + [c for c in complement if c.article_id not in vus])[:limit]
 
-    if not results:
+    if not results and repli_trigramme:
         logger.debug(f"FTS returned 0, trying trigram fallback for: {query[:40]}")
         results = await _trigram_articles_query(db, query, filters, limit, offset)
 
@@ -466,11 +495,40 @@ async def _trigram_articles_query(
 
     Pas de ts_headline sur ce chemin : la correspondance est floue, il n'y a pas
     de lexeme a mettre en evidence. L'extrait est le debut de l'article.
+
+    DEUX BORNES, parce que cette passe prenait des secondes. L'index GIN
+    rendait 74 a 81 % des articles comme candidats, et la reverification de
+    chacun rejetait presque tout : 5,8 a 7,5 s en local, 4,9 a 12,8 s sur
+    Supabase, pour 0 ou 1 resultat.
+
+    1. Un article trop long ne peut PAS passer le seuil, et il est ecarte
+       avant tout calcul de similarite. similarity = c / (|Tq| + |Ta| - c),
+       ou c <= |Tq| compte les trigrammes communs : elle ne depasse donc pas
+       |Tq| / |Ta|, et le seuil s exige |Ta| < |Tq| / s. Une requete d'un mot
+       (|Tq| ~ 13) ne peut toucher qu'un article d'une quarantaine de
+       trigrammes distincts, soit quelques dizaines de caracteres. La borne
+       retenue, en octets, multiplie cette limite par TRIGRAM_LONGUEUR_MARGE
+       (4) : un texte de prose a au moins un trigramme distinct pour quatre
+       octets, et seul un texte tres repetitif (une ligne de pointilles) y
+       echapperait. octet_length se lit dans l'en-tete, sans decompresser le
+       texte. Le `OFFSET 0` empeche PostgreSQL de remettre l'index trigramme
+       devant ce filtre. Mesure en local : 0,23 s au lieu de 6 a 7,5 s, memes
+       resultats (« Paine de mort » : 1 article de 29 octets ; « licensiement »
+       : aucun).
+    2. Le balayage qui reste lit tout le tas des articles (82 Mo) : rapide en
+       memoire, plus lent sur une base froide. Un delai d'execution
+       (TRIGRAM_FALLBACK_TIMEOUT_MS) le plafonne : au-dela, la passe rend
+       « rien », ce qu'elle rendait presque toujours. Le delai est pose dans
+       un SAVEPOINT puis ANNULE avec lui : sans cela, il survivrait jusqu'a la
+       fin de la transaction et couperait les requetes suivantes de
+       l'appelant. Cette passe est rare (mode texte, plein texte vide) : ses
+       quatre allers-retours de plus n'ont lieu qu'alors.
     """
     params: Dict[str, Any] = {
         "query": query,
         "limit": min(limit, MAX_FTS_CHUNKS),
         "offset": offset,
+        "marge": TRIGRAM_LONGUEUR_MARGE,
     }
     where_extra = _law_filter_clauses(filters, params)
 
@@ -492,7 +550,15 @@ async def _trigram_articles_query(
             l.publication_date,
             c.name            AS category_name,
             similarity(a.content, :query) AS rank
-        FROM articles a
+        FROM (
+            SELECT a0.id, a0.number, a0.title, a0.section, a0.page_number,
+                   a0.content, a0.law_id
+            FROM articles a0
+            -- show_limit() : le seuil meme de l'operateur %.
+            WHERE octet_length(a0.content)
+                  <= :marge * array_length(show_trgm(:query), 1) / show_limit()
+            OFFSET 0
+        ) a
         JOIN laws l ON l.id = a.law_id
         LEFT JOIN categories c ON c.id = l.category_id
         WHERE a.content % :query
@@ -502,8 +568,15 @@ async def _trigram_articles_query(
     """)
 
     try:
-        result = await db.execute(sql, params)
-        return _rows_to_chunks(result.fetchall(), source="trigram")
+        async with db.begin_nested() as point:
+            await db.execute(
+                text("SELECT set_config('statement_timeout', :delai, true)"),
+                {"delai": f"{TRIGRAM_FALLBACK_TIMEOUT_MS}ms"},
+            )
+            rows = (await db.execute(sql, params)).fetchall()
+            # ROLLBACK TO SAVEPOINT, et non RELEASE : il retire le delai.
+            await point.rollback()
+        return _rows_to_chunks(rows, source="trigram")
     except Exception as e:
         logger.warning(f"⚠️ Trigram query failed: {e}")
         return []
@@ -536,6 +609,7 @@ async def search_laws_pg(
         "query": query,
         "limit": min(limit, MAX_FTS_RESULTS),
         "offset": offset,
+        "law_chunk_max_chars": LAW_CHUNK_MAX_CHARS,
     }
     where_extra = _law_filter_clauses(filters, params)
 
@@ -546,7 +620,8 @@ async def search_laws_pg(
             NULL::varchar     AS article_title,
             NULL::varchar     AS section,
             NULL::integer     AS page_number,
-            l.content         AS content,
+            -- Extrait borne, pas le texte integral : voir LAW_CHUNK_MAX_CHARS.
+            left(l.content, :law_chunk_max_chars) AS content,
             l.id              AS law_id,
             l.reference,
             l.title           AS law_title,
@@ -762,10 +837,17 @@ async def search_titles_trgm_pg(
     releves : « code miner » 0,727 · « cod minier » 0,769 · « avancment » 0,615 ·
     « fonciere » 0,333 (aucune correspondance, correctement).
 
-    Le seuil doit etre pose par `SET LOCAL` AVANT l'appel (voir
-    `apply_trigram_threshold`) : l'operateur `%>` filtre sur le reglage de
-    session, si bien qu'un predicat `word_similarity(...) >= 0.5` ajoute ici
-    serait du code mort — rien sous le defaut de 0,6 ne lui parviendrait.
+    Le seuil est pose DANS l'enonce, avant le parcours : l'operateur `%>`
+    filtre sur le reglage pg_trgm.word_similarity_threshold, si bien qu'un
+    predicat `word_similarity(...) >= 0.5` ajoute ici serait du code mort —
+    rien sous le defaut de 0,6 ne lui parviendrait. Il etait pose par un
+    `SET LOCAL` envoye juste avant : deux allers-retours de plus, et une
+    dependance a l'etat de la transaction. Ici, `(SELECT set_config(...)) IS NOT
+    NULL` ne porte sur aucune colonne : PostgreSQL en fait un « One-Time
+    Filter », evalue UNE fois avant de lire la moindre ligne (verifie par
+    EXPLAIN ANALYZE : 849 titres pour « nominasion » a 0,5, 0 sans reglage).
+    set_config(..., true) ne vaut que pour la transaction : rien ne passe a la
+    requete suivante d'un pooler en mode transaction.
 
     MOT PAR MOT, ET NON LA REQUETE ENTIERE. Comparee d'un bloc, une requete de
     plusieurs mots passait le seuil sur ses mots les plus banals : dans
@@ -781,7 +863,12 @@ async def search_titles_trgm_pg(
     mots = mots_significatifs(query)
     if not mots:
         return []
-    params: Dict[str, Any] = {"query": query, "limit": limit}
+    params: Dict[str, Any] = {
+        "query": query,
+        "limit": limit,
+        "law_chunk_max_chars": LAW_CHUNK_MAX_CHARS,
+        "seuil": _seuil_trigramme(threshold),
+    }
     for i, mot in enumerate(mots):
         params[f"mot_{i}"] = mot
     titre = "immutable_unaccent(l.title)"
@@ -798,7 +885,8 @@ async def search_titles_trgm_pg(
             NULL::text        AS article_title,
             NULL::text        AS section,
             NULL::integer     AS page_number,
-            l.content,
+            -- Extrait borne, pas le texte integral : voir LAW_CHUNK_MAX_CHARS.
+            left(l.content, :law_chunk_max_chars) AS content,
             l.id              AS law_id,
             l.reference,
             l.title           AS law_title,
@@ -815,7 +903,8 @@ async def search_titles_trgm_pg(
             ) AS rank
         FROM laws l
         LEFT JOIN categories c ON c.id = l.category_id
-        WHERE (
+        WHERE (SELECT set_config('pg_trgm.word_similarity_threshold', :seuil, true)) IS NOT NULL
+        AND (
             ({chaque_mot})
             OR immutable_unaccent(l.reference) %> immutable_unaccent(:query)
         )
@@ -957,6 +1046,11 @@ async def record_search_event(
         logger.debug(f"Journalisation de recherche impossible: {e}")
 
 
+def _seuil_trigramme(threshold: float) -> str:
+    """Seuil de word_similarity borne a [0,1 ; 1], en texte pour set_config."""
+    return str(min(max(float(threshold), 0.1), 1.0))
+
+
 async def apply_trigram_threshold(db: AsyncSession, threshold: float) -> None:
     """
     Pose le seuil de `word_similarity` pour la transaction en cours.
@@ -965,15 +1059,16 @@ async def apply_trigram_threshold(db: AsyncSession, threshold: float) -> None:
     perdu alors que « nominaton » (0,700) passe — une tolerance aux fautes a
     moitie.
 
-    Deux contraintes recopiees de `SearchService._apply_hnsw_settings`, qui fait
-    la meme chose pour `hnsw.ef_search` : SET n'accepte pas de parametre lie, la
-    valeur est donc interpolee APRES passage par float() et bornage ; et
-    SET LOCAL exige une transaction ouverte, que l'AsyncSession ouvre au premier
-    execute. Sous try : un seuil indisponible doit degrader, pas rendre un 500.
+    La recherche ne l'appelle plus : search_titles_trgm_pg pose son seuil dans
+    son propre enonce, sans aller-retour de plus. Gardee pour qui voudrait le
+    poser sur toute une transaction. set_config et non SET : la valeur passe en
+    parametre lie, et ne vaut que jusqu'a la fin de la transaction.
     """
-    bounded = min(max(float(threshold), 0.1), 1.0)
     try:
-        await db.execute(text(f"SET LOCAL pg_trgm.word_similarity_threshold = {bounded}"))
+        await db.execute(
+            text("SELECT set_config('pg_trgm.word_similarity_threshold', :seuil, true)"),
+            {"seuil": _seuil_trigramme(threshold)},
+        )
     except Exception as err:  # pragma: no cover - depend du serveur
         logger.debug(f"pg_trgm.word_similarity_threshold indisponible: {err}")
 

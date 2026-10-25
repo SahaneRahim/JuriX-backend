@@ -3,10 +3,12 @@
 import asyncio
 import logging
 import re
+import time
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.datastructures import MutableHeaders
 
 from app.api.routes import (
     admin,
@@ -223,6 +225,13 @@ _cors_origins = [
     "https://juri-x-frontend.vercel.app",
 ] + _extra_origins
 
+# Duree de vie de la reponse a une requete preliminaire (OPTIONS), en secondes.
+# Starlette en annonce 600 par defaut : un telephone refaisait donc le
+# prealable d'une recherche toutes les dix minutes — 0,94 a 1,2 s mesurees
+# avant meme que le POST parte. 7200 est le plafond de Chrome (deux heures) ;
+# Firefox accepte plus, mais Chrome ramenerait toute valeur superieure a 7200.
+CORS_MAX_AGE_S = 7200
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -230,7 +239,54 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Lisible par le code du front (fetch), et pas seulement dans les outils
+    # de developpement : la duree serveur d'une recherche y devient mesurable.
+    expose_headers=["Server-Timing"],
+    max_age=CORS_MAX_AGE_S,
 )
+
+
+class DureeServeur:
+    """
+    En-tete `Server-Timing: app;dur=<ms>` sur chaque reponse HTTP.
+
+    POURQUOI. Le `search_time_ms` du tableau de bord s'arrete avant les
+    ecritures qui suivent la recherche et avant la construction de la reponse :
+    mesure, il laissait de cote 1,1 a 4,9 s selon la taille du resultat. Cette
+    duree-ci court de l'arrivee de la requete jusqu'a l'envoi des en-tetes.
+    Pour une reponse JSON, le corps est deja serialise a ce moment-la : c'est
+    tout le travail du serveur. Pour un flux, c'est le delai avant le premier
+    octet. Les outils de developpement du navigateur l'affichent dans l'onglet
+    Timing, et curl le montre sans rien installer.
+
+    Intergiciel ASGI pur, et non BaseHTTPMiddleware : celui-ci fait passer
+    chaque corps de reponse par une file supplementaire, et casse le flux des
+    reponses longues. Ici, seul le message de debut de reponse est touche.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            # WebSocket (envoi par lots) et cycle de vie : rien a mesurer.
+            await self.app(scope, receive, send)
+            return
+
+        debut = time.perf_counter()
+
+        async def envoyer(message):
+            if message["type"] == "http.response.start":
+                duree_ms = (time.perf_counter() - debut) * 1000
+                MutableHeaders(scope=message).append("Server-Timing", f"app;dur={duree_ms:.1f}")
+            await send(message)
+
+        await self.app(scope, receive, envoyer)
+
+
+# Ajoute APRES CORS, donc place AUTOUR de lui : la duree compte aussi les
+# reponses aux requetes preliminaires, que CORS sert sans atteindre les routes.
+app.add_middleware(DureeServeur)
 
 
 @app.get("/")

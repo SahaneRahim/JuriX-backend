@@ -23,7 +23,7 @@ from app.models.user import User
 from app.schemas.search import (
     ReindexResponse,
     SearchRequest,
-    SearchResponse,
+    SearchResponsePublic,
     SearchStats,
 )
 from app.services.search_service import SearchService, SearchServiceError
@@ -52,10 +52,10 @@ def get_search_service(db: AsyncSession = Depends(get_db)) -> SearchService:
 # ==================== ENDPOINTS ====================
 
 
-@router.post("/", response_model=SearchResponse, status_code=status.HTTP_200_OK)
+@router.post("/", response_model=SearchResponsePublic, status_code=status.HTTP_200_OK)
 async def search(
     request: SearchRequest, search_service: SearchService = Depends(get_search_service)
-) -> SearchResponse:
+) -> SearchResponsePublic:
     """
     Point d'entrée principal pour la recherche.
 
@@ -142,7 +142,12 @@ async def search(
 
         logger.info(f"📤 Search response: {response.total} results in {response.search_time_ms}ms")
 
-        return response
+        # Version PUBLIQUE de la reponse : sans `chunks`, et `content` reduit a
+        # un apercu. Mesure : 0,06 a 8,6 Mo par recherche, dont 96 % de texte
+        # que le front n'affichait jamais. Le service rend toujours la reponse
+        # complete : le chat et la comparaison, qui l'appellent dans le
+        # processus, en ont besoin.
+        return SearchResponsePublic.depuis(response)
 
     except ValueError as e:
         # Validation errors (query vide, mode invalide, etc.)

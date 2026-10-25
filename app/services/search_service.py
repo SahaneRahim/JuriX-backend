@@ -16,16 +16,20 @@ Author: JuriX Team
 Version: 3.0.0 (PostgreSQL natif)
 """
 
+import asyncio
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.core.config import settings
 from app.models.law import Article, Category, Law
 from app.schemas.search import (
+    APERCU_CONTENU_CARACTERES,
     ArticleMatch,
     ChunkResult,
     ReindexResponse,
@@ -43,7 +47,6 @@ from app.services.embedding_service import (
 )
 from app.services.postgres_search_service import (
     _make_cache_key,
-    apply_trigram_threshold,
     find_article_in_laws,
     get_from_pg_cache,
     record_search_event,
@@ -60,6 +63,125 @@ from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
 from app.utils.chunk_refiner import est_pseudo_numero
 
 logger = logging.getLogger(__name__)
+
+
+# ==================== RE-RANKING HORS DE LA BOUCLE ====================
+
+# Fils dedies au re-ranking : c'est asyncio.to_thread, mais pas sur
+# l'executeur par defaut. rerank_chunks est du Python pur (repli des accents
+# caractere par caractere) : appele dans la boucle, il gelait l'unique worker
+# uvicorn — 0,2 a 3 s mesures avec des textes de loi entiers — et toutes les
+# autres requetes avec lui. L'executeur par defaut, lui, est celui que
+# l'ingestion occupe (un fil par document, Docling, OCR) : une recherche y
+# attendrait derriere des extractions de plusieurs minutes. Deux fils : un
+# re-ranking dure desormais quelques dizaines de millisecondes.
+_EXECUTEUR_RERANK = ThreadPoolExecutor(max_workers=2, thread_name_prefix="rerank")
+
+
+async def _reclasser(question: str, chunks: List[ChunkResult]) -> List[ChunkResult]:
+    """rerank_chunks, sur les fils du re-ranking."""
+    boucle = asyncio.get_running_loop()
+    return await boucle.run_in_executor(
+        _EXECUTEUR_RERANK, partial(rerank_chunks, question, chunks)
+    )
+
+
+# ==================== ECRITURES APRES LA REPONSE ====================
+
+# Taches d'ecriture en cours (journal de recherche, cache). Gardees ici parce
+# qu'asyncio ne garde qu'une reference FAIBLE vers une tache : une ecriture non
+# referencee pourrait etre ramassee avant d'avoir fini.
+_ECRITURES_EN_COURS: Set["asyncio.Task[None]"] = set()
+
+
+def _ecriture_terminee(tache: "asyncio.Task[None]") -> None:
+    _ECRITURES_EN_COURS.discard(tache)
+    if tache.cancelled():
+        return
+    erreur = tache.exception()
+    if erreur is not None:
+        # Jamais remontee a l'utilisateur, qui a deja sa reponse : seulement
+        # journalisee, et assez haut pour se voir.
+        logger.warning(f"⚠️ Ecriture apres la reponse en echec : {erreur!r}")
+
+
+async def ecritures_en_attente() -> None:
+    """
+    Attend la fin des ecritures differees de cette boucle d'evenements.
+
+    Pour les tests, qui relisent la base juste apres une recherche, et pour un
+    script qui veut que son journal soit ecrit avant de se terminer. Une tache
+    d'une boucle deja fermee (fin d'un test precedent) ne finira jamais : elle
+    est oubliee.
+    """
+    boucle = asyncio.get_running_loop()
+    while True:
+        for tache in list(_ECRITURES_EN_COURS):
+            if tache.get_loop().is_closed():
+                _ECRITURES_EN_COURS.discard(tache)
+        miennes = [t for t in _ECRITURES_EN_COURS if t.get_loop() is boucle]
+        if not miennes:
+            return
+        await asyncio.wait(miennes)
+
+
+async def _ecrire_journal_et_cache(
+    moteur: AsyncEngine,
+    evenement: Dict[str, Any],
+    cache: Optional[Tuple[str, Dict[str, Any]]],
+    ttl_seconds: int,
+) -> None:
+    """
+    Journal de recherche puis cache, sur UNE connexion qui n'est pas celle de
+    la requete, en deux transactions : l'echec de l'une n'emporte pas l'autre.
+    """
+    async with moteur.connect() as connexion:
+        async with AsyncSession(bind=connexion, expire_on_commit=False) as session:
+            await record_search_event(session, **evenement)
+            if cache is None:
+                return
+            # record_search_event avale ses erreurs, et une ligne refusee
+            # laisserait sa transaction avortee. Sans effet si elle a commite.
+            await session.rollback()
+            cle, charge = cache
+            try:
+                await store_in_pg_cache(session, cle, charge, ttl_seconds=ttl_seconds)
+            except Exception as cache_err:
+                logger.warning(f"⚠️ Cache write failed (non-fatal): {cache_err}")
+
+
+def _charge_utile_du_cache(response: SearchResponse) -> Dict[str, Any]:
+    """
+    Ce que query_cache garde d'une reponse : tout, sauf le texte des resultats,
+    reduit a l'apercu que la route publique renvoie de toute facon.
+
+    Les chunks restent entiers : le chat les lit sur un succes du cache, et ils
+    sont bornes a la source (articles, lignes niveau loi a LAW_CHUNK_MAX_CHARS).
+    Mesure avant : des lignes de 6 a 11 Mo, 0,43 a 0,72 s d'INSERT chacune, et
+    un succes du cache qui relisait tout cela (0,9 a 1,6 s).
+    """
+    # mode="json" et non model_dump() nu : la reponse porte une
+    # publication_date, et json.dumps refuse un objet date. Sans cela
+    # l'ecriture levait a chaque fois, l'exception etait avalee, et le cache ne
+    # servait plus jamais.
+    charge = response.model_dump(mode="json")
+    for resultat in charge["results"]:
+        if resultat.get("content"):
+            resultat["content"] = resultat["content"][:APERCU_CONTENU_CARACTERES]
+    return charge
+
+
+async def _solder(tache: "asyncio.Task[Any]") -> None:
+    """
+    Une tache qu'on n'attendra plus : annulee si elle tourne encore, son
+    erreur lue — sans quoi asyncio journalise « Task exception was never
+    retrieved ».
+    """
+    if not tache.done():
+        tache.cancel()
+        await asyncio.wait({tache})
+    if not tache.cancelled():
+        tache.exception()
 
 # ==================== GLOBAL SINGLETONS ====================
 
@@ -319,9 +441,8 @@ class SearchService:
                 # cela, la statistique compterait les defauts de cache et non
                 # les recherches, et sous-estimerait d'autant plus que le cache
                 # est efficace.
-                await record_search_event(
-                    self.db, request.query, request.mode,
-                    cached_response.total, elapsed_ms, cached=True,
+                await self._ecrire_apres_la_reponse(
+                    request, cached_response.total, elapsed_ms, cached=True,
                 )
                 return cached_response
 
@@ -331,40 +452,91 @@ class SearchService:
         # Re-ranking AVANT la construction de la reponse, donc avant la
         # troncature a `limit` ET avant l'ecriture du cache : reclasser apres
         # coup laisserait cinq minutes de reponses pre-reranking en circulation,
-        # et reclasser apres troncature ne pourrait plus rien remonter.
+        # et reclasser apres troncature ne pourrait plus rien remonter. Hors de
+        # la boucle d'evenements : voir _EXECUTEUR_RERANK.
         if settings.RERANK_ENABLED and chunks:
-            chunks = rerank_chunks(request.query, chunks)
+            chunks = await _reclasser(request.query, chunks)
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         response = await self._build_search_response(request, chunks, elapsed_ms)
 
-        await record_search_event(
-            self.db, request.query, request.mode, response.total, elapsed_ms, cached=False,
-        )
-
-        # Store in PostgreSQL cache. Pas une reponse degradee : la panne d'une
-        # API distante est le plus souvent passagere, et la reponse plein texte
-        # seul serait resservie cinq minutes, au chat comme a la recherche.
+        # Cache : pas une reponse degradee. La panne d'une API distante est le
+        # plus souvent passagere, et la reponse plein texte seul serait
+        # resservie cinq minutes, au chat comme a la recherche. La charge est
+        # calculee ICI, avant de rendre la reponse a un appelant qui pourrait
+        # la modifier.
+        a_mettre_en_cache = None
         if self.use_cache and not self.semantique_degradee:
-            try:
-                await store_in_pg_cache(
-                    self.db,
-                    cache_key,
-                    # mode="json" et non model_dump() nu : la reponse porte une
-                    # publication_date, et json.dumps refuse un objet date. Sans
-                    # cela l'ecriture levait a chaque fois, l'exception etait
-                    # avalee juste en dessous, et le cache ne servait plus jamais.
-                    response.model_dump(mode="json"),
-                    ttl_seconds=self.CACHE_TTL_SECONDS,
-                )
-            except Exception as cache_err:
-                logger.warning(f"⚠️ Cache write failed (non-fatal): {cache_err}")
+            a_mettre_en_cache = (cache_key, _charge_utile_du_cache(response))
+        await self._ecrire_apres_la_reponse(
+            request, response.total, elapsed_ms, cached=False, cache=a_mettre_en_cache,
+        )
 
         logger.info(
             f"✅ Search completed: {response.total} results in {elapsed_ms}ms "
             f"(mode={request.mode})"
         )
         return response
+
+    async def _ecrire_apres_la_reponse(
+        self,
+        request: SearchRequest,
+        total: int,
+        elapsed_ms: int,
+        cached: bool,
+        cache: Optional[Tuple[str, Dict[str, Any]]] = None,
+    ) -> None:
+        """
+        Journal de recherche et cache, ecrits APRES la reponse.
+
+        Ils etaient ecrits avant de rendre la main, sur la session de la
+        requete, chacun avec son COMMIT, et le second avec une nouvelle prise
+        de connexion : onze allers-retours mesures apres search_time_ms, plus
+        l'INSERT d'une ligne de plusieurs Mo, soit 1 a 3,5 s que l'utilisateur
+        attendait sans que le tableau de bord les montre. Ils partent
+        desormais dans une tache, sur leur propre connexion : la reponse n'en
+        attend aucun, et le COMMIT d'une statistique n'engage plus la
+        transaction de l'appelant (le chat y garde sa conversation en cours).
+
+        Sans moteur dont tirer une connexion (session liee a une connexion,
+        doublure de test), l'ecriture reste faite ici, comme avant.
+        """
+        evenement = {
+            "query": request.query,
+            "mode": request.mode,
+            "results_count": total,
+            "duration_ms": elapsed_ms,
+            "cached": cached,
+        }
+        moteur = self._moteur_isole()
+        if moteur is not None:
+            tache = asyncio.create_task(
+                _ecrire_journal_et_cache(moteur, evenement, cache, self.CACHE_TTL_SECONDS)
+            )
+            _ECRITURES_EN_COURS.add(tache)
+            tache.add_done_callback(_ecriture_terminee)
+            return
+
+        await record_search_event(self.db, **evenement)
+        if cache is not None:
+            try:
+                await store_in_pg_cache(
+                    self.db, cache[0], cache[1], ttl_seconds=self.CACHE_TTL_SECONDS
+                )
+            except Exception as cache_err:
+                logger.warning(f"⚠️ Cache write failed (non-fatal): {cache_err}")
+
+    def _moteur_isole(self) -> Optional[AsyncEngine]:
+        """
+        Le moteur de la session, s'il permet d'ouvrir d'AUTRES connexions.
+
+        C'est ce qui permet a la requete vectorielle et aux ecritures differees
+        de tourner a cote de la session de la requete. None pour une session
+        liee a une connexion, ou une doublure : tout reste alors sur
+        self.db, sequentiellement.
+        """
+        bind = getattr(self.db, "bind", None)
+        return bind if isinstance(bind, AsyncEngine) else None
 
     async def _execute_search_by_mode(self, request: SearchRequest) -> List[ChunkResult]:
         """Dispatch search to the correct mode handler. Renvoie des chunks."""
@@ -461,6 +633,7 @@ class SearchService:
         filters: Optional[SearchFilters] = None,
         limit: int = 15,
         offset: int = 0,
+        repli_trigramme: bool = True,
     ) -> List[ChunkResult]:
         """
         Recherche textuelle PostgreSQL FTS, titre d'abord puis corps du texte.
@@ -484,6 +657,9 @@ class SearchService:
         — le RAG le fait — n'avait aucun effet des que des articles
         correspondaient.
 
+        `repli_trigramme` : voir search_articles_pg. L'hybride le coupe, son
+        volet semantique rattrape les fautes de frappe.
+
         Raises:
             TextSearchError: Si la recherche echoue
         """
@@ -497,12 +673,10 @@ class SearchService:
             # La passe floue ne sert qu'a rattraper une faute de frappe : elle ne
             # se declenche que si la passe exacte n'a pas rempli la page, et ses
             # resultats viennent APRES. Une faute ne doit jamais declasser une
-            # correspondance franche.
+            # correspondance franche. Son seuil est pose dans son propre enonce
+            # (search_titles_trgm_pg) : plus de SET LOCAL a envoyer avant.
             fuzzy_chunks: List[ChunkResult] = []
             if len(title_chunks) < limit:
-                await apply_trigram_threshold(
-                    self.db, settings.TITLE_TRIGRAM_THRESHOLD
-                )
                 seen_laws = {c.law_id for c in title_chunks}
                 fuzzy_chunks = [
                     c
@@ -512,7 +686,9 @@ class SearchService:
                     if c.law_id not in seen_laws
                 ]
 
-            body_chunks = await search_articles_pg(self.db, query, filters, limit, offset)
+            body_chunks = await search_articles_pg(
+                self.db, query, filters, limit, offset, repli_trigramme=repli_trigramme,
+            )
 
             chunks = title_chunks + fuzzy_chunks + body_chunks
 
@@ -590,6 +766,9 @@ class SearchService:
         - L'offset ne s'applique qu'a l'exterieur : le poser a l'interieur
           jetterait les meilleurs candidats avant le tri.
 
+        Les reglages du parcours (hnsw.ef_search, hnsw.iterative_scan) sont
+        poses DANS l'enonce : voir _reglages_hnsw.
+
         Extrait dans une methode pour qu'un test puisse le compiler sans base.
         """
         from pgvector.sqlalchemy import HALFVEC
@@ -625,6 +804,10 @@ class SearchService:
             .where(Article.embedding.isnot(None))
         )
         inner = self._apply_filters_pgvector(inner, filters)
+        inner = inner.where(
+            text(f"({self._reglages_hnsw_sql(filters is not None)}) IS NOT NULL")
+            .bindparams(hnsw_ef_search=self._ef_search(candidates))
+        )
         inner = inner.order_by(distance).limit(candidates).subquery("ann")
 
         # `+ 0` : sans lui, le planificateur supprime ce tri (voir plus haut).
@@ -635,43 +818,60 @@ class SearchService:
             .offset(offset)
         )
 
-    async def _apply_hnsw_settings(self, candidates: int, filtered: bool) -> None:
+    @staticmethod
+    def _ef_search(candidates: int) -> str:
+        """hnsw.ef_search pour `candidates`, borne a [40, 1000], en texte pour set_config."""
+        return str(int(min(max(40, candidates), 1000)))
+
+    @staticmethod
+    def _reglages_hnsw_sql(filtered: bool) -> str:
         """
-        Reglages de session du parcours HNSW.
+        Expression SQL qui pose les reglages du parcours HNSW pour la
+        transaction en cours, et rend une valeur non nulle.
 
         hnsw.ef_search vaut 40 par defaut : un parcours non iteratif ne rend
         JAMAIS plus de lignes que cette valeur. Demander 200 candidats sans le
         relever revient a en reclasser 40 — le sur-echantillonnage devient
         decoratif.
 
-        SET n'accepte pas de parametre lie : la valeur est interpolee APRES
-        passage par int(), jamais une saisie.
+        Sous filtre, PostgreSQL elague APRES le parcours du graphe et peut
+        rendre moins de lignes que demande : hnsw.iterative_scan rescanne. Ce
+        reglage n'existe qu'a partir de pgvector 0.8, et un serveur plus ancien
+        doit degrader, pas renvoyer 500 : le CASE ne le pose que si la version
+        installee le connait. C'est ce que faisaient les deux SAVEPOINT de la
+        version precedente — seize allers-retours a eux deux, mesure.
 
-        Les deux reglages sont sous try : ils n'existent qu'a partir de
-        pgvector 0.8, et un serveur plus ancien doit degrader, pas renvoyer 500.
-        SET LOCAL exige une transaction ouverte — l'AsyncSession en ouvre une au
-        premier execute — et ne vaut que jusqu'a la fin de celle-ci.
+        set_config(..., true) et non SET : il accepte un parametre lie (la
+        valeur, :hnsw_ef_search), et peut s'ecrire DANS un enonce. Il ne vaut
+        que pour la transaction : rien ne fuit vers la requete suivante d'un
+        pooler en mode transaction.
         """
-        # Chaque reglage dans son propre SAVEPOINT : un refus du serveur
-        # (pgvector 0.7 ne connait pas iterative_scan) avorterait sinon la
-        # transaction, et la requete vectorielle qui suit echouerait avec elle.
-        ef_search = int(min(max(40, candidates), 1000))
-        try:
-            async with self.db.begin_nested():
-                await self.db.execute(text(f"SET LOCAL hnsw.ef_search = {ef_search}"))
-        except Exception as err:
-            logger.debug(f"hnsw.ef_search indisponible: {err}")
+        iteratif = (
+            "CASE WHEN EXISTS ("
+            "SELECT 1 FROM pg_extension WHERE extname = 'vector' "
+            "AND (regexp_match(extversion, '^(\\d+)\\.(\\d+)'))[1:2]::int[] >= ARRAY[0, 8]"
+            ") THEN set_config('hnsw.iterative_scan', 'relaxed_order', true) END"
+            if filtered else "NULL"
+        )
+        return (
+            "SELECT concat(set_config('hnsw.ef_search', :hnsw_ef_search, true), "
+            f"{iteratif})"
+        )
 
-        if filtered:
-            # Sous filtre, PostgreSQL elague APRES le parcours du graphe et peut
-            # rendre moins de lignes que demande. iterative_scan rescanne.
-            try:
-                async with self.db.begin_nested():
-                    await self.db.execute(
-                        text("SET LOCAL hnsw.iterative_scan = 'relaxed_order'")
-                    )
-            except Exception as err:
-                logger.debug(f"hnsw.iterative_scan indisponible: {err}")
+    async def _apply_hnsw_settings(self, candidates: int, filtered: bool) -> None:
+        """
+        Pose les reglages du parcours HNSW sur la transaction de self.db, en
+        UN enonce.
+
+        La recherche ne l'appelle plus : _build_semantic_statement porte les
+        memes reglages dans la requete vectorielle elle-meme. Garde pour qui
+        veut examiner le plan d'un enonce sous ces reglages (EXPLAIN dans
+        tests/test_migrations/test_vector_schema.py).
+        """
+        await self.db.execute(
+            text(self._reglages_hnsw_sql(filtered)),
+            {"hnsw_ef_search": self._ef_search(candidates)},
+        )
 
     async def semantic_chunks(
         self,
@@ -702,18 +902,34 @@ class SearchService:
         """
         assert isinstance(query, str) and len(query) > 0
         assert isinstance(limit, int) and limit > 0
-        start_time = time.time()
 
+        tache_vecteur = self._lancer_vectorisation(query)
+        if tache_vecteur is None:
+            return []
+        return await self._chunks_semantiques(tache_vecteur, filters, limit, offset)
+
+    def _lancer_vectorisation(self, texte: str) -> Optional["asyncio.Task[Any]"]:
+        """
+        Envoie `texte` au fournisseur d'embeddings MAINTENANT, et rend la tache
+        qui portera son vecteur. None quand il n'y a rien a vectoriser.
+
+        Partir tot est tout l'interet : l'hybride lance ce vecteur avant de
+        commencer le plein texte, au lieu de l'attendre apres (0,4 a 0,7 s par
+        recherche, mesure).
+        """
+        if self.embedding_service is None:
+            logger.warning("⚠️ Semantic search unavailable: EmbeddingService not loaded")
+            return None
+        # Un texte blanc ne se vectorise pas : ce n'est ni une panne du
+        # fournisseur ni une raison de degrader la sante publique, que
+        # n'importe qui pourrait sinon faire basculer.
+        if not texte.strip():
+            return None
+        return asyncio.create_task(self._vectoriser(texte))
+
+    async def _vectoriser(self, texte: str) -> Any:
+        """Le vecteur de la question ; toute panne du fournisseur devient VectorSearchError."""
         try:
-            if self.embedding_service is None:
-                logger.warning("⚠️ Semantic search unavailable: EmbeddingService not loaded")
-                return []
-            # Un texte blanc ne se vectorise pas : ce n'est ni une panne du
-            # fournisseur ni une raison de degrader la sante publique, que
-            # n'importe qui pourrait sinon faire basculer.
-            if not query.strip():
-                return []
-
             # TASK_QUERY et non TASK_DOCUMENT : encoder une question comme un
             # document degrade la pertinence en recherche asymetrique.
             # Version async : le fournisseur est synchrone et gelerait la
@@ -721,8 +937,8 @@ class SearchService:
             # aussi l'attente (delai du fournisseur plus une seconde) : au-dela,
             # l'erreur leve VectorSearchError, et l'hybride repond par le plein
             # texte seul.
-            query_embedding = await self.embedding_service.generate_embedding_async(
-                query, task_type=self.embedding_service.TASK_QUERY
+            return await self.embedding_service.generate_embedding_async(
+                texte, task_type=self.embedding_service.TASK_QUERY
             )
         except Exception as e:
             # L'echec du fournisseur est deja compte par le service
@@ -730,65 +946,119 @@ class SearchService:
             logger.error(f"❌ Semantic search failed: {e}")
             raise VectorSearchError(f"Échec recherche sémantique: {e}") from e
 
+    async def _chunks_semantiques(
+        self,
+        tache_vecteur: "asyncio.Task[Any]",
+        filters: Optional[SearchFilters],
+        limit: int,
+        offset: int,
+    ) -> List[ChunkResult]:
+        """
+        La requete vectorielle, des que le vecteur de `tache_vecteur` arrive.
+
+        SUR SA PROPRE CONNEXION, quand la session de la requete en permet une
+        autre. Deux raisons :
+
+        - L'isolement, sans SAVEPOINT. Une erreur SQL (vecteur d'une autre
+          dimension pendant une bascule) avorterait sinon TOUTE la transaction
+          de la session, partagee avec le chat : journal, cache, puis
+          l'enregistrement des messages echouaient — une erreur 500 apres une
+          reponse deja generee. Le SAVEPOINT qui l'evitait, avec ceux des
+          reglages, coutait 18 allers-retours a lui seul (mesure). Ici,
+          l'erreur reste dans une transaction en lecture que personne d'autre
+          n'utilise.
+        - Le parallelisme. L'hybride lance ce volet dans une tache pendant que
+          le plein texte avance sur la session de la requete : la prise de
+          connexion se fait pendant l'appel au fournisseur, et la requete
+          vectorielle pendant celles du plein texte. Sur une base froide, ce
+          sont 1 a 2 s de SQL qui ne s'additionnent plus.
+
+        Sinon (session liee a une connexion, doublure), sur self.db, sous un
+        SAVEPOINT : l'isolement d'avant, sans le parallelisme.
+        """
+        start_time = time.time()
+        candidates = self._ann_candidates(limit)
+        moteur = self._moteur_isole()
         try:
-            # Liste passee en parametre lie, PAS en chaine castee : le
-            # convertisseur pgvector attend une liste ou un ndarray.
-            query_vector = query_embedding.tolist()
-
-            candidates = self._ann_candidates(limit)
-            stmt = self._build_semantic_statement(query_vector, filters, limit, offset)
-            # Dans un SAVEPOINT : une erreur SQL (vecteur d'une autre
-            # dimension pendant une bascule, index absent) avorterait sinon
-            # TOUTE la transaction de la session, partagee avec le chat.
-            # L'hybride la rattraperait, mais chaque instruction suivante
-            # echouerait : journal de recherche, cache, puis l'enregistrement
-            # des messages du chat — une erreur 500 apres une reponse deja
-            # generee. Le SAVEPOINT n'annule que lui-meme, SET LOCAL compris.
-            async with self.db.begin_nested():
-                await self._apply_hnsw_settings(candidates, filters is not None)
-                result = await self.db.execute(stmt)
-                rows = result.all()
-
-            chunks = [
-                ChunkResult(
-                    article_id=row.article_id,
-                    law_id=row.law_id,
-                    number=str(row.number) if row.number else None,
-                    article_title=row.article_title,
-                    section=row.section,
-                    page_number=row.page_number,
-                    content=row.content or "",
-                    excerpt=(row.content or "")[:400],
-                    reference=row.reference or "",
-                    law_title=row.law_title or "",
-                    type=row.type or "loi",
-                    language=row.language,
-                    status=row.status or "published",
-                    category_id=row.category_id,
-                    category_name=row.category_name,
-                    publication_date=row.publication_date,
-                    # Score issu de la distance EXACTE, celle qui a servi au
-                    # tri : un appelant qui re-trierait sur le score doit
-                    # retrouver le meme ordre.
-                    relevance_score=max(0.0, min(1.0, 1.0 - float(row.distance))),
-                    source="semantic",
-                )
-                for row in rows
-            ]
-
-            elapsed_ms = int((time.time() - start_time) * 1000)
-            logger.info(
-                f"🧠 Semantic search: {len(chunks)} chunks "
-                f"({candidates} candidats ANN) in {elapsed_ms}ms"
-            )
-            return chunks
-
+            if moteur is not None:
+                async with AsyncSession(bind=moteur) as session:
+                    # Prise de connexion PENDANT l'appel au fournisseur.
+                    await session.connection()
+                    query_embedding = await tache_vecteur
+                    rows = await self._lire_vecteurs(
+                        session, query_embedding, filters, limit, offset
+                    )
+            else:
+                query_embedding = await tache_vecteur
+                async with self.db.begin_nested():
+                    rows = await self._lire_vecteurs(
+                        self.db, query_embedding, filters, limit, offset
+                    )
+        except VectorSearchError:
+            # Panne du fournisseur, deja comptee par le service d'embeddings.
+            raise
         except Exception as e:
-            # Echec de la requete vectorielle (dimension, index) : compte aussi,
-            # il prive chaque question de son volet semantique.
+            # Echec de la requete vectorielle (dimension, index) ou de la
+            # connexion : compte aussi, il prive chaque question de son volet
+            # semantique.
             logger.error(f"❌ Semantic search failed: {e}")
             suivi_semantique.noter(e)
             raise VectorSearchError(f"Échec recherche sémantique: {e}") from e
+        finally:
+            await _solder(tache_vecteur)
+
+        chunks = [
+            ChunkResult(
+                article_id=row.article_id,
+                law_id=row.law_id,
+                number=str(row.number) if row.number else None,
+                article_title=row.article_title,
+                section=row.section,
+                page_number=row.page_number,
+                content=row.content or "",
+                excerpt=(row.content or "")[:400],
+                reference=row.reference or "",
+                law_title=row.law_title or "",
+                type=row.type or "loi",
+                language=row.language,
+                status=row.status or "published",
+                category_id=row.category_id,
+                category_name=row.category_name,
+                publication_date=row.publication_date,
+                # Score issu de la distance EXACTE, celle qui a servi au
+                # tri : un appelant qui re-trierait sur le score doit
+                # retrouver le meme ordre.
+                relevance_score=max(0.0, min(1.0, 1.0 - float(row.distance))),
+                source="semantic",
+            )
+            for row in rows
+        ]
+
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        logger.info(
+            f"🧠 Semantic search: {len(chunks)} chunks "
+            f"({candidates} candidats ANN) in {elapsed_ms}ms"
+        )
+        return chunks
+
+    async def _lire_vecteurs(
+        self,
+        session: AsyncSession,
+        query_embedding: Any,
+        filters: Optional[SearchFilters],
+        limit: int,
+        offset: int,
+    ) -> List[Any]:
+        """
+        UN enonce, reglages HNSW compris (voir _build_semantic_statement) :
+        deux allers-retours, la ou SAVEPOINT, deux SET LOCAL sous SAVEPOINT et
+        leurs RELEASE en coutaient dix-huit.
+        """
+        # Liste passee en parametre lie, PAS en chaine castee : le
+        # convertisseur pgvector attend une liste ou un ndarray.
+        stmt = self._build_semantic_statement(query_embedding.tolist(), filters, limit, offset)
+        result = await session.execute(stmt)
+        return result.all()
 
     async def hybrid_chunks(
         self,
@@ -810,30 +1080,57 @@ class SearchService:
         start_time = time.time()
 
         try:
-            # SEQUENTIEL, pas asyncio.gather : les deux recherches partagent
-            # self.db, et une AsyncSession n'est pas utilisable par deux
-            # coroutines a la fois ("another operation is in progress"). Le
-            # parallelisme ne gagnait rien : une seule connexion, donc les
-            # requetes se serialisent cote serveur de toute facon.
-            #
             # Chaque branche est isolee pour qu'une panne de l'une n'emporte
             # pas l'autre.
             budget = max(limit, self.MAX_RESULTS_PER_MODE)
 
-            try:
-                text_res_list = await self.text_chunks(query, filters, budget, 0)
-            except Exception as e:
-                logger.warning(f"⚠️ Text search failed in hybrid: {e}")
-                text_res_list = []
+            # 1. La question part au fournisseur d'embeddings AVANT le plein
+            #    texte : elle n'etait envoyee qu'apres lui, et ses 0,4 a 0,7 s
+            #    s'ajoutaient a tout le reste (mesure).
+            # 2. Le volet semantique tourne dans sa propre tache, sur sa propre
+            #    connexion (voir _chunks_semantiques), pendant que le plein
+            #    texte avance sur la session de la requete. Une AsyncSession
+            #    ne sert pas deux coroutines a la fois ("another operation is
+            #    in progress") : sans moteur pour une seconde connexion, la
+            #    requete vectorielle attend la fin du plein texte, sur self.db.
+            tache_vecteur = self._lancer_vectorisation(texte_semantique or query)
+            volet_semantique: Optional["asyncio.Task[List[ChunkResult]]"] = None
+            if tache_vecteur is not None and self._moteur_isole() is not None:
+                volet_semantique = asyncio.create_task(
+                    self._chunks_semantiques(tache_vecteur, filters, budget, 0)
+                )
 
             try:
-                sem_res_list = await self.semantic_chunks(
-                    texte_semantique or query, filters, budget, 0
-                )
-            except Exception as e:
-                logger.warning(f"⚠️ Semantic search failed in hybrid, plein texte seul : {e}")
-                sem_res_list = []
-                self.semantique_degradee = True
+                try:
+                    # Sans la passe trigramme sur le texte des articles : le
+                    # volet semantique rattrape les fautes de frappe, et elle
+                    # coutait 5 a 13 s a chacune.
+                    text_res_list = await self.text_chunks(
+                        query, filters, budget, 0, repli_trigramme=False
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ Text search failed in hybrid: {e}")
+                    text_res_list = []
+
+                try:
+                    if volet_semantique is not None:
+                        sem_res_list = await volet_semantique
+                    elif tache_vecteur is not None:
+                        sem_res_list = await self._chunks_semantiques(
+                            tache_vecteur, filters, budget, 0
+                        )
+                    else:
+                        sem_res_list = []
+                except Exception as e:
+                    logger.warning(f"⚠️ Semantic search failed in hybrid, plein texte seul : {e}")
+                    sem_res_list = []
+                    self.semantique_degradee = True
+            finally:
+                # Rien ne doit survivre a la recherche : une annulation (client
+                # parti) arrete aussi le volet semantique, qui rend sa connexion.
+                for tache in (volet_semantique, tache_vecteur):
+                    if tache is not None:
+                        await _solder(tache)
 
             if not text_res_list and not sem_res_list:
                 return []

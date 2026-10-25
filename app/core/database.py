@@ -14,16 +14,18 @@ Author: JuriX Team
 """
 
 import logging
+import time
 from typing import AsyncGenerator
 
 from fastapi import HTTPException
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, exc, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.util import await_only
 
 from app.core.config import settings
 
@@ -36,10 +38,91 @@ class Base(DeclarativeBase):
     pass
 
 
+# ---------------------------------------------------------------------------
+# Connexions mortes : verification a la sortie du pool, sans pool_pre_ping
+# ---------------------------------------------------------------------------
+# pool_pre_ping coutait QUATRE allers-retours a chaque emprunt d'une connexion :
+# derriere un pooler en mode transaction, SQLAlchemy entoure son sondage d'une
+# transaction explicite (BEGIN, ";" prepare puis execute, ROLLBACK — le cache
+# d'instructions etant coupe, preparer coute un aller-retour). Mesure en
+# production : 4 des 8 allers-retours de GET /categories, 8 par recherche
+# (deux emprunts), a 83 ms chacun entre Railway (Virginie) et le pooler
+# (Irlande). Le payer a CHAQUE emprunt protegeait contre un cas rare.
+#
+# Ce qui tue reellement une connexion du pool, chez nous :
+#   - Neon (cible) suspend le calcul apres 5 min sans requete — les connexions
+#     inactives ne l'en empechent pas — et ferme alors toutes les connexions ;
+#   - un redemarrage du pooler (Supavisor, PgBouncer de Neon), qui les ferme
+#     aussi ;
+#   - plus rarement, un equipement reseau qui oublie une connexion inactive.
+# Ni Supavisor (client_idle_timeout = 0 par defaut) ni le PgBouncer de Neon
+# (aucun delai documente) ne ferment d'eux-memes une connexion client inactive.
+# Il n'y a donc pas de delai a « devancer » avec pool_recycle.
+#
+# Les deux premiers cas FERMENT la connexion : asyncpg le voit sans rien
+# envoyer (is_closed()), la boucle d'evenements ayant recu la fin de flux. Le
+# troisieme ne se voit qu'en parlant au serveur. D'ou, a chaque emprunt :
+#   1. connexion fermee -> remplacee, ZERO aller-retour ;
+#   2. inactive depuis plus de PING_APRES_INACTIVITE_S -> un « SELECT 1 » en
+#      protocole simple : UN aller-retour, sans instruction preparee ni
+#      transaction, donc sans risque derriere un pooler en mode transaction ;
+#      borne par DELAI_PING_S, la ou pool_pre_ping pouvait attendre la fin des
+#      retransmissions TCP sur une connexion devenue muette ;
+#   3. sinon, rien : les emprunts d'une meme requete, ou de requetes
+#      rapprochees, ne paient plus aucun sondage.
+# Un echec leve DisconnectionError : le pool jette la connexion et en ouvre
+# une neuve, de facon transparente — le mecanisme meme de pool_pre_ping.
+#
+# Ce qui reste non couvert, comme avec pool_pre_ping : une connexion qui meurt
+# pendant qu'elle sert. La requete echoue alors une fois, et le pool est
+# invalide.
+PING_APRES_INACTIVITE_S = 60.0
+DELAI_PING_S = 5.0
+_RENDUE_A = "jurix_rendue_a"
+
+
+def _noter_le_retour(dbapi_connection, connection_record) -> None:
+    """Horodate le retour au pool : base de la decision de sonder."""
+    connection_record.info[_RENDUE_A] = time.monotonic()
+
+
+def _verifier_a_la_sortie(dbapi_connection, connection_record, connection_proxy) -> None:
+    """
+    Ecarte une connexion morte avant de la preter (voir plus haut).
+
+    Appelee dans le greenlet de SQLAlchemy : await_only y execute une
+    coroutine asyncpg. connection_record.info est vide pour une connexion
+    neuve — le pool le vide a chaque reconnexion — : elle n'est pas sondee.
+    """
+    connexion = connection_record.driver_connection
+    if connexion is None or connexion.is_closed():
+        raise exc.DisconnectionError("connexion fermee par le serveur pendant son inactivite")
+
+    rendue_a = connection_record.info.get(_RENDUE_A)
+    if rendue_a is None or time.monotonic() - rendue_a < PING_APRES_INACTIVITE_S:
+        return
+    try:
+        # execute() sans argument : protocole simple, un seul aller-retour.
+        await_only(connexion.execute("SELECT 1", timeout=DELAI_PING_S))
+    except Exception as erreur:
+        raise exc.DisconnectionError(
+            f"sondage d'une connexion inactive en echec ({type(erreur).__name__})"
+        ) from erreur
+
+
+def brancher_verification_des_connexions(moteur_synchrone) -> None:
+    """Pose la verification sur le pool d'un moteur asyncpg (engine.sync_engine)."""
+    event.listen(moteur_synchrone, "checkin", _noter_le_retour)
+    event.listen(moteur_synchrone, "checkout", _verifier_a_la_sortie)
+
+
 # Create async engine
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG if hasattr(settings, 'DEBUG') else False,  # Log SQL queries in debug mode
+    # Caches d'instructions COUPES, et ils le restent : un pooler en mode
+    # transaction peut executer la preparation et l'execution sur deux
+    # connexions serveur differentes.
     connect_args={
         "statement_cache_size": 0,
         "prepared_statement_cache_size": 0,
@@ -51,9 +134,22 @@ engine = create_async_engine(
     # pool local surdimensionne ne fait que consommer le quota de connexions.
     pool_size=5,
     max_overflow=5,
-    pool_pre_ping=True,  # Verify connections before using
-    pool_recycle=3600,  # Recycle connections after 1 hour
+    # Remplace par _verifier_a_la_sortie (voir plus haut).
+    pool_pre_ping=False,
+    # LIFO : la connexion rendue en dernier ressort la premiere. Les emprunts
+    # rapproches retombent sur une connexion tout juste utilisee, donc sans
+    # sondage ; les autres vieillissent a l'ecart au lieu d'etre sondees a
+    # tour de role (FIFO).
+    pool_use_lifo=True,
+    # -1 et non 3600 : recycler par l'AGE fermait chaque heure une connexion
+    # saine, et la requete suivante payait la reconnexion — une vingtaine
+    # d'allers-retours avec TLS, environ 1,5 s depuis la Virginie. Aucun des
+    # deux poolers n'imposant de duree de vie, cela ne protegeait de rien que
+    # la verification a la sortie ne couvre deja. Avec Neon, la suspension
+    # ferme de toute facon les connexions apres 5 min sans requete.
+    pool_recycle=-1,
 )
+brancher_verification_des_connexions(engine.sync_engine)
 
 # Create async session factory
 AsyncSessionLocal = async_sessionmaker(
@@ -78,16 +174,68 @@ AsyncSessionLocal = async_sessionmaker(
 # Les consommateurs doivent utiliser SyncSessionLocal(), JAMAIS sync_engine
 # directement : c'est ce qui permet de rebrancher toute l'application sur une
 # autre base avec sessionmaker.configure(bind=...), ce dont les tests dependent.
-SYNC_DATABASE_URL = settings.DATABASE_URL.replace("+asyncpg", "")
+#
+# LA CHAINE DE REQUETE EST RETIREE, comme dans alembic/env.py. L'URL de
+# production porte des options propres a asyncpg
+# (?prepared_statement_cache_size=0, documentee dans .env.example), que libpq
+# refuse avant meme d'ouvrir une connexion :
+#     invalid dsn: invalid URI query parameter
+# Le cache d'embeddings, qui passe par ce moteur, n'a donc JAMAIS atteint la
+# base en production (embedding_cache : zero insertion, aucune requete dans
+# pg_stat_statements), et l'erreur etait avalee au niveau DEBUG. Rien d'utile
+# n'est perdu : le TLS se regle par PGSSLMODE, que libpq lit comme asyncpg, et
+# a defaut libpq tente TLS d'abord (sslmode=prefer).
+SYNC_DATABASE_URL = settings.DATABASE_URL.replace("+asyncpg", "").split("?", 1)[0]
 
 sync_engine = create_engine(
     SYNC_DATABASE_URL,
     pool_size=5,
     max_overflow=5,
+    # Garde ici : psycopg2 ne voit qu'en parlant au serveur qu'une connexion a
+    # ete fermee (pas de boucle d'evenements qui recoive la fin de flux), et
+    # son sondage ne coute qu'un aller-retour (SELECT 1 en autocommit).
     pool_pre_ping=True,
-    pool_recycle=3600,
+    pool_use_lifo=True,
+    # Meme raisonnement que pour le moteur asynchrone : le sondage couvre les
+    # connexions mortes, recycler par l'age ne faisait que reconnecter.
+    pool_recycle=-1,
     future=True,
 )
+
+
+# Une erreur du moteur synchrone se voyait mal : le cache d'embeddings
+# l'avale au niveau DEBUG, et c'est ainsi qu'une URL refusee par psycopg2 a pu
+# desactiver ce cache en production sans que rien ne le dise. Chaque cause
+# distincte est desormais journalisee UNE fois en WARNING, sans inonder le
+# journal si elle se repete a chaque recherche. Les echecs du sondage ne
+# comptent pas : le pool les repare seul.
+_CAUSES_SIGNALEES: set = set()
+_CAUSES_SIGNALEES_MAX = 20
+
+
+def _signaler_une_fois(contexte) -> None:
+    if contexte.is_pre_ping:
+        return
+    erreur = contexte.original_exception
+    # Premiere ligne seulement : libpq ne cite jamais le mot de passe, mais une
+    # ligne DETAIL peut citer des valeurs.
+    premiere_ligne = (str(erreur).strip().splitlines() or [""])[0][:200]
+    cause = f"{type(erreur).__name__}: {premiere_ligne}"
+    if cause in _CAUSES_SIGNALEES or len(_CAUSES_SIGNALEES) >= _CAUSES_SIGNALEES_MAX:
+        return
+    _CAUSES_SIGNALEES.add(cause)
+    logger.warning(
+        f"⚠️ Moteur synchrone (psycopg2) en echec — {cause}. Le cache d'embeddings "
+        "et le pipeline d'ingestion en dependent. Signale une seule fois par cause."
+    )
+
+
+def brancher_signalement_des_erreurs(moteur_synchrone) -> None:
+    """Pose _signaler_une_fois sur un moteur psycopg2."""
+    event.listen(moteur_synchrone, "handle_error", _signaler_une_fois)
+
+
+brancher_signalement_des_erreurs(sync_engine)
 
 SyncSessionLocal = sessionmaker(
     bind=sync_engine,

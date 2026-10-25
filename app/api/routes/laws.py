@@ -21,14 +21,14 @@ from typing import List, Optional, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, load_only, selectinload
 
 from app.core.auth import get_current_admin_user
 from app.core.database import AsyncSessionLocal, get_db
-from app.models.law import Law
+from app.models.law import Article, Law
 from app.models.user import User
 from app.schemas.law import (
     ArticleExplanationRequest,
@@ -83,7 +83,78 @@ router = APIRouter(tags=["Laws"])
 # ==================== PUBLIC ENDPOINTS ====================
 
 
-@router.get("/", response_model=List[LawResponse])
+class LawListItem(LawResponse):
+    """
+    Ligne de GET /laws/ : un LawResponse dont le texte peut etre allege.
+
+    `content` y devient facultatif, pour `content_max_chars` (voir la route).
+    Sans ce parametre, le texte reste ENTIER, comme avant : l'ecran
+    d'administration des documents pre-remplit son formulaire d'edition avec la
+    ligne de liste et renvoie `content` tel quel par PUT /laws/admin/{id}.
+    Tronquer par defaut ferait ecraser le texte d'un document par son extrait
+    au premier enregistrement.
+    """
+
+    content: Optional[str] = Field(
+        None,
+        description=(
+            "Texte du document : entier par defaut, tronque a content_max_chars "
+            "caracteres, ou null avec content_max_chars=0"
+        ),
+    )
+
+
+# Tous les champs d'une ligne, sauf le texte : il est fourni a part, entier,
+# tronque ou absent. Lire `law.content` sur une colonne differee declencherait
+# un chargement implicite, interdit en asynchrone.
+_CHAMPS_LIGNE_SANS_TEXTE = tuple(nom for nom in LawListItem.model_fields if nom != "content")
+
+
+def _ligne_de_liste(law: Law, contenu: Optional[str]) -> LawListItem:
+    """Construit une ligne de liste sans jamais lire `law.content`."""
+    donnees = {nom: getattr(law, nom) for nom in _CHAMPS_LIGNE_SANS_TEXTE}
+    donnees["content"] = contenu
+    return LawListItem.model_validate(donnees, from_attributes=True)
+
+
+def _nombre_d_articles():
+    """
+    Nombre d'articles de la loi courante, en sous-requete correlee.
+
+    Compte par l'index de articles.law_id, sans charger un seul article. La
+    liste tirait ce nombre de `len(law.articles)` : elle chargeait TOUS les
+    articles des lois de la page — contenu et embed_text compris — pour n'en
+    garder que le compte.
+    """
+    return (
+        select(func.count(Article.id))
+        .where(Article.law_id == Law.id)
+        .correlate(Law)
+        .scalar_subquery()
+    )
+
+
+async def _avec_nombre_d_articles(db: AsyncSession, law: Law) -> Law:
+    """
+    Pose `article_count` par un COUNT avant de rendre une loi en LawResponse.
+
+    Law.articles ne se charge plus d'office : lire le nombre sur la collection
+    declencherait un chargement implicite, que l'asynchrone refuse
+    (MissingGreenlet). Une instruction, quelle que soit la taille de la loi.
+    """
+    law.article_count = (
+        await db.execute(select(func.count(Article.id)).where(Article.law_id == law.id))
+    ).scalar_one()
+    return law
+
+
+# Sans barre oblique finale aussi : GET /api/v1/laws repondait par une
+# redirection 307 vers /api/v1/laws/ — vers http://, derriere le proxy de
+# Railway, d'ou une seconde redirection 301 vers https (3,45 s mesurees avant
+# le premier octet). Servie directement, l'adresse ne coute plus de detour.
+# Hors du schema OpenAPI : c'est la meme route.
+@router.get("/", response_model=List[LawListItem])
+@router.get("", response_model=List[LawListItem], include_in_schema=False)
 async def get_laws(
     language: Optional[str] = Query(None, description="Filter by language (fr or en)"),
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
@@ -92,6 +163,17 @@ async def get_laws(
     ),
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(100, ge=1, le=10000, description="Maximum number of records to return"),
+    content_max_chars: Optional[int] = Query(
+        None,
+        ge=0,
+        le=20000,
+        description=(
+            "Longueur maximale de `content`. Absent : le texte entier (defaut, "
+            "dont depend l'edition d'administration). 0 : aucun texte, la "
+            "colonne n'est meme pas lue. N : les N premiers caracteres, coupes "
+            "par la base."
+        ),
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -120,8 +202,20 @@ async def get_laws(
     )
 
     try:
-        # Build query
-        query = select(Law).options(selectinload(Law.articles), selectinload(Law.category))
+        # UNE instruction : les lois, leur categorie (jointure, Law.category
+        # est en lazy="joined") et leur nombre d'articles (sous-requete). Elle
+        # en coutait trois — lois, puis tous leurs articles, puis categories.
+        colonnes = [Law, _nombre_d_articles()]
+        if content_max_chars:
+            # substr et non left : PostgreSQL ne lit alors que le debut d'un
+            # texte stocke hors ligne (TOAST), au lieu de le decompresser en
+            # entier.
+            colonnes.append(func.substr(Law.content, 1, content_max_chars))
+        query = select(*colonnes)
+        if content_max_chars is not None:
+            # Le texte entier ne quitte pas la base. raiseload : une lecture
+            # oubliee leverait une erreur au lieu d'un chargement implicite.
+            query = query.options(defer(Law.content, raiseload=True))
 
         # Apply filters
         if language:
@@ -139,10 +233,20 @@ async def get_laws(
 
         # Execute query
         result = await db.execute(query)
-        laws = result.scalars().all()
+        lignes = []
+        for rangee in result.all():
+            law = rangee[0]
+            law.article_count = rangee[1]
+            if content_max_chars is None:
+                contenu = law.content
+            elif content_max_chars == 0:
+                contenu = None
+            else:
+                contenu = rangee[2]
+            lignes.append(_ligne_de_liste(law, contenu))
 
-        logger.info(f"✅ Found {len(laws)} laws")
-        return laws
+        logger.info(f"✅ Found {len(lignes)} laws")
+        return lignes
 
     except Exception as e:
         logger.error(f"❌ Error fetching laws: {e}", exc_info=True)
@@ -179,10 +283,26 @@ async def get_law(
     logger.info(f"📄 GET /laws/{law_id}")
 
     try:
-        # Query law with relationships
+        # Deux instructions : la loi avec sa categorie (jointure), puis ses
+        # articles. Des articles, seules les colonnes du sommaire
+        # (ArticleSummary) et de son tri : `content` et `embed_text` en etaient
+        # aussi charges, soit pour le plus gros document (2 134 articles) deux
+        # fois son texte de plus, pour rien — la page lit le texte dans
+        # `law.content`.
         query = (
             select(Law)
-            .options(selectinload(Law.articles), selectinload(Law.category))
+            .options(
+                selectinload(Law.articles).load_only(
+                    Article.id,
+                    Article.law_id,
+                    Article.number,
+                    Article.title,
+                    Article.section,
+                    Article.page_number,
+                    Article.kind,
+                    Article.order,
+                )
+            )
             .where(Law.id == law_id)
         )
 
@@ -195,11 +315,12 @@ async def get_law(
                 status_code=status.HTTP_404_NOT_FOUND, detail=f"Law with ID {law_id} not found"
             )
 
-        # Les articles sont deja charges par le selectinload ci-dessus ; ils
-        # etaient simplement jetes par LawResponse, qui n'expose que
+        # Les articles sont charges par le selectinload ci-dessus ; ils
+        # etaient autrefois jetes par LawResponse, qui n'expose que
         # `article_count`. La page de lecture les reconstruisait donc par
         # expression reguliere sur le contenu — 193 articles la ou la base en
-        # compte 230, et aucune page de PDF.
+        # compte 230, et aucune page de PDF. `article_count` se lit sur cette
+        # collection chargee.
         law.articles.sort(key=lambda a: (a.order or 0, a.id))
         logger.info(f"✅ Law {law_id} found: {law.title} ({len(law.articles)} articles)")
         return law
@@ -360,15 +481,33 @@ async def _law_file_path(law: Law) -> Path:
         ) from exc
 
 
+async def _loi_pour_fichier(db: AsyncSession, law_id: int) -> Optional[Law]:
+    """
+    La loi, reduite aux colonnes que lisent les routes de fichier.
+
+    Elles chargeaient la ligne ENTIERE, texte integral compris, pour n'en lire
+    que `file_id` et le titre : jusqu'a 1,76 million de caracteres venus de la
+    base a chaque page de PDF affichee (/page/{n} est appele une fois par
+    page), et, avant que Law.articles ne soit plus charge d'office, tous les
+    articles en plus.
+    """
+    query = (
+        select(Law)
+        .options(
+            load_only(Law.id, Law.file_id, Law.title, Law.reference, Law.original_filename)
+        )
+        .where(Law.id == law_id)
+    )
+    return (await db.execute(query)).scalar_one_or_none()
+
+
 @router.get("/{law_id}/download")
 async def download_law_file(
     law_id: int,
     db: AsyncSession = Depends(get_db),
 ):
     """Download the original uploaded file for a law."""
-    query = select(Law).where(Law.id == law_id)
-    result = await db.execute(query)
-    law = result.scalar_one_or_none()
+    law = await _loi_pour_fichier(db, law_id)
 
     if not law:
         raise HTTPException(status_code=404, detail="Law not found")
@@ -411,10 +550,8 @@ async def get_law_pdf_info(
     Used by the frontend to know how many pages to request.
     """
     from pypdf import PdfReader
-    
-    query = select(Law).where(Law.id == law_id)
-    result = await db.execute(query)
-    law = result.scalar_one_or_none()
+
+    law = await _loi_pour_fichier(db, law_id)
 
     if not law:
         raise HTTPException(status_code=404, detail="Law not found")
@@ -462,10 +599,8 @@ async def get_law_pdf_page_image(
     from io import BytesIO
 
     from fastapi.responses import Response
-    
-    query = select(Law).where(Law.id == law_id)
-    result = await db.execute(query)
-    law = result.scalar_one_or_none()
+
+    law = await _loi_pour_fichier(db, law_id)
 
     if not law:
         raise HTTPException(status_code=404, detail="Law not found")
@@ -554,7 +689,7 @@ async def ingest_law(
 
         if existing_law and existing_law.status == "processing":
             logger.info(f"ℹ️ Law already exists for file {request.file_id}: ID={existing_law.id}")
-            return existing_law
+            return await _avec_nombre_d_articles(db, existing_law)
 
         # If existing law failed, create a new one with timestamp
         if existing_law:
@@ -576,8 +711,8 @@ async def ingest_law(
             if existing_ref_law.status == "processing" or existing_ref_law.content == "Document en cours de traitement par le système.":
                  # Potentially restart failed processing here if needed
                  pass
-                 
-            return existing_ref_law
+
+            return await _avec_nombre_d_articles(db, existing_ref_law)
 
         # Create initial Law record
         new_law = Law(
@@ -600,6 +735,10 @@ async def ingest_law(
         db.add(new_law)
         await db.commit()
         await db.refresh(new_law)
+        # Creee a l'instant : aucun article ne la reference encore (le
+        # pipeline les ecrira). Pose ici, la collection n'etant plus chargee
+        # d'office.
+        new_law.article_count = 0
 
         # Lance le traitement en arrière-plan (BackgroundTasks FastAPI)
         # Traitement dans une tache asyncio, sans courtier de messages
@@ -705,6 +844,8 @@ async def create_law(
         db.add(new_law)
         await db.commit()
         await db.refresh(new_law)
+        # Creee a l'instant : aucun article ne la reference encore.
+        new_law.article_count = 0
 
         logger.info(f"✅ Law created: ID={new_law.id}, reference={new_law.reference}")
         return new_law
@@ -770,7 +911,7 @@ async def update_law(
         await db.refresh(existing_law)
 
         logger.info(f"✅ Law {law_id} updated")
-        return existing_law
+        return await _avec_nombre_d_articles(db, existing_law)
 
     except HTTPException:
         raise

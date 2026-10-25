@@ -28,7 +28,7 @@ import logging
 import re
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache, partial
@@ -53,11 +53,60 @@ logger = logging.getLogger(__name__)
 # questions suivantes retombent sur le plein texte a l'echeance.
 _EXECUTEUR_QUESTIONS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="embed-question")
 
-# Fils dedies au cache des questions (lecture, puis ecriture sans attendre).
-# Ni l'executeur par defaut, que l'ingestion peut occuper des minutes, ni les
-# fils des appels au fournisseur, qu'une panne peut bloquer : une question
-# deja vectorisee doit rester servie dans les deux cas.
-_EXECUTEUR_CACHE = ThreadPoolExecutor(max_workers=2, thread_name_prefix="embed-cache")
+# Vecteurs de QUESTIONS gardes en memoire par une instance (cache LRU).
+# Une recherche de 1 Ko de vecteur ne merite pas mieux : 512 questions, 2 Mo.
+VECTEURS_QUESTIONS_MAX = 512
+
+
+class _VecteursRecents:
+    """
+    Les derniers vecteurs de questions, en memoire du processus : un LRU borne,
+    partage entre fils (l'appel au fournisseur rend la main sur un fil
+    d'executeur, la lecture se fait dans la boucle).
+
+    POURQUOI EN MEMOIRE, et non dans la table embedding_cache. Les questions y
+    passaient par le moteur SYNCHRONE (psycopg2), et ce chemin ne servait
+    jamais en production : app/core/database.py derive son URL de DATABASE_URL
+    en retirant seulement « +asyncpg », et garde la query string. Avec le
+    pooler, DATABASE_URL porte « ?prepared_statement_cache_size=0 », option
+    que psycopg2 refuse avant tout acces reseau (« invalid dsn: invalid
+    connection option », verifie) ; l'erreur etait avalee au niveau DEBUG.
+    Bilan mesure : embedding_cache sans une ligne inseree, et en local, ou la
+    connexion reussit, quatre allers-retours avant chaque appel au
+    fournisseur. La reparer ferait payer ces quatre allers-retours en
+    production aussi, sur chaque question nouvelle, pour ne servir que les
+    questions reposees au-dela des cinq minutes de query_cache.
+
+    Les vecteurs gardes sont en lecture seule : un appelant qui en ecrirait un
+    corromprait la question suivante ; il recoit plutot une erreur.
+    """
+
+    def __init__(self, taille: int):
+        self.taille = taille
+        self._entrees: "OrderedDict[str, np.ndarray]" = OrderedDict()
+        self._verrou = threading.Lock()
+
+    def lire(self, cle: str) -> Optional[np.ndarray]:
+        with self._verrou:
+            vecteur = self._entrees.get(cle)
+            if vecteur is not None:
+                self._entrees.move_to_end(cle)
+            return vecteur
+
+    def garder(self, cle: str, vecteur: np.ndarray) -> np.ndarray:
+        """Garde une COPIE en lecture seule de `vecteur`, et la rend."""
+        copie = np.array(vecteur, dtype=np.float32)
+        copie.flags.writeable = False
+        with self._verrou:
+            self._entrees[cle] = copie
+            self._entrees.move_to_end(cle)
+            while len(self._entrees) > self.taille:
+                self._entrees.popitem(last=False)
+        return copie
+
+    def __len__(self) -> int:
+        with self._verrou:
+            return len(self._entrees)
 
 
 def motif_court(erreur: BaseException) -> str:
@@ -692,6 +741,8 @@ class EmbeddingService:
         # toute la duree du processus, et chaque loi traitee en creait un.
         self.use_cache = use_cache
         self._sync_session_factory = SyncSessionLocal if use_cache else None
+        # Les questions, elles, ont leur cache en memoire : voir _VecteursRecents.
+        self._vecteurs_questions = _VecteursRecents(VECTEURS_QUESTIONS_MAX)
 
         logger.info(
             f"✅ EmbeddingService initialisé "
@@ -1181,44 +1232,45 @@ class EmbeddingService:
         """
         Version asynchrone de generate_embedding.
 
-        Les fournisseurs sont synchrones, le backoff est un time.sleep et les
-        lectures/écritures de cache passent par psycopg2 : appelée telle quelle
-        depuis une coroutine, generate_embedding gèle la boucle d'événements
-        pour tout l'aller-retour réseau. Tout appel depuis du code async doit
-        passer par ici.
+        Les fournisseurs sont synchrones et le backoff est un time.sleep :
+        appelée telle quelle depuis une coroutine, generate_embedding gèle la
+        boucle d'événements pour tout l'aller-retour réseau. Tout appel depuis
+        du code async doit passer par ici.
 
         task_type vaut TASK_QUERY par défaut : le seul appelant asynchrone est
         la recherche sémantique, qui encode une question.
 
-        Pour une question, si le fournisseur declare `delai_question_s`,
-        l'attente est BORNEE a ce delai plus une seconde : au-dela,
-        EmbeddingServiceError, et la recherche hybride repond par le plein
-        texte seul. httpx borne la connexion et chaque lecture, mais pas la
-        resolution DNS : seule cette echeance garantit le delai. Le fil, lui,
-        ne s'interrompt pas : il finit son appel en arriere-plan (borne par
-        les delais httpx), puis libere sa place. Les questions ont leurs
+        Une QUESTION deja vue (meme texte, au blanc de bord pres, meme modele,
+        meme dimension) est servie par le cache en memoire de l'instance
+        (_VecteursRecents), dans la boucle : ni fil, ni fournisseur, ni base.
+        Les questions ne passent plus par la table embedding_cache : voir
+        _VecteursRecents pour la raison. Une question servie ainsi ne compte
+        pas dans suivi_semantique : elle ne dit rien du fournisseur.
+
+        Pour une question nouvelle, si le fournisseur declare
+        `delai_question_s`, l'attente est BORNEE a ce delai plus une seconde :
+        au-dela, EmbeddingServiceError, et la recherche hybride repond par le
+        plein texte seul. httpx borne la connexion et chaque lecture, mais pas
+        la resolution DNS : seule cette echeance garantit le delai. Le fil,
+        lui, ne s'interrompt pas : il finit son appel en arriere-plan (borne
+        par les delais httpx), puis libere sa place. Les questions ont leurs
         propres fils (_EXECUTEUR_QUESTIONS).
         """
         if task_type != self.TASK_QUERY:
             return await asyncio.to_thread(self.generate_embedding, text, True, task_type)
 
         self._validate_text(text)
+        cle = self._cache_key(text, task_type) if self.use_cache else None
+        if cle is not None:
+            deja_vue = self._vecteurs_questions.lire(cle)
+            if deja_vue is not None:
+                return deja_vue
+
         boucle = asyncio.get_running_loop()
         delai = getattr(self._provider, "delai_question_s", None)
         echeance = delai + 1.0 if delai else None
-        cle = self._cache_key(text, task_type) if self.use_cache else None
         try:
-            # UNE echeance pour tout : lecture du cache comprise.
             async with asyncio.timeout(echeance):
-                # Le cache d'abord, sur ses propres fils : quand le fournisseur
-                # ne repond plus, ses appels occupent les fils des questions,
-                # et une question deja vectorisee attendrait derriere eux.
-                if cle is not None:
-                    en_cache = await boucle.run_in_executor(
-                        _EXECUTEUR_CACHE, self._get_from_pg_cache, cle
-                    )
-                    if en_cache is not None:
-                        return en_cache
                 vecteur = await boucle.run_in_executor(
                     _EXECUTEUR_QUESTIONS, partial(self._produire, text, True, task_type)
                 )
@@ -1232,11 +1284,7 @@ class EmbeddingService:
             raise
         suivi_semantique.noter(None)
         if cle is not None:
-            # Ecrit SANS attendre, hors echeance : le vecteur est la, une base
-            # lente ne doit pas le faire perdre a cette question. submit() et
-            # non run_in_executor : rien ne doit revenir vers une boucle qui
-            # serait fermee entre-temps.
-            _EXECUTEUR_CACHE.submit(self._store_in_pg_cache, cle, vecteur)
+            return self._vecteurs_questions.garder(cle, vecteur)
         return vecteur
 
 

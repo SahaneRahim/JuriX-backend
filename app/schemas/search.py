@@ -422,6 +422,79 @@ class SearchResponse(BaseModel):
 
 
 # ============================================================================
+# Reponse HTTP publique
+# ============================================================================
+
+# Longueur de `results[].content` dans la reponse de POST /api/v1/search. Le
+# front en lit au plus 200 caracteres (SearchResultCard.svelte, quand
+# highlights.content manque) et ajoute lui-meme « ... » : 300 lui laissent de
+# quoi savoir que le texte continue.
+APERCU_CONTENU_CARACTERES = 300
+
+
+class SearchResultPublic(SearchResult):
+    """
+    Un resultat tel que POST /api/v1/search le renvoie : `content` reduit a un
+    apercu, tout le reste tel quel.
+
+    `content` portait le texte INTEGRAL de l'article, ou de la loi entiere pour
+    une ligne niveau loi : mesure, 7,13 M de caracteres sur une reponse de
+    8,56 Mo, envoyes a un telephone qui n'en affichait que 200. Les extraits
+    (`highlights`, `matched_articles`) sont deja courts et restent entiers.
+    """
+
+    @field_validator("content")
+    @classmethod
+    def _apercu(cls, v: Optional[str]) -> Optional[str]:
+        return v[:APERCU_CONTENU_CARACTERES] if v else v
+
+
+class SearchResponsePublic(BaseModel):
+    """
+    Reponse de POST /api/v1/search : celle de SearchService, SANS `chunks` et
+    avec des `content` reduits a un apercu.
+
+    Seule la route HTTP passe par ce modele. Le chat et la comparaison
+    appellent SearchService dans le processus et gardent la reponse complete :
+    ce sont eux, et eux seuls, qui lisent `chunks`. Le front ne les lisait
+    jamais, et les chunks niveau loi portaient le texte de la loi entiere.
+    """
+
+    query: str = Field(..., description="Original search query")
+    mode: str = Field(..., description="Search mode used")
+    results: List[SearchResultPublic] = Field(
+        default_factory=list,
+        description="List of search results (content reduit a un apercu)"
+    )
+    total: int = Field(..., ge=0, description="Total number of results found")
+    search_time_ms: int = Field(
+        ..., ge=0, description="Search execution time in milliseconds"
+    )
+    filters_applied: Optional[Dict] = Field(
+        None, description="Filters that were applied to this search"
+    )
+    target_law_id: Optional[int] = Field(
+        None, description="Loi a ouvrir quand direct_navigation est vrai"
+    )
+    target_article: Optional[str] = Field(
+        None, description="Article number/reference to scroll to (e.g., '5', 'PREMIER')"
+    )
+    direct_navigation: bool = Field(
+        False, description="If true, client should redirect directly to the document"
+    )
+
+    @classmethod
+    def depuis(cls, reponse: SearchResponse) -> "SearchResponsePublic":
+        """
+        La version publique d'une reponse du service.
+
+        Lue par attributs : les chunks ne sont ni copies ni serialises, et
+        chaque resultat passe par SearchResultPublic, qui coupe `content`.
+        """
+        return cls.model_validate(reponse, from_attributes=True)
+
+
+# ============================================================================
 # Admin Statistics Schemas
 # ============================================================================
 

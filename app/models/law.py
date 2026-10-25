@@ -76,7 +76,17 @@ class Category(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
     # Relationships
-    laws = relationship("Law", back_populates="category", lazy="selectin")
+    #
+    # lazy="raise" et non "selectin" : charger une categorie chargeait TOUTES
+    # ses lois, texte integral compris, puis — Law.articles etant lui aussi en
+    # selectin — tous leurs articles. GET /categories/{id} hydratait ainsi
+    # 16 lois et 1 262 articles pour rendre 206 octets (3,5 s, 469 ms de SQL ;
+    # 7,4 s pour la categorie 13). Personne ne lit cette collection : les
+    # comptes passent par COUNT. Un acces implicite leve desormais une erreur
+    # explicite au lieu de couter en silence ; l'unite de travail, elle, la
+    # charge encore quand un flush en a besoin (suppression d'une categorie :
+    # elle remet a NULL le category_id des lois rattachees).
+    laws = relationship("Law", back_populates="category", lazy="raise")
 
     def __repr__(self) -> str:
         return f"<Category(id={self.id}, name='{self.name}')>"
@@ -138,12 +148,35 @@ class Law(Base):
 
     # Relationships
     category_id = Column(Integer, ForeignKey("categories.id"), nullable=True, index=True)
-    category = relationship("Category", back_populates="laws", lazy="selectin")
+    # lazy="joined" et non "selectin" : une jointure externe sur une table de
+    # 14 lignes, dans la MEME requete. En selectin, chaque select(Law) payait
+    # une seconde instruction, soit deux allers-retours de plus (environ
+    # 170 ms vers le pooler a 83 ms) — y compris sur /laws/{id}/page/{n},
+    # appele une fois par page de PDF affichee. Les lecteurs de law.category
+    # (LawResponse, pipeline synchrone, explication d'article) la trouvent
+    # ainsi toujours chargee.
+    category = relationship("Category", back_populates="laws", lazy="joined")
+    # lazy="select" (chargement a l'acces) et non "selectin" : chaque select(Law)
+    # chargeait TOUS les articles de la loi, contenu et embed_text compris —
+    # 2 134 articles pour le plus gros document — y compris pour servir un
+    # telechargement, une page de PDF ou une liste qui n'en voulait que le
+    # nombre. Les routes qui en ont besoin les demandent (selectinload).
+    #
+    # Pas "raise" : app/tasks/process_law.py (_load_law) lit encore
+    # law.articles en session SYNCHRONE, ou un chargement a l'acces reste
+    # legitime. En asynchrone, un acces implicite leve MissingGreenlet : rien
+    # ne se charge en silence.
+    #
+    # passive_deletes : la cle etrangere porte ON DELETE CASCADE (migration
+    # 001, verifiee en base). Supprimer une loi laisse donc la base effacer ses
+    # articles, au lieu de les charger tous en memoire pour emettre un DELETE
+    # par article.
     articles = relationship(
         "Article",
         back_populates="law",
         cascade="all, delete-orphan",
-        lazy="selectin"
+        lazy="select",
+        passive_deletes=True,
     )
 
 
@@ -166,8 +199,24 @@ class Law(Base):
 
     @property
     def article_count(self) -> int:
-        """Nombre d'articles dans cette loi."""
+        """
+        Nombre d'articles dans cette loi.
+
+        Le compte pose par la requete (un COUNT en SQL, voir le setter) prime :
+        la liste des lois n'a besoin que de ce nombre, et le tirer de la
+        collection obligeait a charger tous les articles, contenu compris.
+        Sinon, la collection chargee — GET /laws/{id} la charge de toute facon
+        pour son sommaire.
+        """
+        compte = self.__dict__.get("_nombre_articles")
+        if compte is not None:
+            return compte
         return len(self.articles) if self.articles else 0
+
+    @article_count.setter
+    def article_count(self, valeur: int) -> None:
+        # Attribut d'instance NON mappe : rien n'est ecrit en base.
+        self._nombre_articles = valeur
 
 
 class Article(Base):
@@ -227,11 +276,13 @@ class Article(Base):
     # settings.EMBEDDING_DIM ; un test verifie l'accord.
     #
     # DIFFERE (deferred) : jamais charge avec l'article, seulement a la
-    # lecture de l'attribut. Law.articles et Category.laws sont en
+    # lecture de l'attribut. Law.articles et Category.laws etaient en
     # lazy="selectin" : sans cela, ouvrir un document chargeait tous ses
     # vecteurs (2 121 pour le plus gros, environ 27 Mo de texte), et une
     # categorie ceux de toutes ses lois, sans qu'aucun de ces chemins ne les
-    # lise. La recherche les lit en SQL, sans passer par l'objet. En contexte
+    # lise. Ils ne sont plus charges d'office (voir Law.articles), mais la
+    # colonne reste differee pour les chemins qui chargent les articles. La
+    # recherche les lit en SQL, sans passer par l'objet. En contexte
     # asynchrone, lire l'attribut exige undefer(Article.embedding).
     embedding = deferred(Column(HALFVEC(1024), nullable=True))
     # Empreinte du fournisseur qui a produit `embedding` : modele, revision,
