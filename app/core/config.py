@@ -420,6 +420,8 @@ class Settings(BaseSettings):
         et il est INDISPENSABLE au pooler Supabase en mode transaction, qui ne
         supporte pas les instructions preparees.
         """
+        if isinstance(v, str):
+            v = v.strip()
         if not v.startswith("postgresql+asyncpg://"):
             return v
         fautifs = [p for p in _PARAMS_QUI_FUIENT if f"{p}=" in v]

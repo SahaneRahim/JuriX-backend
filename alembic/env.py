@@ -52,7 +52,7 @@ target_metadata = Base.metadata
 # dit desormais quoi faire.
 #
 # L'application parle asyncpg ; Alembic a besoin d'un pilote synchrone.
-_db_url = os.environ.get("DATABASE_URL", "")
+_db_url = os.environ.get("DATABASE_URL", "").strip()
 if not _db_url:
     raise RuntimeError(
         "DATABASE_URL absente de l'environnement : Alembic ne lit pas le .env, "
@@ -81,7 +81,7 @@ _db_url = _db_url.replace("postgres://", "postgresql://")  # parfois donne en po
 #
 # Rien d'utile n'est perdu : le TLS se regle par PGSSLMODE, variable
 # d'environnement lue nativement par libpq comme par asyncpg.
-_db_url = _db_url.split("?", 1)[0]
+_db_url = _db_url.split("?", 1)[0].strip()
 
 config.set_main_option("sqlalchemy.url", _db_url)
 
