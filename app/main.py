@@ -6,8 +6,9 @@ import re
 import time
 from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from starlette.datastructures import MutableHeaders
 
 from app.api.routes import (
@@ -28,7 +29,7 @@ from app.api.routes import (
     upload,
 )
 from app.core.config import settings
-from app.core.database import close_db
+from app.core.database import AsyncSession, close_db, get_db
 from app.services.search_service import precharger_les_embeddings
 
 logger = logging.getLogger(__name__)
@@ -303,6 +304,13 @@ async def root():
 async def health():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+@app.get("/health/db")
+async def health_db(db: AsyncSession = Depends(get_db)):
+    """Sonde legere pour reinitialiser la mise en veille Neon sans charger le CPU."""
+    await db.execute(text("SELECT 1"))
+    return {"status": "healthy", "database": "connected"}
 
 
 # Include routers with global /api/v1 prefix
