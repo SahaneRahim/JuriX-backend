@@ -1,0 +1,595 @@
+{
+ "source": "jurix_dev, 2026-10-28, echantillons aleatoires (graines 1 et 2) relus a la main",
+ "cas": [
+  {
+   "titre": "Décret N° 2013/290 du 04 septembre 2013 portant nomination d’un membre du Conseil d’Administration de la société MEKIN HYDROELECTRIQUE DEVELOPMENT CORPORATION",
+   "objet": "Nomination d’un membre du Conseil d’Administration de la société MEKIN HYDROELECTRIQUE DEVELOPMENT CORPORATION",
+   "numero": "2013/290"
+  },
+  {
+   "titre": "Décret N° 2014/185 du 04 juin 2014 portant nomination du secrétaire général des services du gouverneur de la Région de l'Extrême-Nord.",
+   "objet": "Nomination du secrétaire général des services du gouverneur de la Région de l'Extrême-Nord",
+   "numero": "2014/185"
+  },
+  {
+   "titre": "Décret N° 2014/609 du 31 décembre 2014 portant ratification de la Convention fiscale entre le gouvernement de la République du Cameroun et le gouvernement du Royaume du Maroc",
+   "objet": "Ratification de la Convention fiscale entre le gouvernement de la République du Cameroun et le gouvernement du Royaume du Maroc",
+   "numero": "2014/609"
+  },
+  {
+   "titre": "Décret N° 2014/606 du 31 décembre 2014 portant ratification du protocole à la Convention de l'OUA sur la prévention et la lutte contre le terrorisme, adoptée le 8 juillet 2004 à Addis-Abeba",
+   "objet": "Ratification du protocole à la Convention de l'OUA sur la prévention et la lutte contre le terrorisme, adoptée le 8 juillet 2004 à Addis-Abeba",
+   "numero": "2014/606"
+  },
+  {
+   "titre": "decret_n_2015_056_du_02.02.2015_accord_pret_deutsche_bank",
+   "objet": null,
+   "numero": null
+  },
+  {
+   "titre": "Décret N° 2015/124 du 18 mars 2015 instituant des obsèques officielles en l'honneur de Madame Françoise FONING",
+   "objet": "Obsèques officielles en l'honneur de Madame Françoise FONING",
+   "numero": "2015/124"
+  },
+  {
+   "titre": "Décret N°2015/395 du 15 septembre 2015 habilitant le Ministre de l'Economie, de la Planification et de l'Aménagement du Territoire, à signer avec la Banque de droit autrichien Raffeisen Bank International, un accord de prêt d'un montant de 5 millions d'eu",
+   "objet": "Habilitation à signer avec la Banque de droit autrichien Raffeisen Bank International, un accord de prêt d'un montant de 5 millions d'eu",
+   "numero": "2015/395"
+  },
+  {
+   "titre": "Décret N°2015/399 du 15 septembre 2015 portant nomination de Vice-Recteurs dans certaines universités d'Etat",
+   "objet": "Nomination de Vice-Recteurs dans certaines universités d'Etat",
+   "numero": "2015/399"
+  },
+  {
+   "titre": "Décret N°2015/429 du 28 septembre 2015 portant nomination du Directeur Général du Centre Hospitalier et Universitaire (CHU) de Yaoundé.",
+   "objet": "Nomination du Directeur Général du Centre Hospitalier et Universitaire (CHU) de Yaoundé",
+   "numero": "2015/429"
+  },
+  {
+   "titre": "Décret N°2015/471 du 26 octobre portant nomination du Président du Conseil d'Administration de l'Ecole Internationale des Forces de Sécurité (EIFORCES).",
+   "objet": "Nomination du Président du Conseil d'Administration de l'Ecole Internationale des Forces de Sécurité (EIFORCES)",
+   "numero": "2015/471"
+  },
+  {
+   "titre": "Décret N°2016/211 du 25 avril 2016 portant changement de dénomination d'une association religieuse",
+   "objet": "Changement de dénomination d'une association religieuse",
+   "numero": "2016/211"
+  },
+  {
+   "titre": "Décret n°2016/273 du 29 juin 2016 portant nomination du Directeur Général Adjoint de l'Office de Radiodiffusion Télévision Camerounaise (CRTV).",
+   "objet": "Nomination du Directeur Général Adjoint de l'Office de Radiodiffusion Télévision Camerounaise (CRTV)",
+   "numero": "2016/273"
+  },
+  {
+   "titre": "Décret n°2016/274 du 29 juin 2016 portant nomination de la Présidente du Conseil d'Administration du Palais des Congrès.",
+   "objet": "Nomination de la Présidente du Conseil d'Administration du Palais des Congrès",
+   "numero": "2016/274"
+  },
+  {
+   "titre": "Décret N°2018/106 du 07 février 2018 portant nomination du Président du Conseil Constitutionnel.",
+   "objet": "Nomination du Président du Conseil Constitutionnel",
+   "numero": "2018/106"
+  },
+  {
+   "titre": "Décret N°2018/384 du 02 juillet 2018 portant nomination du Directeur Général et du Directeur Général Adjoint de l'Hôpital Général de Yaoundé.",
+   "objet": "Nomination du Directeur Général et du Directeur Général Adjoint de l'Hôpital Général de Yaoundé",
+   "numero": "2018/384"
+  },
+  {
+   "titre": "Arrêté N°0341/CAB/PR du 24 mai 2019 portant nomination du Secrétaire Général de la Communauté Urbaine de Kribi",
+   "objet": "Nomination du Secrétaire Général de la Communauté Urbaine de Kribi",
+   "numero": "0341/CAB/PR"
+  },
+  {
+   "titre": "Décret N° 2019/388 du 24 juillet 2019 portant promotion à titre exceptionnel de Monsieur Batheu Bleuriot (Mle 583 091-Q), Officier de Police, au grade de Commissaire de Police.",
+   "objet": "Promotion à titre exceptionnel de Monsieur Batheu Bleuriot (Mle 583 091-Q), Officier de Police, au grade de Commissaire de Police",
+   "numero": "2019/388"
+  },
+  {
+   "titre": "Décret N° 2019/475/CAB/PR du 16 septembre 2019 portant renouvellement du mandat de certains membres du Conseil Electoral d’ « Elections Cameroon » (ELECAM)",
+   "objet": "Renouvellement du mandat de certains membres du Conseil Electoral d’ « Elections Cameroon » (ELECAM)",
+   "numero": "2019/475/CAB/PR"
+  },
+  {
+   "titre": "Décret N°2019/612 du 10 novembre 2019 portant convocation du corps électoral en vue de l'élection des députés à l'Assemblée Nationale et des conseillers municipaux.",
+   "objet": "Convocation du corps électoral en vue de l'élection des députés à l'Assemblée Nationale et des conseillers municipaux",
+   "numero": "2019/612"
+  },
+  {
+   "titre": "Décret N°2019/685 du 26 Décembre 2019, portant nomination d'un Inspecteur Général au Ministère de la Promotion de la Femme et de la Famille",
+   "objet": "Nomination d'un Inspecteur Général au Ministère de la Promotion de la Femme et de la Famille",
+   "numero": "2019/685"
+  },
+  {
+   "titre": "Décret N°2020/395 du 27 juillet 2020 portant ratification du · Protocole pour l'élimination du commerce illicite des produits du tabac",
+   "objet": "Ratification du Protocole pour l'élimination du commerce illicite des produits du tabac",
+   "numero": "2020/395"
+  },
+  {
+   "titre": "Décret N°2020/491 du 13 août 2020 portant nomination d’un Ambassadeur",
+   "objet": "Nomination d’un Ambassadeur",
+   "numero": "2020/491"
+  },
+  {
+   "titre": "Décret N°2020/7951/PM du 30 décembre 2020 portant harmonisation de l'âge de départ à la retraite des agents de l'Etat relevant du Code du Travail.",
+   "objet": "Harmonisation de l'âge de départ à la retraite des agents de l'Etat relevant du Code du Travail",
+   "numero": "2020/7951/PM"
+  },
+  {
+   "titre": "Décret N°2021/026 du 19 janvier 2021 portant nomination du Directeur Général de la société CAMEROON AIRLINES Corporation (CAMAIR-CO)",
+   "objet": "Nomination du Directeur Général de la société CAMEROON AIRLINES Corporation (CAMAIR-CO)",
+   "numero": "2021/026"
+  },
+  {
+   "titre": "Décret N°2021/439 du 20 août 2021 portant ratification de I' Accord de coopération relatif à la suppression réciproque de l'obligation de visa avec le Conseil Fédéral Suisse",
+   "objet": "Ratification de l'Accord de coopération relatif à la suppression réciproque de l'obligation de visa avec le Conseil Fédéral Suisse",
+   "numero": "2021/439"
+  },
+  {
+   "titre": "Décret N°2021/582 du 1er octobre 2021 portant nomination d'un lnspecteur Général des Enseignements au Ministère des Enseignements Secondaires",
+   "objet": "Nomination d'un lnspecteur Général des Enseignements au Ministère des Enseignements Secondaires",
+   "numero": "2021/582"
+  },
+  {
+   "titre": "Décret N°2021/750 du 28 décembre 2021 portant adhésion du Cameroun à l'Accord créant le Réseau International sur le Bambou et le Rotin (I NBAR), adopté à Beijing (Chine), le 06 novembre 1997.",
+   "objet": "Adhésion du Cameroun à l'Accord créant le Réseau International sur le Bambou et le Rotin (I NBAR), adopté à Beijing (Chine), le 06 novembre 1997",
+   "numero": "2021/750"
+  },
+  {
+   "titre": "Arrêté N° 0153/CAB/PR du 04 mars 2022 portant nomination de certains responsables dans les Services Extérieurs de la Délégation Générale à la Sûreté Nationale",
+   "objet": "Nomination de certains responsables dans les Services Extérieurs de la Délégation Générale à la Sûreté Nationale",
+   "numero": "0153/CAB/PR"
+  },
+  {
+   "titre": "Décret N°2022/311 du 19 juillet 2022 portant ratification de la Convention multilatérale de sécurité sociale de la Conférence Internationale de la Prévoyance Sociale (CIPRES) adoptée le 27 février 2006 à Dakar au Sénégal",
+   "objet": "Ratification de la Convention multilatérale de sécurité sociale de la Conférence Internationale de la Prévoyance Sociale (CIPRES) adoptée le 27 février 2006 à Dakar au Sénégal",
+   "numero": "2022/311"
+  },
+  {
+   "titre": "Décret N°2022/410 du 31 août 2022 portant nomination d'un responsable au Secrétariat Général de la Présidence de la République",
+   "objet": "Nomination d'un responsable au Secrétariat Général de la Présidence de la République",
+   "numero": "2022/410"
+  },
+  {
+   "titre": "Décret N°2022/452 du 28 septembre 2022 habilitant un Accord de Prêt pour le financement du Programme d'Appui au Renforcement de la Production Agricole au Cameroun",
+   "objet": "Accord de Prêt pour le financement du Programme d'Appui au Renforcement de la Production Agricole au Cameroun",
+   "numero": "2022/452"
+  },
+  {
+   "titre": "Décret N°2023/027 du 17 janvier 2023 portant nomination du Secrétaire Particulier du Premier Ministre, Chef du Gouvernement",
+   "objet": "Nomination du Secrétaire Particulier du Premier Ministre, Chef du Gouvernement",
+   "numero": "2023/027"
+  },
+  {
+   "titre": "Décret N°2023/100 du 08 février 2023 ratifiant l'Accord de Prêt pour le financement du Projet d'Aménagement des Routes de désenclavement de la Zone industrielle et Portuaire de Kribi (PARZIK)",
+   "objet": "Ratification de l'Accord de Prêt pour le financement du Projet d'Aménagement des Routes de désenclavement de la Zone industrielle et Portuaire de Kribi (PARZIK)",
+   "numero": "2023/100"
+  },
+  {
+   "titre": "Décret N°2023/238 du 04 mai 2023 portant nomination d'un responsable dans les services extérieurs du Ministère des Relations Extérieures",
+   "objet": "Nomination d'un responsable dans les services extérieurs du Ministère des Relations Extérieures",
+   "numero": "2023/238"
+  },
+  {
+   "titre": "Décret N°2024/064 du 13 mars 2024 relatif au financement partiel de la deuxième phase du projet d’extension au plan national du système intelligent de vidéosurveillance urbaine",
+   "objet": "Financement partiel de la deuxième phase du projet d’extension au plan national du système intelligent de vidéosurveillance urbaine",
+   "numero": "2024/064"
+  },
+  {
+   "titre": "Décret N°2024/143 du 10 mai 2024 Ordonnant la publication du Journal Officiel du. texte portant Accord de Crédit n°72130-CM, pour le financement du Projet Gouvernance Locale et Communautés Résilientes",
+   "objet": "Publication du Journal Officiel du. texte portant Accord de Crédit n°72130-CM, pour le financement du Projet Gouvernance Locale et Communautés Résilientes",
+   "numero": "2024/143"
+  },
+  {
+   "titre": "Décret N°2024/333 du 24 juillet 2024 portant adhésion du Cameroun aux Conventions des Nations Unies relatives au statut des apatrides et à la réduction des cas d'apatridie, adoptés respectivement le 28 septembre 1954 et le 30 août 1961 à New-York (Etats U",
+   "objet": "Adhésion du Cameroun aux Conventions des Nations Unies relatives au statut des apatrides et à la réduction des cas d'apatridie, adoptés respectivement le 28 septembre 1954 et le 30 août 1961 à New-York (Etats U",
+   "numero": "2024/333"
+  },
+  {
+   "titre": "Décret N°2024/437 du 23 octobre 2024 portant nomination d'un responsable dans les services extérieurs du Ministère des Relations Extérieures",
+   "objet": "Nomination d'un responsable dans les services extérieurs du Ministère des Relations Extérieures",
+   "numero": "2024/437"
+  },
+  {
+   "titre": "Décret N°2024/610 du 25 novembre 2024 relatif au financement partiel du projet d’électrification rurale par système solaire photovoltaïque de 200 localités",
+   "objet": "Financement partiel du projet d’électrification rurale par système solaire photovoltaïque de 200 localités",
+   "numero": "2024/610"
+  },
+  {
+   "titre": "Décret N°2024/584 du 18 novembre 2024 portant promotion à titre posthume dans l'Ordre de la Valeur",
+   "objet": "Promotion à titre posthume dans l'Ordre de la Valeur",
+   "numero": "2024/584"
+  },
+  {
+   "titre": "Décret N°2024/591 du 18 novembre 2024 portant promotion à titre posthume dans l'Ordre du Mérite Camerounais",
+   "objet": "Promotion à titre posthume dans l'Ordre du Mérite Camerounais",
+   "numero": "2024/591"
+  },
+  {
+   "titre": "Décret N°2024/592 du 18 novembre 2024 portant promotion à titre posthume dans l'Ordre du Mérite Camerounais",
+   "objet": "Promotion à titre posthume dans l'Ordre du Mérite Camerounais",
+   "numero": "2024/592"
+  },
+  {
+   "titre": "Décret N°2025/052 du 21 février 2025 ratifiant l’Accord de prêt entre la République du Cameroun et la Banque Africaine de Développement (BAD), pour le financement du Programme d’Appui au Redressement du Secteur de l’Electricité (PARSEC)",
+   "objet": "Ratification de l’Accord de prêt entre la République du Cameroun et la Banque Africaine de Développement (BAD), pour le financement du Programme d’Appui au Redressement du Secteur de l’Electricité (PARSEC)",
+   "numero": "2025/052"
+  },
+  {
+   "titre": "Décret N°2025/131 du 21 avril 2025 relatif au Crédit-Acheteur, pour le financement du Projet de Reconfiguration du système d’alimentation en eau potable de la Ville de Yaoundé (lot 2)",
+   "objet": "Crédit-Acheteur, pour le financement du Projet de Reconfiguration du système d’alimentation en eau potable de la Ville de Yaoundé (lot 2)",
+   "numero": "2025/131"
+  },
+  {
+   "titre": "Décret N°2025/086 du 24 mars 2025 modifiant et complétant certaines dispositions du décret n° 2022/071 du 08 février 2022 portant classement au domaine public artificiel, des terrains nécessaires aux travaux de construction de la ligne double terne 400KV",
+   "objet": "Modification de certaines dispositions du décret n° 2022/071 du 08 février 2022 portant classement au domaine public artificiel, des terrains nécessaires aux travaux de construction de la ligne double terne 400KV",
+   "numero": "2025/086"
+  },
+  {
+   "titre": "Décret N°2025/527 du 20 novembre 2025 portant nomination du Procureur Général Près la Cour Suprême",
+   "objet": "Nomination du Procureur Général Près la Cour Suprême",
+   "numero": "2025/527"
+  },
+  {
+   "titre": "Décret N°2026/013 du 21 janvier 2026 autorisant des emprunts intérieurs et extérieurs destinés au financement des projets de développement et à l'apurement des restes à payer",
+   "objet": "Autorisation d'emprunts intérieurs et extérieurs destinés au financement des projets de développement et à l'apurement des restes à payer",
+   "numero": "2026/013"
+  },
+  {
+   "titre": "Décret N°2026/035 of 29 janvier 2026 ratifiant les Accords de Prêt n°2000200006851 et n°2100150044946, pour le financement du Programme Bâtir les Capacités et les Compétences pour l'Employabilité et l'Entrepreneuriat dans la Région de l'Extrême-Nord",
+   "objet": "Ratification des Accords de Prêt n°2000200006851 et n°2100150044946, pour le financement du Programme Bâtir les Capacités et les Compétences pour l'Employabilité et l'Entrepreneuriat dans la Région de l'Extrême-Nord",
+   "numero": "2026/035"
+  },
+  {
+   "titre": "Décret N° 2013/223 du 03 juillet 2013 portant découpage spécial de certaines circonscriptions électorales et répartition des sièges au sein desdites circonscriptions",
+   "objet": "Découpage spécial de certaines circonscriptions électorales et répartition des sièges au sein desdites circonscriptions",
+   "numero": "2013/223"
+  },
+  {
+   "titre": "Décret N°2014/030 du 28 janvier 2014 portant nomination des Directeurs à la Délégation Générale à la Sûreté Nationale",
+   "objet": "Nomination des Directeurs à la Délégation Générale à la Sûreté Nationale",
+   "numero": "2014/030"
+  },
+  {
+   "titre": "Décret N°2016/216 du 28 avril 2016 portant transformation de la Société de Presse et d’Editions du Cameroun en Société à Capital Public.",
+   "objet": "Transformation de la Société de Presse et d’Editions du Cameroun en Société à Capital Public",
+   "numero": "2016/216"
+  },
+  {
+   "titre": "Décret N°2018/692 du 21 novembre 2018 portant nomination de responsables dans certaines Universités d'Etat.",
+   "objet": "Nomination de responsables dans certaines Universités d'Etat",
+   "numero": "2018/692"
+  },
+  {
+   "titre": "Décret N° 2019/265 du 29 mai 2019 portant nomination de certains Membres du Conseil Supérieur de la Magistrature",
+   "objet": "Nomination de certains Membres du Conseil Supérieur de la Magistrature",
+   "numero": "2019/265"
+  },
+  {
+   "titre": "Loi N° 2019/018 du 24 décembre 2019 autorisant le Président de la République à procéder à l'adhésion du Cameroun à l'accord portant création de l'Agence pour l'Assurance du Commerce en Afrique, signe le 18 mai 2000",
+   "objet": "Autorisation de procéder à l'adhésion du Cameroun à l'accord portant création de l'Agence pour l'Assurance du Commerce en Afrique, signe le 18 mai 2000",
+   "numero": "2019/018"
+  },
+  {
+   "titre": "Décret N°2020/460 du 12 août 2020 portant promotion ou nomination à titre exceptionnel dans l'Ordre de la Valeur",
+   "objet": "Promotion ou nomination à titre exceptionnel dans l'Ordre de la Valeur",
+   "numero": "2020/460"
+  },
+  {
+   "titre": "Loi N°2020/015 du 17 décembre 2020 portant ratification de l'Accord entre le Cameroun et les Émirats Arabes Unis relatif aux services aériens",
+   "objet": "Ratification de l'Accord entre le Cameroun et les Émirats Arabes Unis relatif aux services aériens",
+   "numero": "2020/015"
+  },
+  {
+   "titre": "Décret N°2021/438 du 20 août 2021 Portant nomination de responsables dans certaines Universités d'Etat",
+   "objet": "Nomination de responsables dans certaines Universités d'Etat",
+   "numero": "2021/438"
+  },
+  {
+   "titre": "Arrêté N° 1194/CAB/PR du 3 novembre 2021 portant inscription de vingt-sept (27) Inspecteurs de Police Principaux sur la liste d'aptitude pour l'accès au cadre des Officiers de Police au titre de l'année 2021",
+   "objet": "Inscription de vingt-sept (27) Inspecteurs de Police Principaux sur la liste d'aptitude pour l'accès au cadre des Officiers de Police au titre de l'année 2021",
+   "numero": "1194/CAB/PR"
+  },
+  {
+   "titre": "Décret N°2022/293 du 11 juillet 2022 portant nomination des membres du Conseil d’Administration de l’Agence Nationale des Technologies de l’Information et de la Communication (ANTIC)",
+   "objet": "Nomination des membres du Conseil d’Administration de l’Agence Nationale des Technologies de l’Information et de la Communication (ANTIC)",
+   "numero": "2022/293"
+  },
+  {
+   "titre": "Arrêté N°1071/CAB/PR du 31 décembre 2022 portant titularisation de sept (07) Officiers de Police Stagiaires",
+   "objet": "Titularisation de sept (07) Officiers de Police Stagiaires",
+   "numero": "1071/CAB/PR"
+  },
+  {
+   "titre": "Décret N°2023/584 du 30 décembre 2023 portant avancement de grade au choix de huit (08) Commissaires de Police Principaux au grade de Commissaire Divisionnaire au titre de l’année 2023 et avancement d’échelon de deux (02) Commissaires Divisionnaires",
+   "objet": "Avancement de grade au choix de huit (08) Commissaires de Police Principaux au grade de Commissaire Divisionnaire au titre de l’année 2023 et avancement d’échelon de deux (02) Commissaires Divisionnaires",
+   "numero": "2023/584"
+  },
+  {
+   "titre": "Loi N°2024/011 du 24 juillet 2024 portant prorogation du mandat des députés à l'Assemblée Nationale",
+   "objet": "Prorogation du mandat des députés à l'Assemblée Nationale",
+   "numero": "2024/011"
+  },
+  {
+   "titre": "Décret N°2024/578 du 18 novembre 2024 portant nomination à titre exceptionnel dans l’Ordre du Mérite Camerounais",
+   "objet": "Nomination à titre exceptionnel dans l’Ordre du Mérite Camerounais",
+   "numero": "2024/578"
+  },
+  {
+   "titre": "Décret N°2025/308 du 15 juillet 2025 portant promotion de certains Officiers Généraux des Forces de Défense aux grades supérieurs",
+   "objet": "Promotion de certains Officiers Généraux des Forces de Défense aux grades supérieurs",
+   "numero": "2025/308"
+  },
+  {
+   "titre": "Décret N°2025/403 du 12 août 2025 portant nomination de responsables dans les Missions Militaires près certains postes diplomatiques du Cameroun à l'étranger",
+   "objet": "Nomination de responsables dans les Missions Militaires près certains postes diplomatiques du Cameroun à l'étranger",
+   "numero": "2025/403"
+  },
+  {
+   "titre": "Arrêté N°0840/CAB/PR du 12 novembre 2025 portant nomination de responsables à l'École Internationale des Forces de Sécurité (EIFORCES)",
+   "objet": "Nomination de responsables à l'École Internationale des Forces de Sécurité (EIFORCES)",
+   "numero": "0840/CAB/PR"
+  },
+  {
+   "titre": "Loi N°2025/015 du 17 décembre 2025 portant ratification de l’ordonnance n°2025/002 du 18 juillet 2025 fixant les incitations à l'investissement en République du Cameroun.",
+   "objet": "Ratification de l’ordonnance n°2025/002 du 18 juillet 2025 fixant les incitations à l'investissement en République du Cameroun",
+   "numero": "2025/015"
+  },
+  {
+   "titre": "Décret N°2014/189 du 04 juin 2014 portant nomination de responsables dans les Universités d'Etat.",
+   "objet": "Nomination de responsables dans les Universités d'Etat",
+   "numero": "2014/189"
+  },
+  {
+   "titre": "Arrêté N°0812/CAB/PR du 19 novembre 2019 portant titularisation de trente-six (36) Officiers de Police Stagiaires",
+   "objet": "Titularisation de trente-six (36) Officiers de Police Stagiaires",
+   "numero": "0812/CAB/PR"
+  },
+  {
+   "titre": "Loi N° 2019/020 du 24 décembre 2019 modifiant et complétant certaines dispositions de la loi No 2016/007 du 12 juillet 2016 portant code pénal",
+   "objet": "Modification de certaines dispositions de la loi No 2016/007 du 12 juillet 2016 portant code pénal",
+   "numero": "2019/020"
+  },
+  {
+   "titre": "Décret N°2020/353 du 30 juin 2020 portant nomination de Secrétaires Généraux dans certains Départements ministériels",
+   "objet": "Nomination de Secrétaires Généraux dans certains Départements ministériels",
+   "numero": "2020/353"
+  },
+  {
+   "titre": "arrête_n_0 453_cab_pr_du_05.06.2024",
+   "objet": null,
+   "numero": null
+  },
+  {
+   "titre": "Décision N°003/RDPC/PN du 26 mars 2025 portant nomination des chefs des délégations permanentes départementales du Comité Central du Rassemblement Démocratique du Peuple Camerounais",
+   "objet": "Nomination des chefs des délégations permanentes départementales du Comité Central du Rassemblement Démocratique du Peuple Camerounais",
+   "numero": "003/RDPC/PN"
+  },
+  {
+   "titre": "Décret N° 2016/350 du 27 juillet 2016 portant avancement de grade au choix de trente-huit (38) Commissaires de Police Principaux au grade de Commissaire Divisionnaire au titre de l'année 2016 et avancement d'échelon de trente-six (36) Commissaires Divisio",
+   "objet": "Avancement de grade au choix de trente-huit (38) Commissaires de Police Principaux au grade de Commissaire Divisionnaire au titre de l'année 2016 et avancement d'échelon de trente-six (36) Commissaires Divisio",
+   "numero": "2016/350"
+  },
+  {
+   "titre": "Décret N°2019/342 du 09 juillet 2019 portant transformation, en société à capital public, de la Société Nationale des Hydrocarbures",
+   "objet": "Transformation, en société à capital public, de la Société Nationale des Hydrocarbures",
+   "numero": "2019/342"
+  },
+  {
+   "titre": "Arrêté N°0772/CAB/PR du 27 octobre 2025 portant intégration et reclassement de 94 anciens Elèves-Inspecteurs de Police.",
+   "objet": "Intégration et reclassement de 94 anciens Elèves-Inspecteurs de Police",
+   "numero": "0772/CAB/PR"
+  },
+  {
+   "titre": "Arrêté N°0525/CAB/PR du 15 juillet 2026 portant intégration et reclassement de soixante-trois (63) anciens Élèves-Inspecteurs de Police",
+   "objet": "Intégration et reclassement de soixante-trois (63) anciens Élèves-Inspecteurs de Police",
+   "numero": "0525/CAB/PR"
+  },
+  {
+   "titre": "Décret N°2019/447 du 27 août 2019 portant nomination de responsables dans certaines universités d'Etat",
+   "objet": "Nomination de responsables dans certaines universités d'Etat",
+   "numero": "2019/447"
+  },
+  {
+   "titre": "Décret N°2020/796 du 28 décembre 2020 portant promotion aux grades de Sous-Lieutenant et Enseigne de Vaisseau de 2eme Classe, des Adjudants-Chefs et Maitres-Principaux des Forces de Défense inscrits au tableau d'avancement de grade",
+   "objet": "Promotion aux grades de Sous-Lieutenant et Enseigne de Vaisseau de 2eme Classe, des Adjudants-Chefs et Maitres-Principaux des Forces de Défense inscrits au tableau d'avancement de grade",
+   "numero": "2020/796"
+  },
+  {
+   "titre": "ARRETE N°0030/DGSN/SG/DRH/SDRS/SR du 03 décembre 2008 portant ouverture d'un concours direct pour le recrutement de 100 Elèves-Officiers de Police en 1ère Année à l'Ecole Nationale Supérieure de Police.",
+   "objet": "Ouverture d'un concours direct pour le recrutement de 100 Elèves-Officiers de Police en 1ère Année à l'Ecole Nationale Supérieure de Police",
+   "numero": "0030/DGSN/SG/DRH/SDRS/SR"
+  },
+  {
+   "titre": "Décret N°2017/278 du 7 juin 2017 portant nomination de Magistrats au Ministère de la Justice",
+   "objet": "Nomination de Magistrats au Ministère de la Justice",
+   "numero": "2017/278"
+  },
+  {
+   "titre": "Décret N°2024/676 du 20 décembre 2024 portant admission au Corps des Officiers d'Active des Forces de Défense et nomination au grade",
+   "objet": "Admission au Corps des Officiers d'Active des Forces de Défense et nomination au grade",
+   "numero": "2024/676"
+  },
+  {
+   "titre": "Arrêté N° 0127/CAB/PR du 25 février 2021 portant nomination de Responsables au Ministère de la Défense",
+   "objet": "Nomination de Responsables au Ministère de la Défense",
+   "numero": "0127/CAB/PR"
+  },
+  {
+   "titre": "Arrêté N° 1198/CAB/PR du 3 novembre 2021 portant inscription au tableau d'avancement au choix de trois cent dix-sept (317) Gardiens de la paix de 1er Grade au grade de Gardien de la Paix de 2eme Grade au titre de l'année 2021.",
+   "objet": "Inscription au tableau d'avancement au choix de trois cent dix-sept (317) Gardiens de la paix de 1er Grade au grade de Gardien de la Paix de 2eme Grade au titre de l'année 2021",
+   "numero": "1198/CAB/PR"
+  },
+  {
+   "titre": "Décret N°2021/690 du 2 décembre 2021 fixant les modalités d'application de la loi n° 2020/010 du 20 juillet 2020 régissant l’activité statistique au Cameroun",
+   "objet": "Modalités d'application de la loi n° 2020/010 du 20 juillet 2020 régissant l’activité statistique au Cameroun",
+   "numero": "2021/690"
+  },
+  {
+   "titre": "Décret N°2025/292 du 10 juillet 2025 portant réorganisation de la Grande Chancellerie des Ordres Nationaux",
+   "objet": "Réorganisation de la Grande Chancellerie des Ordres Nationaux",
+   "numero": "2025/292"
+  },
+  {
+   "titre": "Décret N°2023/294 du 19 juin 2023 portant promotion aux grades supérieurs, des personnels Officiers d’Active des Forces de Défense, au titre du second semestre de l’année budgétaire 2023",
+   "objet": "Promotion aux grades supérieurs, des personnels Officiers d’Active des Forces de Défense, au titre du second semestre de l’année budgétaire 2023",
+   "numero": "2023/294"
+  },
+  {
+   "titre": "Décret N°2014/027 du 28 janvier 2014 portant nomination des Huissiers de Justice dans les ressorts des Cours d'Appel",
+   "objet": "Nomination des Huissiers de Justice dans les ressorts des Cours d'Appel",
+   "numero": "2014/027"
+  },
+  {
+   "titre": "Loi N°2022/017 du 27 décembre 2022 portant répression de la piraterie, du terrorisme et des atteintes contre la sécurité de la navigation maritime et des plateformes",
+   "objet": "Répression de la piraterie, du terrorisme et des atteintes contre la sécurité de la navigation maritime et des plateformes",
+   "numero": "2022/017"
+  },
+  {
+   "titre": "Décret N°2024/555 du 14 novembre 2024 fixant les règles applicables au recrutement et à la discipline du Personnel de la Justice Militaire",
+   "objet": "Règles applicables au recrutement et à la discipline du Personnel de la Justice Militaire",
+   "numero": "2024/555"
+  },
+  {
+   "titre": "Décret N°2024/635 du 02 décembre 2024 portant promotion aux grades de Sous-Lieutenant et Enseigne de Vaisseau de 2ème Classe, des Adjudants-Chefs et Maîtres-Principaux des Forces de Défense inscrits au tableau d’avancement de grade, au titre de l’année bu",
+   "objet": "Promotion aux grades de Sous-Lieutenant et Enseigne de Vaisseau de 2ème Classe, des Adjudants-Chefs et Maîtres-Principaux des Forces de Défense inscrits au tableau d’avancement de grade, au titre de l’année bu",
+   "numero": "2024/635"
+  },
+  {
+   "titre": "Décret N°2022/013 du 11 janvier 2022 portant création, organisation et fonctionnement des Centres Hospitaliers Régionaux",
+   "objet": "Création, organisation et fonctionnement des Centres Hospitaliers Régionaux",
+   "numero": "2022/013"
+  },
+  {
+   "titre": "Arrêté n°0212/CAB/PR du 30 mars 2022 portant nomination de responsables au Ministère de la Défense",
+   "objet": "Nomination de responsables au Ministère de la Défense",
+   "numero": "0212/CAB/PR"
+  },
+  {
+   "titre": "Décret N°85/1296 du 27 septembre 1985 portant création et organisation du Centre National d’Administration et de Magistrature",
+   "objet": "Création et organisation du Centre National d’Administration et de Magistrature",
+   "numero": "85/1296"
+  },
+  {
+   "titre": "Décret N°2018/240 du 09 avril 2018 portant réorganisation de l’Ecole Nationale d’Administration et de Magistrature (ENAM)",
+   "objet": "Réorganisation de l’Ecole Nationale d’Administration et de Magistrature (ENAM)",
+   "numero": "2018/240"
+  },
+  {
+   "titre": "Décret N°2019/142 du 18 mars 2019 portant réorganisation de la Mission de Développement Intégré des Monts Mandara",
+   "objet": "Réorganisation de la Mission de Développement Intégré des Monts Mandara",
+   "numero": "2019/142"
+  },
+  {
+   "titre": "Décret N°2025/037 du 12 fév 2025 portant classement au domaine public artificiel, des terrains nécessaires aux travaux d’électrification de sept (07) localités dans les Arrondissements de Galim-Tignère, Mayo-Baléo et Tignère, Département du Faro et Déo",
+   "objet": "Classement au domaine public artificiel, des terrains nécessaires aux travaux d’électrification de sept (07) localités dans les Arrondissements de Galim-Tignère, Mayo-Baléo et Tignère, Département du Faro et Déo",
+   "numero": "2025/037"
+  },
+  {
+   "titre": "Décret N°2019/032 du 24 janvier 2019 portant réorganisation de la Caisse de Stabilisation des Prix des Hydrocarbures",
+   "objet": "Réorganisation de la Caisse de Stabilisation des Prix des Hydrocarbures",
+   "numero": "2019/032"
+  },
+  {
+   "titre": "Décret N°2019/067 du 12 février 2019 portant organisation et fonctionnement du Centre National de Transfusion Sanguine",
+   "objet": "Organisation et fonctionnement du Centre National de Transfusion Sanguine",
+   "numero": "2019/067"
+  },
+  {
+   "titre": "Circulaire N° 001/CAB/PRC du 28 juillet 2016 relative à la préparation du budget de l'Etat pour l'exercice 2017.",
+   "objet": "Préparation du budget de l'Etat pour l'exercice 2017",
+   "numero": "001/CAB/PRC"
+  },
+  {
+   "titre": "Décret N°2020/111 du 02 mars 2020 portant création, organisation et fonctionnement de la National School of Local Administration",
+   "objet": "Création, organisation et fonctionnement de la National School of Local Administration",
+   "numero": "2020/111"
+  },
+  {
+   "titre": "Loi N°2021/024 du 16 décembre 2021 portant organisation et promotion de la filière du livre au Cameroun",
+   "objet": "Organisation et promotion de la filière du livre au Cameroun",
+   "numero": "2021/024"
+  },
+  {
+   "titre": "Décret N°2017/461 du 04 septembre 2017 portant nomination de Sous-Préfets.-",
+   "objet": "Nomination de Sous-Préfets",
+   "numero": "2017/461"
+  },
+  {
+   "titre": "Décret N°2019/150 du 22 mars 2019 portant organisation et fonctionnement de l'Agence Nationale des Technologies de l'Information et de la Communication",
+   "objet": "Organisation et fonctionnement de l'Agence Nationale des Technologies de l'Information et de la Communication",
+   "numero": "2019/150"
+  },
+  {
+   "titre": "Circulaire N°001/CAB/PRC du 24 juillet 2019 relative à la préparation du budget de l'Etat pour l'exercice 2020",
+   "objet": "Préparation du budget de l'Etat pour l'exercice 2020",
+   "numero": "001/CAB/PRC"
+  },
+  {
+   "titre": "Décret N°2020/793 du 28 décembre 2020 portant inscription au tableau d'avancement de grades des personnels Officiers d'Active des Forces de Défense au titre de l'année budgétaire 2021",
+   "objet": "Inscription au tableau d'avancement de grades des personnels Officiers d'Active des Forces de Défense au titre de l'année budgétaire 2021",
+   "numero": "2020/793"
+  },
+  {
+   "titre": "Arrêté N° 0455/CAB/PR du 05 juin 2024 portant avancement d’échelon, intégration et reclassement de 904 anciens Elèves-Inspecteurs de Police",
+   "objet": "Avancement d’échelon, intégration et reclassement de 904 anciens Elèves-Inspecteurs de Police",
+   "numero": "0455/CAB/PR"
+  },
+  {
+   "titre": "Loi n° 2024/017 du 23 décembre 2024 relative à la protection des données à caractère personnel au Cameroun",
+   "objet": "Protection des données à caractère personnel au Cameroun",
+   "numero": "2024/017"
+  },
+  {
+   "titre": "Arrêté N° 1079/CAB/PR du 31 décembre 2022 portant inscription au tableau d'avancement de grade au choix de 1203 Inspecteurs de Police de 1er grade au grade d1nspecteur de Police de 2ime grade au titre de l'année 2022",
+   "objet": "Inscription au tableau d'avancement de grade au choix de 1203 Inspecteurs de Police de 1er grade au grade d1nspecteur de Police de 2ime grade au titre de l'année 2022",
+   "numero": "1079/CAB/PR"
+  },
+  {
+   "titre": "Loi N° 2019/022 du 24 décembre 2019 portant loi de règlement de la République du Cameroun pour l'exercice 2018",
+   "objet": "Loi de règlement de la République du Cameroun pour l'exercice 2018",
+   "numero": "2019/022"
+  },
+  {
+   "titre": "Décret N°2020/750 du 14 décembre 2020 portant approbation des statuts de la Société Nationale des Mines",
+   "objet": "Approbation des statuts de la Société Nationale des Mines",
+   "numero": "2020/750"
+  },
+  {
+   "titre": "Arrêté N°0412/CAB/PR du 24 mai 2024 portant nomination de mille sept cent quarante-six (1746) Élèves-Gardiens de la Paix",
+   "objet": "Nomination de mille sept cent quarante-six (1746) Élèves-Gardiens de la Paix",
+   "numero": "0412/CAB/PR"
+  },
+  {
+   "titre": "Décret N°2022/010 du 06 janvier 2022 portant organisation administrative et académique de l'Université de Garoua",
+   "objet": "Organisation administrative et académique de l'Université de Garoua",
+   "numero": "2022/010"
+  },
+  {
+   "titre": "Décret N°2021/523 du 31 août 2021 portant promotion ou nomination dans l'Ordre du Mérite Camerounais au titre de la Fête Nationale du 20 Mai 2021",
+   "objet": "Promotion ou nomination dans l'Ordre du Mérite Camerounais au titre de la Fête Nationale du 20 Mai 2021",
+   "numero": "2021/523"
+  },
+  {
+   "titre": "Arrêté N°0815/CAB/PR du 19 novembre 2019 portant reclassement, avancement de grade au choix de 2398 Inspecteurs de Police de 1er grade au grade d'Inspecteur de Police de 2ème grade et avancement d'échelon de certains Inspecteurs de Police de 2ème grade",
+   "objet": "Reclassement, avancement de grade au choix de 2398 Inspecteurs de Police de 1er grade au grade d'Inspecteur de Police de 2ème grade et avancement d'échelon de certains Inspecteurs de Police de 2ème grade",
+   "numero": "0815/CAB/PR"
+  },
+  {
+   "titre": "Loi N°2010/021 du 21 décembre 2010 régissant le commerce électronique au Cameroun",
+   "objet": "Commerce électronique au Cameroun",
+   "numero": "2010/021"
+  },
+  {
+   "titre": "Acte uniforme portant organisation des procédures collectives d'apurement du passif du 10 septembre 2015",
+   "objet": "Organisation des procédures collectives d'apurement du passif",
+   "numero": null
+  },
+  {
+   "titre": "Acte uniforme révisé relatif au droit des sociétés commerciales et du groupement d'intérêt économique du 30 janvier 2014",
+   "objet": "Droit des sociétés commerciales et du groupement d'intérêt économique",
+   "numero": null
+  }
+ ]
+}
