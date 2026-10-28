@@ -5,14 +5,16 @@ Trois branches ont ajoute, chacune de son cote, les reperes d'un texte : la
 page d'un texte et les textes nommes par un statut (app/schemas/law.py,
 app/services/statut_juridique.py), les lignes de liste et de recherche
 (app/schemas/reperes.py), le chat (app/services/rag_service.py). Fusionnees,
-elles se contredisaient ; ces tests fixent :
+elles se contredisaient sur trois points, que ces tests fixent :
 
 - la DATE : deux Actes uniformes OHADA dont l'intitule ne date que la
   publication au Journal officiel etaient « signés le 15 novembre 2023 » en
   liste et sans date de signature sur leur page ; le chat montrait la date
   brute en base, 1er janvier de remplissage compris ;
 - le NUMERO d'acte : deux lectures de l'intitule, dont une seule repare l'OCR
-  (« N°202l/345 »).
+  (« N°202l/345 ») ;
+- le STATUT en bref d'une ligne de liste comptait des liens que la page du
+  texte range dans l'historique (loi 2013/004).
 
 Fonctions pures et doublures : ni base, ni reseau.
 """
@@ -25,10 +27,12 @@ import pytest
 
 from app.schemas.law import LawDetailResponse
 from app.schemas.law_list import LawListLightItem
+from app.services.liens_entre_textes import LIENS
 from app.services.prompts import _date_du_texte
 from app.services.rag_service import _date_affichee
 from app.services.reperes_textes import dates_de_l_acte
-from app.services.statut_juridique import InfoTexte, texte_lie
+from app.services.statut_en_bref import statut_en_bref
+from app.services.statut_juridique import InfoTexte, construire_statut, texte_lie
 from app.utils.titre_officiel import numero_du_titre
 
 pytestmark = pytest.mark.unit
@@ -139,3 +143,41 @@ def test_un_texte_absent_du_corpus_garde_son_numero():
     # La nature n'ouvre pas l'intitule : seule la seconde lecture trouve le numero.
     constitution = "la Constitution (Loi N°96/06 du 18 janvier 1996 portant révision)"
     assert texte_lie(None, constitution, date(1996, 1, 18), {}).numero == "96/06"
+
+
+# ==================== STATUT EN BREF ====================
+
+
+def _actuels(statut):
+    return [c for c in statut.modifie_par if not c.depasse and not c.integre_au_texte]
+
+
+@pytest.mark.parametrize("reference", sorted({lien.texte for lien in LIENS}))
+def test_la_ligne_de_liste_resume_ce_que_la_page_dit_actuel(reference):
+    """Pour chaque texte du releve : meme abrogation, memes textes, memes natures."""
+    bref = statut_en_bref(reference)
+    statut = construire_statut(reference, {})
+    actuels = _actuels(statut)
+    par_nature = {}
+    for changement in actuels:
+        qui = changement.texte.reference or changement.texte.titre
+        par_nature.setdefault(changement.type, set()).add(qui)
+
+    assert bref is not None
+    assert bref.abroge == statut.abroge
+    assert bref.textes == len({c.texte.reference or c.texte.titre for c in actuels})
+    assert bref.natures == {nature: len(qui) for nature, qui in sorted(par_nature.items())}
+
+
+def test_la_loi_2013_004_est_remplacee_sans_ses_reecritures_de_2017():
+    """
+    L'ordonnance 2025/002 remplace la loi 2013/004 en entier : les articles que
+    la loi 2017/015 avait reecrits sont de l'historique, sur la page comme en
+    liste.
+    """
+    bref = statut_en_bref("LOI-2013-004")
+
+    assert bref.abroge is True
+    assert bref.natures == {"remplace": 1}
+    assert bref.textes == 1
+    assert bref.date_dernier_texte == date(2025, 7, 18)

@@ -50,7 +50,20 @@ def test_abroge_seulement_si_le_texte_entier_l_est():
         _lien("remplace", "R-2", date(2025, 7, 18)),
     ])
     assert entier["T-1"].abroge is True
-    assert entier["T-1"].textes == 2
+    # La modification de 2017 est depassee par le remplacement de 2025 : la
+    # page du texte la range dans l'historique, la ligne ne la compte plus.
+    assert entier["T-1"].textes == 1
+    assert entier["T-1"].natures == {"remplace": 1}
+
+
+def test_un_lien_anterieur_a_une_abrogation_partielle_d_autres_articles_compte():
+    """Seul ce que l'abrogation couvre est depasse : l'article 5 modifie reste actuel."""
+    resume = resumer([
+        _lien("modifie", "R-1", date(2017, 7, 12), articles=("5",)),
+        _lien("abroge", "R-2", date(2025, 7, 18), articles=("6", "7")),
+    ])["T-1"]
+    assert resume.textes == 2
+    assert resume.natures == {"abroge": 1, "modifie": 1}
 
 
 def test_un_texte_absent_du_corpus_compte_par_son_intitule():

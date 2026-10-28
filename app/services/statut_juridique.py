@@ -163,12 +163,13 @@ def _bases(designations: Sequence[str]) -> Optional[Set[str]]:
     return bases
 
 
-def _depasse_par(lien: Lien, liens: Sequence[Lien]) -> Optional[Lien]:
+def lien_qui_depasse(lien: Lien, liens: Sequence[Lien]) -> Optional[Lien]:
     """
     Le dernier lien de LIENS qui abroge ou remplace, depuis, tout ce que `lien`
     avait touche. La loi 2017/015 reecrit des articles de la loi 2013/004, que
     l'ordonnance 2025/002 remplace en entier : ses reecritures relevent de
-    l'historique.
+    l'historique. Public : le statut en bref des lignes de liste
+    (statut_en_bref) ecarte les memes liens, pour dire ce que dit la page.
     """
     candidats = []
     touches = _bases(lien.articles)
@@ -406,7 +407,7 @@ def _construire(
                     historique.depasse_le,
                     infos,
                 )
-            elif historique is None and (fin := _depasse_par(lien, liens)) is not None:
+            elif historique is None and (fin := lien_qui_depasse(lien, liens)) is not None:
                 depasse_par = texte_lie(fin.par_reference, fin.par_titre, fin.par_date, infos)
             nature_modification = _nature_modification(lien)
             changement = Changement(

@@ -16,6 +16,12 @@ s'abstenir d'afficher un statut, ou dire « version d'origine, non consolidée �
 
 Les donnees sont lues dans liens_entre_textes.LIENS, sans y rien changer ; le
 resume est calcule une fois, a l'import.
+
+LE RESUME DE LA PAGE. La ligne resume ce que la page du texte (statut
+juridique de GET /laws/{id}) donne pour ACTUEL : un lien depasse depuis par
+une abrogation ou un remplacement n'y compte pas. La loi 2013/004 se lisait
+« modifiée, complétée et remplacée » en liste, « remplacée » sur sa page, ou
+les reecritures de 2017 sont de l'historique.
 """
 
 from collections import defaultdict
@@ -25,6 +31,7 @@ from typing import Dict, Iterable, Optional
 from pydantic import BaseModel, Field
 
 from app.services.liens_entre_textes import LIENS, Lien
+from app.services.statut_juridique import lien_qui_depasse
 
 # Natures qui mettent fin au texte entier quand le lien ne vise aucun article.
 _FIN_DU_TEXTE = ("abroge", "remplace")
@@ -61,9 +68,12 @@ def _qui(lien: Lien) -> str:
 
 
 def resumer(liens: Iterable[Lien]) -> Dict[str, StatutEnBref]:
-    """Le resume de chaque texte touche, par reference en base."""
+    """Le resume de chaque texte touche, par reference en base, liens depasses exclus."""
+    liens = list(liens)
     par_texte: Dict[str, list] = defaultdict(list)
     for lien in liens:
+        if lien_qui_depasse(lien, liens) is not None:
+            continue
         par_texte[lien.texte].append(lien)
     resumes: Dict[str, StatutEnBref] = {}
     for reference, ses_liens in par_texte.items():
