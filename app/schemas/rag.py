@@ -4,12 +4,16 @@ Pydantic schemas for RAG chatbot service.
 Defines request/response models for RAG endpoints, citations, and conversation management.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.personas import PROFIL_GENERAL, normaliser_profil
+
+# Ce qu'un texte plus recent fait a un texte cite : les cles de
+# textes_successifs.NATURES, la ou les liens prouves sont definis.
+NatureDuLien = Literal["modifie", "complete", "abroge", "abroge_partiellement", "remplace"]
 
 
 class RAGRequest(BaseModel):
@@ -109,6 +113,67 @@ class Citation(BaseModel):
             }
         }
     }
+
+
+# ==================== STATUT PROUVE D'UNE SOURCE ====================
+#
+# POURQUOI. Une source s'affichait sans dire qu'un texte plus recent avait
+# reecrit l'article cite, alors que le modele, lui, le lisait sous l'extrait.
+# Ces schemas portent les MEMES liens prouves (app/services/liens_entre_textes.py),
+# structures pour l'interface. Ils ne sont encore rattaches a aucune reponse.
+
+
+class LienProuve(BaseModel):
+    """
+    Un texte plus recent qui touche la source citee, tel que releve dans
+    app/services/liens_entre_textes.py (disposition relue en base).
+    """
+
+    nature: NatureDuLien = Field(..., description="Ce que fait le texte plus recent")
+    libelle: str = Field(..., description="Le participe a afficher : « modifié », « abrogé en partie »…")
+    par_titre: str = Field(
+        ..., description="Le texte qui touche, article et date compris : « la Loi N°2008/001 du 14 avril 2008 »"
+    )
+    par_date: date = Field(..., description="Date de ce texte")
+    par_reference: Optional[str] = Field(
+        None, description="Sa reference en base ; null quand il manque au corpus"
+    )
+    par_law_id: Optional[int] = Field(
+        None, description="Son identifiant en base, pour le lien ; null s'il manque au corpus"
+    )
+    articles: List[str] = Field(
+        default_factory=list, description="Articles touches du texte cite ; vide : le texte entier"
+    )
+    par_articles: List[str] = Field(
+        default_factory=list, description="Articles du texte plus recent qui portent le changement"
+    )
+    portee: Optional[str] = Field(None, description="Ce qui change, en une phrase, quand c'est releve")
+
+
+class StatutProuve(BaseModel):
+    """
+    Le statut juridique PROUVE d'une source : rien n'y est suppose.
+
+    `etat` null et `liens` vide ne veulent pas dire « en vigueur » : aucun
+    texte plus recent n'est connu pour l'avoir touchee. L'interface ecrit alors
+    une mention neutre (« version d'origine, non consolidée »).
+    """
+
+    etat: Optional[NatureDuLien] = Field(
+        None,
+        description=(
+            "Le plus fort des liens qui visent la source (abroge > remplace > "
+            "abroge_partiellement > modifie > complete) ; null : rien de prouve"
+        ),
+    )
+    liens: List[LienProuve] = Field(default_factory=list, description="Du plus recent au plus ancien")
+    lignes: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Les lignes de statut que le modele a lues sous l'extrait. Pour audit : "
+            "elles citent des references internes et ne s'affichent pas telles quelles"
+        ),
+    )
 
 
 class RAGResponse(BaseModel):
