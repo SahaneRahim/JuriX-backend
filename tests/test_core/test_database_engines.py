@@ -127,3 +127,144 @@ def test_une_erreur_du_moteur_synchrone_est_signalee_une_fois(monkeypatch, caplo
     assert "invalid URI query parameter" in caplog.text
     assert "valeur privee" not in caplog.text
     assert "server closed" not in caplog.text
+
+
+# ==================== VERIFICATION DES CONNEXIONS A LA SORTIE DU POOL ====================
+
+
+class _ConnexionFactice:
+    """Ce que _verifier_a_la_sortie lit d'une connexion asyncpg."""
+
+    def __init__(self, fermee=False, panne=None):
+        self.fermee = fermee
+        self.panne = panne
+        self.envois = []
+
+    def is_closed(self):
+        return self.fermee
+
+    async def execute(self, sql, timeout=None):
+        self.envois.append((sql, timeout))
+        if self.panne is not None:
+            raise self.panne
+        return "SELECT 1"
+
+
+def _fiche(connexion, rendue_il_y_a=None):
+    import time
+
+    from app.core import database
+
+    class _Fiche:
+        pass
+
+    fiche = _Fiche()
+    fiche.driver_connection = connexion
+    fiche.info = {} if rendue_il_y_a is None else {
+        database._RENDUE_A: time.monotonic() - rendue_il_y_a
+    }
+    return fiche
+
+
+class TestVerificationALaSortie:
+    """
+    pool_pre_ping coutait QUATRE allers-retours a chaque emprunt (BEGIN, « ; »
+    prepare puis execute, ROLLBACK) : 8 par recherche, a 83 ms chacun. La
+    verification qui le remplace n'en coute aucun pour une connexion recente,
+    un seul pour une connexion inactive, et ecarte une connexion fermee sans
+    rien envoyer.
+    """
+
+    @staticmethod
+    async def _verifier(fiche):
+        from sqlalchemy.util import greenlet_spawn
+
+        from app.core import database
+
+        await greenlet_spawn(database._verifier_a_la_sortie, None, fiche, None)
+
+    @pytest.mark.asyncio
+    async def test_une_connexion_fermee_est_ecartee_sans_rien_envoyer(self):
+        from sqlalchemy import exc
+
+        connexion = _ConnexionFactice(fermee=True)
+
+        with pytest.raises(exc.DisconnectionError):
+            await self._verifier(_fiche(connexion, rendue_il_y_a=1000))
+        assert connexion.envois == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("rendue_il_y_a", [None, 1.0], ids=["neuve", "recente"])
+    async def test_une_connexion_neuve_ou_recente_ne_coute_rien(self, rendue_il_y_a):
+        connexion = _ConnexionFactice()
+
+        await self._verifier(_fiche(connexion, rendue_il_y_a))
+
+        assert connexion.envois == []
+
+    @pytest.mark.asyncio
+    async def test_une_connexion_inactive_est_sondee_une_fois(self):
+        """Protocole simple, sans transaction ni preparation : un aller-retour, borne."""
+        from app.core import database
+
+        connexion = _ConnexionFactice()
+
+        await self._verifier(_fiche(connexion, database.PING_APRES_INACTIVITE_S + 1))
+
+        assert connexion.envois == [("SELECT 1", database.DELAI_PING_S)]
+
+    @pytest.mark.asyncio
+    async def test_un_sondage_en_echec_fait_remplacer_la_connexion(self):
+        from sqlalchemy import exc
+
+        from app.core import database
+
+        connexion = _ConnexionFactice(panne=ConnectionResetError("connexion perdue"))
+
+        with pytest.raises(exc.DisconnectionError):
+            await self._verifier(_fiche(connexion, database.PING_APRES_INACTIVITE_S + 1))
+
+    def test_le_moteur_de_l_application_est_ainsi_regle(self):
+        from sqlalchemy import event
+
+        from app.core import database, mesure_sql
+
+        assert database.engine.pool._pre_ping is False
+        assert database.engine.pool._pool.use_lifo is True
+        assert database.engine.pool._recycle == -1
+        for nom, ecouteur in (
+            ("checkout", database._verifier_a_la_sortie),
+            ("checkin", database._noter_le_retour),
+            ("before_cursor_execute", mesure_sql._avant_instruction),
+        ):
+            assert event.contains(database.engine.sync_engine, nom, ecouteur), nom
+
+    @pytest.mark.asyncio
+    async def test_une_connexion_coupee_par_le_serveur_est_remplacee(self, pg_engine):
+        """
+        Ce que fait Neon a sa mise en veille : il ferme les connexions du pool.
+        La requete suivante doit repondre, sur une connexion neuve, sans erreur.
+        """
+        import asyncio
+
+        import asyncpg
+        from sqlalchemy import text
+
+        from app.core import database
+        from tests.conftest import TEST_DATABASE_URL
+
+        database.brancher_verification_des_connexions(pg_engine.sync_engine)
+        async with pg_engine.connect() as connexion:
+            pid = (await connexion.execute(text("SELECT pg_backend_pid()"))).scalar()
+
+        tiers = await asyncpg.connect(TEST_DATABASE_URL.replace("+asyncpg", ""))
+        try:
+            assert await tiers.fetchval("SELECT pg_terminate_backend($1)", pid)
+        finally:
+            await tiers.close()
+        await asyncio.sleep(0.2)  # la fin de flux arrive a la boucle
+
+        async with pg_engine.connect() as connexion:
+            nouveau = (await connexion.execute(text("SELECT pg_backend_pid()"))).scalar()
+
+        assert nouveau != pid
