@@ -657,14 +657,26 @@ class SearchService:
 
     # ==================== RECHERCHE AFFINEE ====================
 
-    # Fenetre de l'ensemble candidat : ce que le parcours classique classe pour
-    # sa plus grande premiere page (limit=50, offset=0), soit
-    # _chunk_budget(50) = 200 morceaux. Assez pour qu'un filtre trouve de quoi
-    # remplir plusieurs pages ; au-dela, le classement semantique ne rend plus
-    # que du bruit, et chaque morceau de plus transite avec son texte. Fixe :
-    # l'ensemble ne depend ni de la page ni des filtres, sans quoi les
-    # effectifs changeraient d'une page a l'autre.
-    FENETRE_ENSEMBLE = 50
+    # Fenetre de l'ensemble candidat : EXACTEMENT ce que le parcours classique
+    # classe pour la premiere page du front, 20 resultats (limit=20,
+    # offset=0), soit _chunk_budget(20) = 80 morceaux. Sa premiere page par
+    # pertinence est donc celle que le front deploye affiche, dans le meme
+    # ordre, et `total` y vaut le meme nombre.
+    #
+    # PAS PLUS LARGE. Une fenetre de 200 morceaux (limit=50) a ete mesuree le
+    # 28/10/2026 sur les 102 questions d'evaluation (vecteurs Voyage
+    # enregistres, jurix_dev) : la loi attendue y sortait dans les 10 premiers
+    # pour 64 questions (66 dans les 20 premiers), contre 91 (101) ici, et les
+    # lois ajoutees ne contenaient jamais une loi attendue que la fenetre de 80
+    # manquait. Plus de morceaux laissent passer plus de correspondances
+    # FLOUES de titre (« cession » pour « succession », « travaux » pour
+    # « code du travail »), et le tri « titre d'abord » les place devant les
+    # articles pertinents ; le tri par date les aurait remontees en tete.
+    # L'ensemble compte 25 textes en mediane (6 a 62).
+    #
+    # Fixe : l'ensemble ne depend ni de la page, ni du tri, ni de `refine`,
+    # sans quoi les effectifs changeraient d'une page a l'autre.
+    FENETRE_ENSEMBLE = 20
 
     async def _recherche_affinee(
         self, request: SearchRequest, start_time: float

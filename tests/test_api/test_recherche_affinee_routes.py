@@ -87,6 +87,36 @@ async def test_le_parcours_classique_ne_change_pas_de_forme(client, corpus):
 
 
 @pytest.mark.asyncio
+async def test_la_premiere_page_par_pertinence_est_celle_du_parcours_classique(
+    client, corpus, monkeypatch
+):
+    """
+    Le front deploye demande des pages de 20 (TAILLE_PAGE_RECHERCHE). Sans
+    `refine`, triee par pertinence, la premiere page de la recherche affinee
+    est la sienne : memes textes, meme ordre, meme total. Le nouveau front
+    peut passer a la recherche affinee sans que le haut de la liste change.
+
+    L'egalite tient a ce que l'ensemble candidat est classe avec le MEME
+    budget de morceaux que cette page : verifie sur l'appel lui-meme, car une
+    fenetre plus large (200 morceaux) donnait un autre ordre sur un vrai
+    corpus — pas sur celui-ci, trop petit pour la remplir.
+    """
+    budgets = []
+    origine = SearchService._execute_search_by_mode
+
+    async def noter(self, request):
+        budgets.append(self._chunk_budget(request.offset + request.limit))
+        return await origine(self, request)
+
+    monkeypatch.setattr(SearchService, "_execute_search_by_mode", noter)
+    classique = await _chercher(client, limit=20)
+    affinee = await _chercher(client, limit=20, sort="pertinence", facets=True)
+    assert budgets == [80, 80]
+    assert [r["law_id"] for r in affinee["results"]] == [r["law_id"] for r in classique["results"]]
+    assert affinee["total"] == classique["total"] == affinee["candidates"]
+
+
+@pytest.mark.asyncio
 async def test_parcourir_les_pages_filtrees_donne_le_total(client, corpus):
     """
     Filtre puis tri puis page : toutes les pages reunies donnent exactement

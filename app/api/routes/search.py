@@ -90,11 +90,13 @@ async def search(
     Avec l'un d'eux, la réponse porte `sort`, `candidates` (taille de
     l'ensemble avant `refine`) et `facets` ; `total` compte les résultats
     filtrés, exactement ceux que la pagination parcourt. L'ensemble candidat
-    est celui que le parcours classique classe pour une première page de 50
-    (200 morceaux), calculé une fois puis relu en cache : changer de page,
-    de tri ou de filtre ne relance pas la recherche. Les effectifs sont
-    disjonctifs : celui d'une valeur tient compte des autres filtres, pas du
-    sien.
+    est exactement ce que le parcours classique classe pour une première page
+    de 20 (80 morceaux) : trié par pertinence, sans `refine`, sa première page
+    de 20 est celle du parcours classique, dans le même ordre, et `total` y
+    vaut le même nombre. Il est calculé une fois puis relu en cache : changer
+    de page, de tri ou de filtre ne relance pas la recherche. Les effectifs
+    sont disjonctifs : celui d'une valeur tient compte des autres filtres, pas
+    du sien.
 
     Chaque résultat porte aussi, sur les deux parcours, les repères d'une
     ligne dense : `objet` (tiré de l'intitulé, null si incertain), `numero`,
