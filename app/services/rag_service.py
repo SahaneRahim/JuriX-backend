@@ -242,13 +242,20 @@ def _date_affichee(jour: Optional[date], titre: Optional[str]) -> Optional[date]
 
 def _requete_des_identifiants(references: List[str]):
     """
-    (reference, identifiant) des textes en base parmi `references`. Une
+    (reference, identifiant) des textes PUBLIES parmi `references`. Une
     fonction a part pour qu'un test la fasse echouer en SQL, sur la vraie base.
     Import local, comme dans _get_priority_document_context.
+
+    Publies seulement, comme `TexteLie` sur la page d'un texte
+    (statut_juridique.texte_lie) : un texte archive, ou encore en brouillon,
+    devenait un lien dans le chat, vers une page qui ne le montre pas, alors
+    que sa page ne le liait pas.
     """
     from app.models.law import Law
 
-    return select(Law.reference, Law.id).where(Law.reference.in_(references))
+    return select(Law.reference, Law.id).where(
+        Law.reference.in_(references), Law.status == "published"
+    )
 
 
 class RAGQuotaError(Exception):

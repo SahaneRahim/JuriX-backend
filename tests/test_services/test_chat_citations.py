@@ -481,7 +481,7 @@ class TestIdentifiantsSurLaVraieBase:
         from app.models.law import Law
 
         loi = Law(reference="PRC-6284", title="Loi N°2008/001 du 14 avril 2008", type="loi",
-                  content="Article 1er. La Constitution est modifiée.")
+                  content="Article 1er. La Constitution est modifiée.", status="published")
         db_session.add(loi)
         await db_session.commit()
 
@@ -491,6 +491,30 @@ class TestIdentifiantsSurLaVraieBase:
         [lien] = [lien for lien in article["statut"]["liens"] if lien["par_reference"] == "PRC-6284"]
         assert lien["par_law_id"] == loi.id
         assert nommee["law_id"] == loi.id and nommee["article"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("statut", ["archived", "draft"])
+    async def test_un_texte_non_publie_n_a_pas_d_adresse(self, db_session, statut):
+        """
+        Comme sur la page d'un texte (TexteLie) : un texte archive ou en
+        brouillon n'est pas un lien. Il reste nomme par le statut, sans
+        adresse, et sa mention n'est ni liee ni signalee.
+        """
+        from app.models.law import Law
+
+        db_session.add(Law(
+            reference="PRC-6284", title="Loi N°2008/001 du 14 avril 2008", type="loi",
+            content="Article 1er. La Constitution est modifiée.", status=statut,
+        ))
+        await db_session.commit()
+
+        fin = (await _evenements(self._service_sur(db_session), _requete()))[-1]
+
+        [article] = fin["citations"]
+        [lien] = [lien for lien in article["statut"]["liens"]
+                  if lien["par_reference"] == "PRC-6284"]
+        assert lien["par_law_id"] is None
+        assert fin["citations_introuvables"] == []
 
     @pytest.mark.asyncio
     async def test_un_echec_de_cette_lecture_ne_perd_pas_l_echange(self, db_session, monkeypatch):
