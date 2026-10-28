@@ -6,8 +6,9 @@ import re
 import time
 from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI, Depends
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.datastructures import MutableHeaders
 
@@ -306,10 +307,33 @@ async def health():
     return {"status": "healthy"}
 
 
+# Attente maximale de la sonde de /health/db. Le reveil d'un calcul Neon
+# suspendu a pris 0,6 a 0,9 s en mesure : au-dela de dix secondes, la base ne
+# repond pas, et la sonde doit le dire au lieu de retenir son appelant pendant
+# la minute que laisse la connexion asyncpg.
+DELAI_SONDE_BASE_S = 10.0
+
+
 @app.get("/health/db")
 async def health_db(db: AsyncSession = Depends(get_db)):
-    """Sonde legere pour reinitialiser la mise en veille Neon sans charger le CPU."""
-    await db.execute(text("SELECT 1"))
+    """
+    Sonde legere pour reinitialiser la mise en veille Neon sans charger le CPU.
+
+    503, et non 500, quand la base ne repond pas : c'est l'etat que la sonde
+    mesure, pas une panne du code. L'erreur remontait par get_db, qui la
+    relance : une 500 indiscernable d'un bogue, et une trace d'erreur
+    complete au journal a chaque sonde manquee. Seule la classe de l'erreur
+    est journalisee : la route est publique, et le message d'asyncpg peut
+    citer l'hote.
+    """
+    try:
+        async with asyncio.timeout(DELAI_SONDE_BASE_S):
+            await db.execute(text("SELECT 1"))
+    except Exception as erreur:
+        logger.warning(f"⚠️ /health/db : base injoignable ({type(erreur).__name__})")
+        return JSONResponse(
+            status_code=503, content={"status": "unhealthy", "database": "unreachable"}
+        )
     return {"status": "healthy", "database": "connected"}
 
 

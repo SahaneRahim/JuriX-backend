@@ -59,6 +59,80 @@ async def test_health_ne_touche_pas_la_base():
 
 
 @pytest.mark.asyncio
+async def test_health_db_interroge_la_base(client):
+    response = await client.get("/health/db")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "healthy", "database": "connected"}
+
+
+def _session_qui(execute):
+    """Une dependance get_db dont la session execute `execute`."""
+
+    class _Session:
+        pass
+
+    session = _Session()
+    session.execute = execute
+
+    async def _dependance():
+        yield session
+
+    return _dependance
+
+
+@pytest.mark.asyncio
+async def test_health_db_rend_503_quand_la_base_refuse(caplog):
+    """
+    503 et non 500 : l'erreur remontait par get_db, et la sonde de maintien
+    en eveil ne distinguait plus une base endormie d'un bogue. Le message de
+    l'erreur, qui peut citer l'hote, ne sort ni dans la reponse ni au journal.
+    """
+    from app.core.database import get_db
+
+    async def _refus(*a, **k):
+        raise ConnectionRefusedError("connexion refusee par db.interne.example")
+
+    app.dependency_overrides[get_db] = _session_qui(_refus)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/health/db")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "unhealthy", "database": "unreachable"}
+    assert "db.interne.example" not in response.text
+    assert "db.interne.example" not in caplog.text
+    assert "ConnectionRefusedError" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_health_db_ne_retient_pas_son_appelant(monkeypatch):
+    """Une base muette rend 503 a l'echeance, pas apres la minute d'asyncpg."""
+    import asyncio
+    import time
+
+    import app.main as main
+    from app.core.database import get_db
+
+    async def _muette(*a, **k):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(main, "DELAI_SONDE_BASE_S", 0.05)
+    app.dependency_overrides[get_db] = _session_qui(_muette)
+    try:
+        debut = time.monotonic()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/health/db")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 503
+    assert time.monotonic() - debut < 2
+
+
+@pytest.mark.asyncio
 async def test_secret_key_par_defaut_refuse_le_demarrage_hors_developpement():
     """
     Le garde-fou de `lifespan` n'était couvert par aucun test.
