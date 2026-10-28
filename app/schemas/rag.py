@@ -4,6 +4,7 @@ Pydantic schemas for RAG chatbot service.
 Defines request/response models for RAG endpoints, citations, and conversation management.
 """
 
+import json
 from datetime import date, datetime
 from typing import List, Literal, Optional
 
@@ -115,12 +116,14 @@ class Citation(BaseModel):
     }
 
 
-# ==================== STATUT PROUVE D'UNE SOURCE ====================
+# ==================== CITATIONS LUES DANS LA REPONSE ====================
 #
-# POURQUOI. Une source s'affichait sans dire qu'un texte plus recent avait
-# reecrit l'article cite, alors que le modele, lui, le lisait sous l'extrait.
-# Ces schemas portent les MEMES liens prouves (app/services/liens_entre_textes.py),
-# structures pour l'interface. Ils ne sont encore rattaches a aucune reponse.
+# POURQUOI. Les sources n'etaient listees qu'en fin de reponse, et une citation
+# que rien ne portait etait jetee sans un mot : le lecteur voyait « l'article
+# 312 du Code pénal » sans source ni alerte. Ces champs disent OU chaque
+# citation se trouve dans le texte affiche, ce qu'elle designe, et lesquelles
+# ne correspondent a aucun texte consulte. Tous sont NOUVEAUX et facultatifs :
+# `sources` garde son contenu et son sens pour le front deja deploye.
 
 
 class LienProuve(BaseModel):
@@ -176,6 +179,87 @@ class StatutProuve(BaseModel):
     )
 
 
+class CitationPositionnee(BaseModel):
+    """
+    Une citation reperee dans le texte de la reponse, et ce qu'elle designe.
+
+    `debut` et `fin` sont des indices JavaScript — unites de code UTF-16 —
+    dans le texte final de la reponse : la concatenation des `chunk` du flux,
+    ou `answer` hors flux, markdown compris. `texte.slice(debut, fin)` rend
+    exactement `texte_cite`. Ils coincident avec les indices Python tant que la
+    reponse ne contient aucun caractere hors du plan multilingue de base (un
+    emoji, par exemple).
+    """
+
+    debut: int = Field(..., ge=0, description="Indice UTF-16 du premier caractere cite")
+    fin: int = Field(..., ge=0, description="Indice UTF-16 qui suit le dernier caractere cite")
+    texte_cite: str = Field(..., description="Le passage, tel qu'ecrit : « article 37 du Code du travail »")
+    law_id: int = Field(..., description="Le texte designe")
+    article: Optional[str] = Field(
+        None, description="Numero de l'article cite ; null pour un texte cite sans article"
+    )
+    article_id: Optional[int] = Field(None, description="La ligne d'article en base, pour l'apercu")
+    reference: str = Field(..., description="Reference du texte en base")
+    titre: str = Field(..., description="Intitule du texte")
+    date_du_texte: Optional[date] = Field(None, description="Date du texte (publication), si connue")
+    statut: StatutProuve = Field(default_factory=StatutProuve)
+
+
+class CitationIntrouvable(BaseModel):
+    """
+    Une citation que rien de ce que le modele a lu ne porte : a signaler, pas
+    a jeter. Memes indices que CitationPositionnee.
+    """
+
+    debut: int = Field(..., ge=0)
+    fin: int = Field(..., ge=0)
+    texte_cite: str
+    raison: Literal["article_non_consulte", "texte_non_consulte"] = Field(
+        ...,
+        description=(
+            "article_non_consulte : le texte cite a ete consulte, pas cet article ; "
+            "texte_non_consulte : aucun texte consulte ne repond a ce nom"
+        ),
+    )
+
+
+class SourceCitee(BaseModel):
+    """
+    Une source citee dans la reponse, une fois par article (ou par texte cite
+    sans article). Memes champs qu'une `Citation`, pour que l'affichage des
+    sources serve aux deux listes, plus la date et le statut du texte.
+    """
+
+    law_id: int
+    law_reference: str
+    law_title: str
+    article_number: Optional[str] = None
+    article_id: Optional[int] = None
+    excerpt: str = Field("", max_length=300)
+    relevance_score: float = Field(0.0, ge=0.0, le=1.0)
+    date_du_texte: Optional[date] = None
+    statut: StatutProuve = Field(default_factory=StatutProuve)
+
+
+class TexteConsulte(BaseModel):
+    """
+    Un texte remis au modele et que la reponse ne cite pas.
+
+    Distinct d'une source : le presenter comme une citation ferait croire que
+    la reponse s'appuie dessus. C'est ici que finit la source « de repli »
+    que `sources` garde pour le front deja deploye.
+    """
+
+    law_id: int
+    law_reference: str
+    law_title: str
+    date_du_texte: Optional[date] = None
+    articles: List[str] = Field(
+        default_factory=list, description="Numeros des articles lus par le modele, dans l'ordre"
+    )
+    statut: StatutProuve = Field(default_factory=StatutProuve, description="Statut du texte entier")
+
+
 class RAGResponse(BaseModel):
     """Response schema for RAG ask endpoint."""
 
@@ -193,6 +277,21 @@ class RAGResponse(BaseModel):
     intent: str = Field(
         "juridique",
         description="Intention retenue par le routeur : juridique | smalltalk | meta | hors_sujet",
+    )
+    # Les citations lues dans `answer` (voir CitationPositionnee). Listes vides
+    # par defaut : les reponses construites sans elles (doublures, sorties
+    # anticipees) restent valides, et le front deploye les ignore.
+    citations: List[CitationPositionnee] = Field(
+        default_factory=list, description="Citations reperees dans `answer`, dans l'ordre du texte"
+    )
+    citations_introuvables: List[CitationIntrouvable] = Field(
+        default_factory=list, description="Citations qu'aucun texte consulte ne porte"
+    )
+    articles_cites: List[SourceCitee] = Field(
+        default_factory=list, description="Sources citees, une par article, dans l'ordre du texte"
+    )
+    textes_consultes_non_cites: List[TexteConsulte] = Field(
+        default_factory=list, description="Textes remis au modele que la reponse ne cite pas"
     )
 
     model_config = {
@@ -260,6 +359,46 @@ class RAGStreamChunk(BaseModel):
         None,
         description="Nature de la panne : quota, overloaded, server"
     )
+    citations: Optional[List[CitationPositionnee]] = Field(
+        None, description="Citations reperees dans le texte final (only in final chunk)"
+    )
+    citations_introuvables: Optional[List[CitationIntrouvable]] = Field(
+        None, description="Citations qu'aucun texte consulte ne porte (only in final chunk)"
+    )
+    articles_cites: Optional[List[SourceCitee]] = Field(
+        None, description="Sources citees, une par article (only in final chunk)"
+    )
+    textes_consultes_non_cites: Optional[List[TexteConsulte]] = Field(
+        None, description="Textes remis au modele et non cites (only in final chunk)"
+    )
+
+    def en_json(self) -> str:
+        """
+        L'evenement tel qu'il part dans le flux.
+
+        Au premier niveau, un champ vide est omis, comme avant : le front
+        deploye teste `evenement.chunk`, `done` et `error`, et la forme de ses
+        evenements ne change pas. Les structures nouvelles, elles, partent
+        ENTIERES, `null` compris : avec `exclude_none` recursif, un statut sans
+        lien perdait sa cle `etat`, et la meme citation n'aurait pas eu la meme
+        forme dans le flux et dans la reponse de `/ask`.
+        """
+        donnees = self.model_dump(mode="json", exclude_none=True, exclude=set(_CHAMPS_ENTIERS))
+        for champ in _CHAMPS_ENTIERS:
+            valeur = getattr(self, champ)
+            if valeur is None:
+                continue
+            if isinstance(valeur, list):
+                donnees[champ] = [element.model_dump(mode="json") for element in valeur]
+            else:
+                donnees[champ] = valeur.model_dump(mode="json", exclude_none=True)
+        return json.dumps(donnees, ensure_ascii=False)
+
+
+# Champs de RAGStreamChunk serialises sans `exclude_none` (voir en_json).
+_CHAMPS_ENTIERS = (
+    "citations", "citations_introuvables", "articles_cites", "textes_consultes_non_cites",
+)
 
 
 class MessageResponse(BaseModel):

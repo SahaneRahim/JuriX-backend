@@ -27,12 +27,32 @@ from sqlalchemy.orm import joinedload
 
 from app.core.config import settings
 from app.models.conversation import Conversation, Message
-from app.schemas.rag import Citation, RAGRequest, RAGResponse, RAGStreamChunk
+from app.schemas.rag import (
+    Citation,
+    CitationIntrouvable,
+    CitationPositionnee,
+    RAGRequest,
+    RAGResponse,
+    RAGStreamChunk,
+    SourceCitee,
+    StatutProuve,
+    TexteConsulte,
+)
 from app.schemas.search import ChunkResult, SearchFilters, SearchRequest
 from app.services.intent_classifier import (
     INTENT_JURIDIQUE,
     IntentResult,
     classify_intent,
+)
+from app.services.lecture_des_citations import (
+    # Les primitives de lecture des citations vivent la-bas ; elles restent
+    # importables d'ici sous leurs noms d'origine.
+    CITATION_REGEX,
+    Occurrence,
+    _citable_article_number,
+    _normalize_article_number,
+    indices_utf16,
+    lire_les_citations,
 )
 from app.services.llm import (  # noqa: F401 - mentions reexportees pour les tests
     ERREURS_LLM,
@@ -55,42 +75,14 @@ from app.services.prompts import (
 )
 from app.services.reranker import rerank_with_llm
 from app.services.search_service import SearchService
+from app.services.statut_des_sources import (
+    liens_qui_touchent,
+    references_a_resoudre,
+    statut_prouve,
+)
 from app.services.text_features import STOPWORDS
-from app.utils.chunk_refiner import est_pseudo_numero
 
 logger = logging.getLogger(__name__)
-
-
-# Formes ordinales rencontrees dans le corpus, ramenees a leur rang.
-_ORDINAL_WORDS = {
-    "PREMIER": "1", "PREMIERE": "1", "PREMIÈRE": "1", "1ER": "1", "1ÈRE": "1",
-    "FIRST": "1", "DEUXIEME": "2", "DEUXIÈME": "2", "SECOND": "2", "SECONDE": "2",
-    "TROISIEME": "3", "TROISIÈME": "3",
-}
-
-
-def _citable_article_number(number: Optional[str]) -> Optional[str]:
-    """Numero d'article citable, ou None pour un pseudo-numero."""
-    if not number or est_pseudo_numero(number):
-        return None
-    return number
-
-
-def _normalize_article_number(number: str) -> str:
-    """
-    Normalise un numero d'article pour comparaison.
-
-    Les numeros circulent sous des formes multiples — "1", "1er", "PREMIER",
-    "Article 1" — et etaient compares tantot par egalite de chaines, tantot par
-    inclusion. L'inclusion faisait correspondre "1" a "10", "11", "100" : la
-    mauvaise citation etait alors rattachee a la reponse.
-    """
-    if not number:
-        return ""
-    cleaned = str(number).strip().upper()
-    cleaned = re.sub(r"^(ARTICLE|ART\.?|SECTION)\s+", "", cleaned)
-    cleaned = cleaned.strip(" .:-")
-    return _ORDINAL_WORDS.get(cleaned, cleaned)
 
 
 # Budget de generation. Doit couvrir la reflexion du modele ET la reponse.
@@ -152,6 +144,29 @@ _ABSTENTION_MARKERS = (
     "not present in the documents",
     "i could not find",
 )
+
+
+def _sans_citation() -> Dict[str, list]:
+    """
+    Les champs de citation d'une reponse que le serveur ecrit lui-meme
+    (aucun resultat, article absent du document ouvert) : vides, mais
+    presents, pour que le dernier evenement ait toujours la meme forme.
+    """
+    return {
+        "citations": [], "citations_introuvables": [],
+        "articles_cites": [], "textes_consultes_non_cites": [],
+    }
+
+
+def _requete_des_identifiants(references: List[str]):
+    """
+    (reference, identifiant) des textes en base parmi `references`. Une
+    fonction a part pour qu'un test la fasse echouer en SQL, sur la vraie base.
+    Import local, comme dans _get_priority_document_context.
+    """
+    from app.models.law import Law
+
+    return select(Law.reference, Law.id).where(Law.reference.in_(references))
 
 
 class RAGQuotaError(Exception):
@@ -237,39 +252,10 @@ class RAGService:
     # Ecart de MRR@8 en faveur de la question entiere : +0,087 [+0,035 ;
     # +0,143] en francais, +0,127 [+0,067 ; +0,191] en anglais (IC 95 %).
     vectoriser_la_question_entiere = True
-    # Couvre du / de la / de l' / des / de, et la numerotation composee
-    # (161, 1er, 94-2, L 94 septies). L'ancienne version ne connaissait que
-    # "de la " : "article 161 du Code OHADA", la formulation la plus courante
-    # en francais juridique, n'etait JAMAIS reconnue — les reponses du chatbot
-    # sortaient donc sans aucune source.
-    CITATION_REGEX = (
-        # « art. » : les prompts l'interdisent, le modele l'ecrit quand meme,
-        # surtout entre parentheses (« (art. 15 du Décret N°2019/143) ») —
-        # mesure du 2026-10-11, un tiers des citations illisibles de l'avocat.
-        # Illisibles, elles ne devenaient pas des sources. \b : « départ. 12 »
-        # n'est pas une citation.
-        r"\b[Aa]rt(?:icle|\.)\s*"
-        r"([LRD]\s*)?(\d+(?:[-.]\d+)*(?:\s*(?:er|bis|ter|quater|septies))?)"
-        # Paragraphe a l'anglaise, colle au numero : « Article 33(2) of… ».
-        r"(?:\(\d+\))?"
-        # Un alinea glisse entre le numero et le texte : « l'article 5, alinéa 1,
-        # du Décret N°2021/743 », « alinéa 1er », « alinéa premier »,
-        # « paragraphe 2 ». Lu puis ignore : la source est l'article.
-        r"(?:,?\s+(?:alin[ée]a|al\.|paragraphe?)\s*(?:\d+(?:\s*er)?|premier),?)?"
-        # `of the` / `of` : sans eux, AUCUNE reponse anglaise n'a jamais produit
-        # une seule citation extraite. « According to Article 161 of the OHADA
-        # Code » echouait sur la contrainte de majuscule du groupe suivant, qui
-        # butait sur le « of » minuscule. Toutes les sources anglaises affichees
-        # jusqu'ici venaient donc du repli `_create_sources_from_results`,
-        # c'est-a-dire n'etaient pas des citations mais des devinettes.
-        r"\s+(?:du\s+|de\s+la\s+|de\s+l['’]\s*|des\s+|de\s+|of\s+the\s+|of\s+)?"
-        # Le texte cite s'arrete a la ponctuation, a une parenthese, et avant
-        # la citation suivante : les prompts demandent « l'article 5 du Code
-        # Minier et l'article 6 du Code Minier », et ce groupe avalait la
-        # seconde, qui ne devenait jamais une source.
-        r"([A-ZÀ-Ý](?:(?!\s+(?:et|ou|and|or)\s+(?:l['’]\s*)?art(?:icle|\.))[^,\.;()])+)"
-    )
-    
+    # La grammaire des citations, commentee dans lecture_des_citations.
+    # L'attribut reste : les tests des prompts lui appliquent leurs exemples.
+    CITATION_REGEX = CITATION_REGEX
+
     # Mots vides deplaces dans app/services/text_features.py : le re-ranking en
     # a besoin aussi, et deux listes auraient diverge. L'attribut de classe est
     # conserve, plusieurs appelants le lisent.
@@ -308,6 +294,9 @@ class RAGService:
         self.user_id = user_id
         self.llm = get_llm_service()
         self.search_service = SearchService(db)
+        # Les extraits places dans le dernier prompt construit (_build_prompt).
+        # Le service vit le temps d'une requete : c'est la question en cours.
+        self._extraits_du_prompt: Optional[List[ChunkResult]] = None
 
     async def ask(self, request: RAGRequest) -> RAGResponse:
         """
@@ -486,12 +475,15 @@ class RAGService:
         generation_time_ms = int((time.time() - generation_start) * 1000)
         answer = llm_response["response"] + mention_de_reponse(llm_response, request.language)
 
-        # Extract citations
-        citations = self._extract_citations(answer, search_results)
+        # Extract citations, dans ce que le modele a lu et dans le texte
+        # rendu, mention de fin comprise.
+        extraits = self._extraits_lus(search_results)
+        citations = self._extract_citations(answer, extraits)
         if not citations and self._peut_fabriquer_une_source(answer, search_results):
             citations = self._create_sources_from_results(search_results, request.question)
 
         confidence = self._calculate_confidence(answer, citations, search_results)
+        champs = await self._champs_des_citations(answer, extraits)
 
         await self._save_interaction(
             conversation=conversation, question=request.question, answer=answer,
@@ -510,7 +502,8 @@ class RAGService:
             session_id=conversation.session_id,
             retrieval_time_ms=retrieval_time_ms,
             generation_time_ms=generation_time_ms,
-            total_time_ms=total_time_ms, persona=request.persona
+            total_time_ms=total_time_ms, persona=request.persona,
+            **champs,
         )
 
     async def _repondre_conversationnel(
@@ -576,6 +569,8 @@ class RAGService:
             intention.intent, total_time_ms,
         )
 
+        # Aucun texte consulte : toute citation que le modele ecrirait malgre
+        # la consigne est introuvable, et le dire vaut mieux que la taire.
         return RAGResponse(
             answer=answer, confidence=CONFIANCE_CONVERSATIONNELLE, sources=[],
             session_id=conversation.session_id,
@@ -583,6 +578,7 @@ class RAGService:
             generation_time_ms=generation_time_ms,
             total_time_ms=total_time_ms, persona=request.persona,
             intent=intention.intent,
+            **await self._champs_des_citations(answer, []),
         )
 
     async def ask_stream(
@@ -641,7 +637,11 @@ class RAGService:
                     session_id=reponse.session_id,
                     persona=conversation.persona,
                     intent=reponse.intent,
-                ).model_dump_json(exclude_none=True)
+                    citations=reponse.citations,
+                    citations_introuvables=reponse.citations_introuvables,
+                    articles_cites=reponse.articles_cites,
+                    textes_consultes_non_cites=reponse.textes_consultes_non_cites,
+                ).en_json()
                 return
 
             # Meme recuperation que `ask` : le document ouvert (`law_id`) en
@@ -660,7 +660,8 @@ class RAGService:
                     session_id=early_response.session_id,
                     persona=conversation.persona,
                     intent=INTENT_JURIDIQUE,
-                ).model_dump_json(exclude_none=True)
+                    **_sans_citation(),
+                ).en_json()
                 return
             if not search_results:
                 search_results = await self._fallback_search(request.question, history)
@@ -682,7 +683,8 @@ class RAGService:
                     session_id=conversation.session_id,
                     persona=conversation.persona,
                     intent=INTENT_JURIDIQUE,
-                ).model_dump_json(exclude_none=True)
+                    **_sans_citation(),
+                ).en_json()
                 return
 
             prompt = self._build_prompt(
@@ -705,7 +707,7 @@ class RAGService:
                 yield RAGStreamChunk(
                     chunk="", done=True,
                     error=MESSAGE_LLM_ABSENT,
-                ).model_dump_json(exclude_none=True)
+                ).en_json()
                 return
 
             await self._valider_avant_la_generation()
@@ -723,25 +725,29 @@ class RAGService:
                 fin=lambda r: raison.update(fin=r),
             ):
                 answer_parts.append(chunk)
-                yield RAGStreamChunk(chunk=chunk, done=False).model_dump_json(exclude_none=True)
+                yield RAGStreamChunk(chunk=chunk, done=False).en_json()
 
             # Une reponse restee incomplete le dit, comme dans `ask` : coupee
             # par le budget malgre la suite demandee, ou flux rompu.
             mention = mention_de_fin(raison.get("fin"), request.language)
             if mention:
                 answer_parts.append(mention)
-                yield RAGStreamChunk(chunk=mention, done=False).model_dump_json(exclude_none=True)
+                yield RAGStreamChunk(chunk=mention, done=False).en_json()
 
             generation_time_ms = int((time.time() - generation_start) * 1000)
 
-            # Process complete answer
+            # Process complete answer. La lecture des citations porte sur ce
+            # que le modele a lu, et sur le texte FINAL, mention comprise :
+            # c'est lui que le front a recu, morceau par morceau.
             full_answer = "".join(answer_parts)
-            citations = self._extract_citations(full_answer, search_results)
+            extraits = self._extraits_lus(search_results)
+            citations = self._extract_citations(full_answer, extraits)
             if not citations and self._peut_fabriquer_une_source(full_answer, search_results):
                 citations = self._create_sources_from_results(search_results, request.question)
             confidence = self._calculate_confidence(
                 full_answer, citations, search_results
             )
+            champs = await self._champs_des_citations(full_answer, extraits)
 
             # Save to DB
             await self._save_interaction(
@@ -756,7 +762,8 @@ class RAGService:
                 confidence=confidence, session_id=conversation.session_id,
                 persona=conversation.persona,
                 intent=INTENT_JURIDIQUE,
-            ).model_dump_json(exclude_none=True)
+                **champs,
+            ).en_json()
 
         except Exception as e:
             logger.error(f"❌ Streaming error: {e}")
@@ -767,7 +774,7 @@ class RAGService:
             )
             yield RAGStreamChunk(
                 chunk="", done=True, error=str(e), error_code=code
-            ).model_dump_json(exclude_none=True)
+            ).en_json()
 
     async def _retrieve_chunks(
         self,
@@ -1271,7 +1278,11 @@ class RAGService:
         # integral : un simple reordonnancement suffit.
         chunks = self._pin_requested_article(question, search_results)
 
-        context_str = build_context_string(chunks)
+        # Ce que le modele lit vraiment : la lecture des citations s'y tient
+        # (voir _extraits_lus). Le budget du contexte peut ecarter les derniers.
+        retenus: List[ChunkResult] = []
+        context_str = build_context_string(chunks, retenus)
+        self._extraits_du_prompt = retenus
         context_section = CONTEXT_TEMPLATE.format(context_docs=context_str)
 
         # Build history
@@ -1316,7 +1327,8 @@ class RAGService:
         chunks: List[ChunkResult]
     ) -> List[Citation]:
         """
-        Extrait et valide les citations presentes dans la reponse.
+        Les sources citees par la reponse, une par article : ce que `sources`
+        a toujours porte.
 
         Cherche "Article 161 du Code OHADA", "article 5 de la Loi...", etc.
 
@@ -1327,66 +1339,216 @@ class RAGService:
         L'extrait et l'identifiant d'article proviennent du chunk : aucun
         aller-retour en base, la ou trois moteurs synchrones etaient ouverts
         pour aller rechercher un texte deja present.
+
+        La lecture elle-meme — position, rattachement, citations introuvables —
+        est dans lecture_des_citations ; seules les citations d'ARTICLE
+        rattachees deviennent des sources, comme avant.
         """
+        return self._sources_citees(lire_les_citations(answer, chunks))
+
+    @staticmethod
+    def _sources_citees(occurrences: List[Occurrence]) -> List[Citation]:
+        """Une `Citation` par article cite et rattache, dans l'ordre du texte."""
         citations: List[Citation] = []
-        seen = set()
-
-        matches = re.finditer(self.CITATION_REGEX, answer, re.IGNORECASE)
-
-        for match in matches:
-            # Groupes : 1 = prefixe de code (L/R/D, optionnel), 2 = numero,
-            # 3 = texte cite.
-            prefix = (match.group(1) or "").strip()
-            article_num = f"{prefix} {match.group(2)}".strip()
-            law_mention = match.group(3).strip().lower()
-            wanted = _normalize_article_number(match.group(2))
-
-            def cite_la_loi(chunk: ChunkResult) -> bool:
-                return (
-                    law_mention in (chunk.law_title or "").lower()
-                    or law_mention in (chunk.reference or "").lower()
-                )
-
-            meme_numero = [
-                c for c in chunks
-                if c.number and _normalize_article_number(c.number) == wanted
-            ]
-            # La loi citee departage les articles de meme numero. Le premier
-            # chunk portant le numero l'emportait quelle que soit sa loi :
-            # « l'article 5 du Code Minier » devenait l'article 5 d'un decret
-            # place avant lui dans le contexte. Le numero seul ne sert plus que
-            # si la loi citee n'est reconnue nulle part (le modele l'a nommee
-            # autrement) : jamais l'article d'une AUTRE loi presente.
-            chunk = (
-                next((c for c in meme_numero if cite_la_loi(c)), None)
-                or next((c for c in chunks if not c.number and cite_la_loi(c)), None)
-                or (
-                    meme_numero[0]
-                    if meme_numero and not any(cite_la_loi(c) for c in chunks)
-                    else None
-                )
-            )
-            if chunk is None:
+        vues = set()
+        for occurrence in occurrences:
+            chunk = occurrence.extrait
+            if occurrence.forme != "article" or chunk is None or occurrence.cle in vues:
                 continue
-
-            key = (chunk.law_id, wanted)
-            if key in seen:
-                continue
-
+            vues.add(occurrence.cle)
             excerpt = (chunk.content or chunk.excerpt or "")[:300]
             citations.append(Citation(
                 law_id=chunk.law_id,
                 law_reference=chunk.reference,
                 law_title=chunk.law_title,
-                article_number=_citable_article_number(chunk.number) or article_num,
+                article_number=occurrence.article,
                 article_id=chunk.article_id,
                 excerpt=excerpt or "Voir document complet pour détails",
                 relevance_score=chunk.relevance_score,
             ))
-            seen.add(key)
 
         logger.info(f"📎 Extracted {len(citations)} citations")
         return citations
+
+    def _extraits_lus(self, search_results: List[ChunkResult]) -> List[ChunkResult]:
+        """
+        Les extraits que le modele a lus : ceux du prompt, quand il a ete
+        construit ; a defaut, ce que la recherche a rendu.
+        """
+        if self._extraits_du_prompt is not None:
+            return self._extraits_du_prompt
+        return list(search_results or [])
+
+    async def _identifiants_des_textes(self, references) -> Dict[str, int]:
+        """
+        L'identifiant en base de chaque reference, pour lier un texte que nomme
+        un lien prouve (« Modifié par la Loi N°… »).
+
+        Une requete, et seulement s'il y a quelque chose a resoudre : le corpus
+        compte 67 liens, la plupart des reponses n'en touchent aucun. Un echec
+        laisse les liens sans identifiant plutot que de faire echouer la
+        reponse.
+
+        SOUS UN POINT DE SAUVEGARDE, comme la recherche vectorielle
+        (search_service) : un echec n'annule que lui. Un rollback complet
+        expirait TOUS les objets de la session, conversation comprise, et
+        l'enregistrement de l'echange, qui suit, echouait a la lecture de son
+        titre (MissingGreenlet, essai du 2026-10-28 sur PostgreSQL) : la
+        reponse, deja affichee, sortait de l'historique.
+        """
+        references = sorted({r for r in references or () if r})
+        if not references:
+            return {}
+
+        try:
+            async with self.db.begin_nested():
+                lignes = (await self.db.execute(_requete_des_identifiants(references))).all()
+        except Exception as e:
+            logger.warning(f"⚠️ Identifiants des textes lies introuvables : {e}")
+            return {}
+        return {reference: law_id for reference, law_id in lignes if reference}
+
+    async def _champs_des_citations(
+        self, answer: str, extraits: List[ChunkResult]
+    ) -> Dict[str, list]:
+        """
+        Les quatre champs nouveaux d'une reponse : `citations`,
+        `citations_introuvables`, `articles_cites`, `textes_consultes_non_cites`.
+
+        Calcules sur le texte FINAL, mention de fin comprise : c'est celui que
+        le front affiche et que la conversation enregistre. Les indices sont
+        rendus en UTF-16, ceux du `slice` de JavaScript.
+
+        `extraits` : ce que le modele a lu (_extraits_lus). `sources` n'en
+        depend pas et garde son sens, source de repli comprise : la repartition
+        « cités / consultés, non cités » est dans les deux derniers champs.
+        """
+        occurrences = lire_les_citations(answer, extraits)
+
+        # L'unite dont on donne le statut : l'article, sous le numero de son
+        # extrait — celui sous lequel le modele a lu sa ligne de statut — ou le
+        # texte entier.
+        def unite(occurrence: Occurrence) -> Optional[Tuple]:
+            extrait = occurrence.extrait
+            if extrait is not None:
+                if occurrence.forme == "article" and extrait.number:
+                    return (extrait.reference, extrait.number, extrait.content, extrait.section)
+                return (extrait.reference, None, None, None)
+            if occurrence.texte_nomme is not None and occurrence.texte_nomme.reference:
+                return (occurrence.texte_nomme.reference, None, None, None)
+            return None
+
+        lois_citees = {o.extrait.law_id for o in occurrences if o.extrait is not None}
+        non_cites: Dict[int, Tuple[ChunkResult, List[str]]] = {}
+        for extrait in extraits:
+            if extrait.law_id in lois_citees:
+                continue
+            premier, numeros = non_cites.setdefault(extrait.law_id, (extrait, []))
+            numero = _citable_article_number(extrait.number)
+            if numero and numero not in numeros:
+                numeros.append(numero)
+
+        unites = {u for u in map(unite, occurrences) if u is not None}
+        unites.update((e.reference, None, None, None) for e, _ in non_cites.values())
+        a_resoudre = set()
+        for u in unites:
+            a_resoudre.update(references_a_resoudre(liens_qui_touchent(*u)))
+        a_resoudre.update(
+            o.texte_nomme.reference for o in occurrences
+            if o.texte_nomme is not None and o.texte_nomme.reference
+        )
+        ids = await self._identifiants_des_textes(a_resoudre)
+        statuts = {u: statut_prouve(*u, ids=ids) for u in unites}
+
+        def statut_de(cle: Optional[Tuple]) -> StatutProuve:
+            return statuts.get(cle) or StatutProuve()
+
+        vers_js = indices_utf16(answer)
+        citations: List[CitationPositionnee] = []
+        introuvables: List[CitationIntrouvable] = []
+        cites: List[SourceCitee] = []
+        vues = set()
+        lois_citees_par_article = {
+            o.extrait.law_id for o in occurrences if o.forme == "article" and o.extrait is not None
+        }
+        for occurrence in occurrences:
+            bornes = {
+                "debut": vers_js(occurrence.debut),
+                "fin": vers_js(occurrence.fin),
+                "texte_cite": answer[occurrence.debut:occurrence.fin],
+            }
+            if occurrence.introuvable:
+                introuvables.append(CitationIntrouvable(**bornes, raison=occurrence.raison))
+                continue
+            extrait = occurrence.extrait
+            if extrait is None:
+                # Texte que seule une ligne de statut nomme : lie s'il est en
+                # base, ni lie ni signale sinon.
+                nomme = occurrence.texte_nomme
+                law_id = ids.get(nomme.reference) if nomme and nomme.reference else None
+                if law_id is not None:
+                    citations.append(CitationPositionnee(
+                        **bornes, law_id=law_id, reference=nomme.reference,
+                        titre=re.sub(r"^(?:la|le|les|l['’])\s*", "", nomme.titre),
+                        date_du_texte=nomme.date, statut=statut_de(unite(occurrence)),
+                    ))
+                continue
+            article = occurrence.article if occurrence.forme == "article" else None
+            statut = statut_de(unite(occurrence))
+            citations.append(CitationPositionnee(
+                **bornes, law_id=extrait.law_id, article=article,
+                article_id=extrait.article_id if occurrence.forme == "article" else None,
+                reference=extrait.reference, titre=extrait.law_title,
+                date_du_texte=extrait.publication_date, statut=statut,
+            ))
+            # Une source par article cite ; un texte cite sans article n'en est
+            # une que si aucun de ses articles ne l'est deja.
+            if occurrence.forme == "article":
+                cle = occurrence.cle
+            elif extrait.law_id in lois_citees_par_article:
+                continue
+            else:
+                cle = (extrait.law_id, None)
+            if cle in vues:
+                continue
+            vues.add(cle)
+            cites.append(SourceCitee(
+                law_id=extrait.law_id,
+                law_reference=extrait.reference,
+                law_title=extrait.law_title,
+                article_number=article,
+                article_id=extrait.article_id if occurrence.forme == "article" else None,
+                excerpt=(
+                    (extrait.content or extrait.excerpt or "")[:300]
+                    if occurrence.forme == "article" else ""
+                ),
+                relevance_score=extrait.relevance_score,
+                date_du_texte=extrait.publication_date,
+                statut=statut,
+            ))
+
+        textes = [
+            TexteConsulte(
+                law_id=extrait.law_id,
+                law_reference=extrait.reference,
+                law_title=extrait.law_title,
+                date_du_texte=extrait.publication_date,
+                articles=numeros,
+                statut=statut_de((extrait.reference, None, None, None)),
+            )
+            for extrait, numeros in non_cites.values()
+        ]
+        if introuvables:
+            logger.info(
+                "🔎 %d citation(s) sans texte consulte : %s",
+                len(introuvables), [c.texte_cite for c in introuvables],
+            )
+        return {
+            "citations": citations,
+            "citations_introuvables": introuvables,
+            "articles_cites": cites,
+            "textes_consultes_non_cites": textes,
+        }
 
     def _peut_fabriquer_une_source(self, answer: str, chunks: List[ChunkResult]) -> bool:
         """

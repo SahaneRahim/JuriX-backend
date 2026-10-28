@@ -1163,6 +1163,8 @@ class TestFluxAligneSurAsk:
         assert len(evenements) == 1
         assert evenements[0]["chunk"] == "Ce document ne contient pas d'article 99."
         assert evenements[0]["done"] is True
+        # Une reponse ecrite par le serveur : champs de citation vides, presents.
+        assert evenements[0]["citations"] == [] and evenements[0]["articles_cites"] == []
 
     @pytest.mark.asyncio
     async def test_quota_epuise_a_son_code(

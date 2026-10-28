@@ -380,7 +380,7 @@ def format_chunk_block(chunk, index: int, deja_vues: Optional[Dict[str, int]] = 
     return "\n".join(lines)
 
 
-def build_context_string(chunks: List) -> str:
+def build_context_string(chunks: List, retenus: Optional[List] = None) -> str:
     """
     Assemble le contexte a partir des CHUNKS remontes par la recherche.
 
@@ -392,6 +392,11 @@ def build_context_string(chunks: List) -> str:
     Le budget global est respecte en tronquant sur une frontiere de paragraphe.
     Le premier chunk est toujours inclus, meme s'il excede a lui seul le
     budget : un contexte tronque vaut mieux qu'un contexte vide.
+
+    `retenus`, s'il est fourni, recoit les chunks effectivement places dans le
+    contexte, dans l'ordre. Le chat en a besoin pour dire quels textes le
+    modele a lus : un chunk ecarte par le budget n'a pas ete « consulté », et
+    une citation qui le vise n'est portee par rien de ce que le modele a lu.
     """
     if not chunks:
         return ""
@@ -420,6 +425,8 @@ def build_context_string(chunks: List) -> str:
 
     if dropped:
         logger.info(f"📏 Contexte plafonne : {dropped} chunk(s) ecarte(s)")
+    if retenus is not None:
+        retenus.extend(chunks[:len(blocks)])
 
     context = "\n\n---\n\n".join(blocks)
 
