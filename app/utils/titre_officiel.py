@@ -39,13 +39,43 @@ _VERBE_COLLE = re.compile(
 # pris pour intitule. Un souligne isole (« d'installation_ du personnel ») est
 # une faute de frappe, retiree par _nettoyer.
 _NOM_DE_FICHIER = re.compile(r"_\w*_")
-# « de I'Accord », « I ‘Accord » : un l lu comme un I par l'OCR.
-_L_LU_COMME_I = re.compile(r"(?<![\w'’])[Ii]\s?['’‘]\s?(?=\w)")
+# « de I'Accord », « I ‘Accord », « de !'Hôpital » : un l lu comme un I ou un
+# point d'exclamation par l'OCR.
+_L_LU_COMME_I = re.compile(r"(?<![\w'’])[Ii!]\s?['’‘]\s?(?=\w)")
+# « Accord de Créditn°72130-CM » : le numero colle au mot qui le precede.
+_NUMERO_COLLE = re.compile(r"(?<=[^\W\d_])(?=n\s*[°º]\s*\d)", re.IGNORECASE)
+# « Conseil d' Administration » : une espace apres l'elision.
+_ELISION_ESPACEE = re.compile(r"(?<!\w)(qu|[dlnjsc])(['’])\s+(?=[^\W\d_])", re.IGNORECASE)
+
+
+def _trait_d_union_conditionnel(titre: str) -> str:
+    """
+    Le trait d'union conditionnel (U+00AD) des intitules, selon sa place.
+
+    Il est invisible a l'ecran, sauf en fin de ligne. Au milieu d'un mot
+    (« disposi­tions »), c'est une cesure : on le retire. Mais dans 13
+    intitules de la base, c'est un trait d'union ordinaire mal converti entre
+    deux noms (« Extrême­Nord », « Sapeurs­Pompiers », « Ngaoundéré ­
+    Garoua ») : le retirer collait les deux (« GabonPont »). D'ou : retire
+    contre un vrai trait d'union, trait d'union devant une capitale ou entre
+    deux espaces, retire ailleurs.
+    """
+
+    def remplacer(m: "re.Match[str]") -> str:
+        avant = titre[m.start() - 1] if m.start() > 0 else " "
+        apres = titre[m.end()] if m.end() < len(titre) else " "
+        if "-" in (avant, apres):
+            return ""
+        if avant.isspace() or apres.isspace() or apres.isupper():
+            return "-"
+        return ""
+
+    return re.sub("\N{SOFT HYPHEN}", remplacer, titre)
 
 
 def _nettoyer(titre: str) -> str:
-    """Espaces normalises, trait d'union conditionnel retire, fautes connues reparees."""
-    t = titre.replace("\N{SOFT HYPHEN}", "").replace("\N{NO-BREAK SPACE}", " ").replace("_", " ")
+    """Espaces normalises, trait d'union conditionnel traite, fautes connues reparees."""
+    t = _trait_d_union_conditionnel(titre).replace("\N{NO-BREAK SPACE}", " ").replace("_", " ")
     # « ratification du · Protocole » : un point median egare.
     t = re.sub(r"\s+", " ", t.replace(" · ", " ")).strip()
     t = _PORTANT_ABIME.sub("portant", t)
@@ -53,6 +83,8 @@ def _nettoyer(titre: str) -> str:
     # « N°202l/345 » : un 1 lu comme un l dans l'annee du numero.
     t = re.sub(r"\b(\d{3})l(?=\s*/)", r"\g<1>1", t)
     t = _L_LU_COMME_I.sub("l'", t)
+    t = _ELISION_ESPACEE.sub(r"\1\2", t)
+    t = _NUMERO_COLLE.sub(" ", t)
     return _VERBE_COLLE.sub(r" \1", t)
 
 
@@ -203,6 +235,7 @@ _OUVERTURES = (
     (r"d['’]orientation", "Orientation"),
     (r"autorisant", "AUTORISATION"),
     (r"habilitant", "HABILITATION"),
+    (r"d[ée]clarant", "DECLARATION"),
 )
 _OUVERTURE = re.compile(
     r"(?<![\w'’])(?:" + "|".join(f"({motif})" for motif, _ in _OUVERTURES) + r")(?![\w'’])",
@@ -226,6 +259,13 @@ _ARTICLE = re.compile(r"^(?:les|le|la|l['’]|des|du|une|un)\s*(?=\w)", re.IGNOR
 _HABILITE_A = re.compile(
     r"^(?P<qui>.{0,160}?)[\s,]*\bà\s+(?P<inf>signer|recourir|conclure|n[ée]gocier"
     r"|contracter|emprunter|[ée]mettre|ratifier)\b[\s,]*",
+    re.IGNORECASE,
+)
+# « déclarant fériée et chômée la journée du lundi 26 juin 2017 » : les douze
+# « déclarant » de la base sont des jours feries, tous de cette forme.
+# « férié » (sic) y figure une fois.
+_JOUR_FERIE = re.compile(
+    r"^f[ée]ri[ée]e?(?P<chomee>\s+et\s+ch[ôo]m[ée]e?)?\s+la\s+journ[ée]e\s+(?P<jour>.+)$",
     re.IGNORECASE,
 )
 # « autorisant le Président de la République à ratifier … », « le PR à … ».
@@ -280,6 +320,26 @@ _SECOND_VERBE = re.compile(
     r"|instituant|autorisant|habilitant)\b",
     re.IGNORECASE,
 )
+
+
+# Les intitules du releve sont coupes vers 255 caracteres : 64 intitules de la
+# base font 254 ou 255 caracteres, contre 5 environ pour chaque longueur
+# voisine, et la plupart s'arretent au milieu d'un mot (« soit envir »).
+_LONGUEUR_DE_COUPE = 254
+
+
+def _intitule_coupe(titre: str) -> bool:
+    """
+    Vrai si l'intitule s'arrete avant sa fin : coupe a la longueur du releve
+    sans ponctuation finale, ou termine par des points de suspension
+    (« … au titre de l’année 2022 ... »). L'objet garde alors une marque de
+    coupe : sans elle, « … un montant de 40 millions d'euros, soit envir »
+    se lirait comme une faute.
+    """
+    fin = titre.rstrip()
+    if fin.endswith(("...", "…")):
+        return True
+    return len(fin) >= _LONGUEUR_DE_COUPE and not fin.endswith((".", ")", "»", '"'))
 
 
 def _sans_prepositions_d_enumeration(texte: str) -> str:
@@ -353,6 +413,16 @@ def _nominaliser(nom: str, reste: str) -> Optional[str]:
         if _ACTE_HABILITE.match(reste):
             return _sans_article(reste)
         return None
+    if nom == "DECLARATION":
+        # « Journée du lundi 26 juin 2017 déclarée fériée et chômée » : le jour
+        # est l'objet, et c'est lui qui distingue ces arretes les uns des
+        # autres. Tout autre « déclarant » (d'utilité publique…) : on doute.
+        ferie = _JOUR_FERIE.match(reste)
+        if not ferie:
+            return None
+        chomee = " et chômée" if ferie.group("chomee") else ""
+        jour = ferie.group("jour").rstrip(" .;,")
+        return f"Journée {jour} déclarée fériée{chomee}"
     if nom == "Complément":
         return "Complément " + _a(reste)
     if nom == "Orientation":
@@ -419,7 +489,9 @@ def objet_du_titre(titre: Optional[str]) -> Optional[str]:
     # qui fait partie de l'objet.
     if _replier(en_tete).startswith(("acte", "traite")):
         objet = _DATE_FINALE.sub("", objet)
-    objet = re.sub(r"[\s.;,:\-–—]+$", "", objet).strip()
+    objet = re.sub(r"[\s.;,:\-–—…]+$", "", objet).strip()
     if len(objet) < 3 or _DEBUT_DOUTEUX.match(objet) or _SECOND_VERBE.search(objet):
         return None
+    if _intitule_coupe(titre):
+        objet += " …"
     return objet[0].upper() + objet[1:]

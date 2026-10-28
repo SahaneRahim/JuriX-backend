@@ -3,9 +3,11 @@ Objet, numero et date lus dans l'intitule officiel d'un texte.
 
 Les intitules viennent tous de la base de developpement (jurix_dev, releve du
 28/10/2026) : chaque regle y est prise sur un cas reel, fautes de saisie
-comprises. tests/fixtures/titres_objets.json fige en plus 118 intitules tires
-au hasard et relus a la main ; sur les 2 287 intitules de la base, 2 225
-recoivent un objet (97,3 %), les autres sont des cas de doute assumes.
+comprises. tests/fixtures/titres_objets.json fige en plus 233 intitules tires
+au hasard (quatre echantillons de 60) et relus a la main ; sur les 2 287
+intitules de la base, 2 237 recoivent un objet (97,8 %), les autres sont des
+cas de doute assumes (noms de fichier, accords et codes designes par leur nom,
+deux verbes coordonnes).
 """
 
 import json
@@ -186,10 +188,95 @@ pytestmark = pytest.mark.unit
             "Règles applicables à la solde consulaire, aux frais de relève et à l'allocation "
             "d'installation du personnel de l'Etat en service hors du Cameroun",
         ),
+        # Jours feries : le jour est l'objet ; « férié » (sic) et point final.
+        (
+            "Arrêté N° 8448/CAB/PR du 24 juin 2017 déclarant fériée et chômée la journée du "
+            "lundi 26 juin 2017",
+            "Journée du lundi 26 juin 2017 déclarée fériée et chômée",
+        ),
+        (
+            "Arrêté N°0593/CAB/PR du 11 août 2017 déclarant férié et chômée la journée du lundi "
+            "14 août 2017.",
+            "Journée du lundi 14 août 2017 déclarée fériée et chômée",
+        ),
+        (
+            "Arrêté déclarant fériée la journée du lundi 17 juin 2024",
+            "Journée du lundi 17 juin 2024 déclarée fériée",
+        ),
+        # Trait d'union conditionnel : trait d'union entre deux noms, cesure
+        # au milieu d'un mot, retire contre un vrai trait d'union.
+        (
+            "Décret N°2022/403 du 26 août 2022 habilitant le financement de la route "
+            "Olounou-Oveng-Frontiere Gabon­Pont sur le fleuve KOM",
+            "Financement de la route Olounou-Oveng-Frontiere Gabon-Pont sur le fleuve KOM",
+        ),
+        (
+            "Décret N°2024/101 du 03 avril 2024 portant ratification du Programme de la Région "
+            "de l’Extrême­Nord (PAT)",
+            "Ratification du Programme de la Région de l’Extrême-Nord (PAT)",
+        ),
+        (
+            "Décret N°2026/050 du 2 février 2026 modifiant certaines disposi­tions du "
+            "décret n° 2013/092 du 03 avril 2013 relatif à la route Olama­-Kribi",
+            "Modification de certaines dispositions du décret n° 2013/092 du 03 avril 2013 "
+            "relatif à la route Olama-Kribi",
+        ),
+        # Numero colle au mot, espace apres l'elision, « !' » de l'OCR.
+        (
+            "Décret N°2024/142 du 10 mai 2024 ratifiant l'Accord de Créditn°72130-CM entre la "
+            "République du Cameroun et l'IDA",
+            "Ratification de l'Accord de Crédit n°72130-CM entre la République du Cameroun et l'IDA",
+        ),
+        (
+            "Décret N°2024/134 du 25 avril 2024 portant nomination des membres du Conseil d' "
+            "Administration de l'Hôpital Général de Garoua",
+            "Nomination des membres du Conseil d'Administration de l'Hôpital Général de Garoua",
+        ),
+        (
+            "Décret N°2021/103 du 11 mars 2021 portant nomination du Directeur Général de "
+            "!'Hôpital Gynéco-Obstétrique et Pédiatrique de Yaoundé",
+            "Nomination du Directeur Général de l'Hôpital Gynéco-Obstétrique et Pédiatrique de Yaoundé",
+        ),
     ],
 )
 def test_objet_du_titre(titre, objet):
     assert objet_du_titre(titre) == objet
+
+
+def test_un_intitule_coupe_garde_une_marque_de_coupe():
+    """
+    Le releve coupe les intitules vers 255 caracteres, souvent au milieu d'un
+    mot : l'objet le dit (« … »), sans quoi la coupe se lirait comme une faute.
+    """
+    coupe = (
+        "Décret N°2015/396 du 15 septembre 2015 habilitant le Ministre de l'Economie, de la "
+        "Planification et de l'Aménagement du Territoire, à signer avec la Belfius Banque "
+        "Belgique, une Convention de crédit acheteur d'un montant de 40 millions d'euros, soit envir"
+    )
+    assert len(coupe) == 255
+    assert objet_du_titre(coupe) == (
+        "Habilitation à signer avec la Belfius Banque Belgique, une Convention de crédit "
+        "acheteur d'un montant de 40 millions d'euros, soit envir …"
+    )
+    # Points de suspension de la source : meme marque, sans les doubler.
+    assert objet_du_titre(
+        "Décret N°2022/553 du 31 décembre 2022 portant avancement de grade au choix de seize "
+        "(16) Commissaires de Police Principaux au titre de l’année 2022 ..."
+    ) == (
+        "Avancement de grade au choix de seize (16) Commissaires de Police Principaux au titre "
+        "de l’année 2022 …"
+    )
+    # A la longueur de coupe mais complet (point final), ou court : aucune marque.
+    complet = (
+        "Décret N°2021/001 du 04 janvier 2021 portant convocation du collège des électeurs de la "
+        "circonscription électorale de la Menoua en vue de l'élection des représentants du "
+        "commandement traditionnel du Département de la Menoua au Conseil Régional de l'Ouest."
+    )
+    assert len(complet) == 255
+    assert objet_du_titre(complet).endswith("au Conseil Régional de l'Ouest")
+    assert objet_du_titre("Décret N°2023/357 du 22 août 2023 portant nomination d'un Ambassadeur") == (
+        "Nomination d'un Ambassadeur"
+    )
 
 
 @pytest.mark.parametrize(
@@ -201,9 +288,10 @@ def test_objet_du_titre(titre, objet):
         "decret_n_2014_543_du_10.12.2014_nomination_dg_apme",
         "arrête_n_0 453_cab_pr_du_05.06.2024",
         # Verbe que la decoupe ne sait pas nominaliser.
-        "Arrêté N° 8448/CAB/PR du 24 juin 2017 déclarant fériée et chômée la journée du lundi 26 juin 2017",
         "Arrêté N° 0225/CAB/PR du 11 avril 2019 relevant un responsable de la Délégation Générale "
         "à la Sûreté Nationale de ses fonctions",
+        # « déclarant » hors des jours feries : aucune forme sure.
+        "Décret N°2020/001 du 2 janvier 2020 déclarant d'utilité publique les travaux de la route",
         # Un nom, pas un acte suivi de son objet.
         "Code civil applicable au Cameroun, annoté de la jurisprudence de la Cour suprême",
         "Accord-cadre entre la République du Cameroun et le Saint-Siège, relatif au statut "
@@ -233,11 +321,11 @@ def test_objet_du_titre_rend_none_quand_il_doute(titre):
 
 
 def test_echantillon_relu_a_la_main():
-    """118 intitules tires au hasard dans jurix_dev, relus un par un."""
+    """233 intitules tires au hasard dans jurix_dev, relus un par un."""
     cas = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "titres_objets.json").read_text(encoding="utf-8")
     )["cas"]
-    assert len(cas) == 118
+    assert len(cas) == 233
     ecarts = [
         (c["titre"], c["objet"], objet_du_titre(c["titre"]))
         for c in cas
