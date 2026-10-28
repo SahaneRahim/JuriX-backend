@@ -362,7 +362,7 @@ async def _fts_articles_query(
     Recherche tsvector principale avec websearch_to_tsquery.
     Supporte: "expression exacte", OR, -, mots simples.
 
-    Trois choix a expliciter :
+    Quatre choix a expliciter :
 
     - Les filtres entrent DANS la CTE, avant le LIMIT. Places apres, le budget
       de lignes serait depense sur des lignes destinees a etre jetees.
@@ -371,6 +371,21 @@ async def _fts_articles_query(
       le laissant dehors, il ne s'execute que sur les lignes deja retenues.
     - La CTE est MATERIALIZED pour empecher PostgreSQL 16 de l'inliner, ce qui
       repousserait ts_headline sur chaque ligne candidate.
+    - Chaque tri va jusqu'a une cle UNIQUE. ts_rank_cd donne le meme score a
+      tous les articles d'une loi dont seul le titre correspond (chacun porte
+      ce titre en poids A), et souvent a plusieurs lois dont les titres ont la
+      meme forme. Sans departage, ces ex aequo sortaient dans l'ordre
+      d'arrivee des lignes, et le plan parallele que PostgreSQL choisit des
+      que la requete touche des milliers d'articles (Parallel Seq Scan puis
+      Gather Merge) le change d'un appel a l'autre : les trois articles
+      retenus d'une loi, et les lois qui passent le LIMIT, changeaient avec
+      lui. Mesure sur jurix_dev, meme base et meme vecteur, trois essais par
+      question : la reponse publique changeait d'un essai a l'autre pour 48
+      questions d'evaluation sur 112 en mode texte et 24 en hybride (aucune
+      depuis), ce que query_cache masquait cinq minutes. A score egal
+      passent la loi d'identifiant le plus petit, puis l'article le plus tot
+      dans le texte (`order`, puis `id`). Les autres requetes de ce module
+      departagent de la meme facon.
 
     La configuration de dictionnaire suit la langue de la loi : passer un texte
     anglais au stemmer francais degrade l'extrait.
@@ -435,7 +450,11 @@ async def _fts_articles_query(
                     ) + ts_rank_cd(
                         '{RANK_WEIGHTS}', a.search_vector,
                         websearch_to_tsquery('english', :query)
-                    ) DESC
+                    ) DESC,
+                    -- Departage (voir la docstring) : sans lui, les trois
+                    -- articles retenus d'une loi changeaient d'un appel a
+                    -- l'autre.
+                    a."order", a.id
                 ) AS law_rank
             FROM articles a
             JOIN laws l ON l.id = a.law_id
@@ -449,7 +468,9 @@ async def _fts_articles_query(
         capped AS (
             SELECT * FROM ranked
             WHERE law_rank <= :per_law_cap
-            ORDER BY rank DESC
+            -- (law_id, law_rank) est unique : l'ordre est total, et les
+            -- memes lignes passent le LIMIT a chaque appel.
+            ORDER BY rank DESC, law_id, law_rank
             LIMIT :limit OFFSET :offset
         )
         SELECT
@@ -464,7 +485,7 @@ async def _fts_articles_query(
                 'StartSel=<mark>,StopSel=</mark>,MaxFragments=2,MaxWords=40,MinWords=20'
             ) AS excerpt
         FROM capped
-        ORDER BY rank DESC
+        ORDER BY rank DESC, law_id, law_rank
     """)
 
     try:
@@ -552,7 +573,7 @@ async def _trigram_articles_query(
             similarity(a.content, :query) AS rank
         FROM (
             SELECT a0.id, a0.number, a0.title, a0.section, a0.page_number,
-                   a0.content, a0.law_id
+                   a0.content, a0.law_id, a0."order"
             FROM articles a0
             -- show_limit() : le seuil meme de l'operateur %.
             WHERE octet_length(a0.content)
@@ -563,7 +584,9 @@ async def _trigram_articles_query(
         LEFT JOIN categories c ON c.id = l.category_id
         WHERE a.content % :query
         {where_extra}
-        ORDER BY rank DESC
+        -- Departage comme en plein texte (voir _fts_articles_query) : des
+        -- articles au texte identique ont la meme similarite.
+        ORDER BY rank DESC, a.law_id, a."order", a.id
         LIMIT :limit OFFSET :offset
     """)
 
@@ -663,7 +686,9 @@ async def search_laws_pg(
             OR l.title ILIKE :ilike_query ESCAPE '\\'
         )
         {where_extra}
-        ORDER BY rank DESC
+        -- Departage par l'identifiant (voir _fts_articles_query) : des titres
+        -- de meme forme marquent le meme score.
+        ORDER BY rank DESC, l.id
         LIMIT :limit OFFSET :offset
     """)
     # Echappement des metacaracteres : sans lui, une requete contenant % ou _
@@ -909,7 +934,9 @@ async def search_titles_trgm_pg(
             OR immutable_unaccent(l.reference) %> immutable_unaccent(:query)
         )
         {where_extra}
-        ORDER BY rank DESC
+        -- Departage par l'identifiant (voir _fts_articles_query) : tous les
+        -- titres qui portent le mot une fois ont la meme similarite.
+        ORDER BY rank DESC, l.id
         LIMIT :limit
     """)
 
@@ -964,7 +991,10 @@ async def resolve_law_by_hint(
             FROM laws l
             WHERE ({predicate})
             {where_extra}
-            ORDER BY score DESC, length(l.title) ASC
+            -- l.id en dernier : deux lois peuvent porter le MEME titre (sept
+            -- paires dans jurix_dev). Sans lui, la loi visee par une
+            -- navigation directe pouvait changer d'un appel a l'autre.
+            ORDER BY score DESC, length(l.title) ASC, l.id
             LIMIT :limit
         """)
         try:
