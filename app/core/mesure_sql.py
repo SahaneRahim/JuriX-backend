@@ -21,7 +21,12 @@ cote de la duree totale :
 Lire les allers-retours : les caches d'instructions etant coupes (pooler en
 mode transaction), chaque instruction en coute DEUX (preparation, execution),
 et chaque transaction deux de plus (BEGIN, puis COMMIT ou ROLLBACK). Soit
-environ 2 × n + 2 × tx, plus un par sondage et l'ouverture des connexions.
+2 × n + 2 × tx, plus un par sondage et l'ouverture des connexions. Verifie
+contre un proxy TCP qui compte les allers-retours (data/perf/r3/api,
+octobre 2026) : egalite exacte sur une connexion deja servie. Seul ecart
+observe, invisible d'ici : la premiere fois qu'une connexion rencontre un
+type qu'asyncpg doit decrire (tableau d'entiers de laws, halfvec), il
+l'interroge, soit environ six allers-retours de plus, une fois.
 
 Hors du compte : ce qui suit l'envoi des en-tetes — la fermeture de la session
 de la requete (son ROLLBACK), les ecritures differees des recherches.
