@@ -57,6 +57,7 @@ from app.services.explanation_service import (
     ExplanationQuotaError,
     ExplanationService,
 )
+from app.services.lecture_des_citations import porte_l_entete
 from app.services.search_service import invalidate_search_cache
 from app.services.statut_juridique import (
     InfoTexte,
@@ -747,9 +748,16 @@ async def _morceau_englobant(
     """
     Le morceau qui contient l'article, quand celui-ci n'a pas de morceau propre.
 
-    Deux preuves seulement : la citation qui designe ce morceau (`article_id`,
-    du meme texte), ou le releve des liens (`morceaux` : l'article 8 de la loi
-    sur la Cour supreme est a la fin du morceau « 7 », repere « ARTICLE 8 »).
+    Deux preuves seulement : le morceau que designe la citation (`article_id`,
+    du meme texte) S'IL PORTE l'en-tete de l'article, ou le releve des liens
+    (`morceaux` : l'article 8 de la loi sur la Cour supreme est a la fin du
+    morceau « 7 », repere « ARTICLE 8 »).
+
+    L'en-tete est exige parce que c'est lui qui a rattache la citation du chat
+    a ce morceau (lecture_des_citations) : sans lui, l'identifiant seul
+    faisait rendre, sous le numero 999, l'article 35.1 du Code du travail,
+    « englobant » sans preuve (revue du 2026-10-28). Un morceau sans en-tete
+    peut encore etre etabli par le releve, essaye ensuite.
     """
     if article_id is not None:
         ligne = (
@@ -757,7 +765,7 @@ async def _morceau_englobant(
                 select(*_COLONNES_APERCU).where(Article.id == article_id, Article.law_id == law_id)
             )
         ).first()
-        if ligne is not None:
+        if ligne is not None and porte_l_entete(ligne.content, vise):
             return ligne
     for morceau, article, repere in morceaux_etablis(reference):
         if _base_normalisee(article) != vise:

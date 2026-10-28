@@ -365,6 +365,31 @@ async def test_un_article_colle_dans_un_autre_se_rend_avec_son_morceau(client, d
     assert [c["texte"]["numero"] for c in corps["statut"]["changements"]] == ["99/011", "2020/009", "2021/022"]
 
 
+async def test_un_morceau_designe_sans_l_entete_de_l_article_ne_l_englobe_pas(client, db_session):
+    """
+    Revue du 2026-10-28 : /laws/2274/articles/999?article_id=97420 rendait
+    l'article 35.1 du Code du travail comme « englobant » l'article 999. Le
+    morceau designe doit porter l'en-tete de l'article, la preuve qui a
+    rattache la citation du chat a ce morceau.
+    """
+    loi = await _loi(db_session, "PRC-5004", "Loi N°2026/003 du 2 avril 2026 modifiant le code", [
+        ("35.1", "(1) Le contrat de travail à durée indéterminée peut être rompu."),
+        ("SECTION_1",
+         "Les dispositions suivantes sont modifiées : ARTICLE 142 (nouveau).- Le juge statue."),
+    ])
+    ids = (await db_session.execute(
+        text('SELECT id FROM articles WHERE law_id = :id ORDER BY "order"'), {"id": loi.id})
+    ).scalars().all()
+
+    incoherent = await client.get(f"/api/v1/laws/{loi.id}/articles/999?article_id={ids[0]}")
+    assert incoherent.status_code == 404
+    assert incoherent.json() == {"detail": f"Article 999 introuvable dans le document {loi.id}"}
+
+    porte = (await client.get(f"/api/v1/laws/{loi.id}/articles/142?article_id={ids[1]}")).json()
+    assert porte["englobant"] is True and porte["numero"] == "142"
+    assert porte["article_ids"] == [ids[1]] and "Le juge statue." in porte["contenu"]
+
+
 async def test_un_article_premier_se_demande_comme_on_l_ecrit(client, db_session):
     loi = await _loi(db_session, "PRC-5002", "Décret N°2020/002 du 3 janvier 2020 portant", [
         ("1", "Article premier du décret."), ("TROISIÈME", "Article troisième de la loi de finances."),
