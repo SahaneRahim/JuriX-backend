@@ -47,6 +47,7 @@ from app.services.embedding_service import (
     suivi_semantique,
 )
 from app.services.postgres_search_service import (
+    CACHE_SCHEMA_VERSION,
     _make_cache_key,
     find_article_in_laws,
     get_from_pg_cache,
@@ -58,6 +59,13 @@ from app.services.postgres_search_service import (
     search_titles_trgm_pg,
     store_in_pg_cache,
     update_law_search_vector,
+)
+from app.services.recherche_affinee import (
+    TRI_PAR_DEFAUT,
+    EnsembleCandidat,
+    affiner,
+    cle_de_l_ensemble,
+    surligner,
 )
 from app.services.reranker import rerank_chunks
 from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
@@ -434,6 +442,11 @@ class SearchService:
             f"query=\"{request.query[:50]}\", filters={request.filters}"
         )
 
+        # Tri, filtres sur l'ensemble ou effectifs demandes : recherche
+        # affinee. Sans eux, le parcours classique ci-dessous, inchange.
+        if request.recherche_affinee():
+            return await self._recherche_affinee(request, start_time)
+
         cache_key = ""
         # Check PostgreSQL cache
         if self.use_cache:
@@ -593,6 +606,34 @@ class SearchService:
         total = len(results)
         results = results[request.offset:request.offset + request.limit]
 
+        target_law_id, target_article, direct_navigation = await self._navigation(
+            request, results
+        )
+
+        return SearchResponse(
+            query=request.query,
+            mode=request.mode,
+            results=results,
+            total=total,
+            search_time_ms=elapsed_ms,
+            filters_applied=request.filters.model_dump() if request.filters else None,
+            target_law_id=target_law_id,
+            target_article=target_article,
+            direct_navigation=direct_navigation,
+            chunks=chunks[:request.limit],
+        )
+
+    async def _navigation(
+        self, request: SearchRequest, results: List[SearchResult]
+    ) -> Tuple[Optional[int], Optional[str], bool]:
+        """
+        (target_law_id, target_article, direct_navigation) pour une question
+        qui designe un article : « article 35 du code minier ».
+
+        Extrait de _build_search_response, a l'identique, pour servir aussi la
+        recherche affinee. `results` : les lois ou chercher l'article quand la
+        question ne nomme pas de texte, dans l'ordre de pertinence.
+        """
         target_article = target_law_id = None
         direct_navigation = False
         reference = parse_reference(request.query)
@@ -612,17 +653,119 @@ class SearchService:
             # jamais : le champ etait calcule puis toujours faux.
             direct_navigation = target_law_id is not None
 
+        return target_law_id, target_article, direct_navigation
+
+    # ==================== RECHERCHE AFFINEE ====================
+
+    # Fenetre de l'ensemble candidat : ce que le parcours classique classe pour
+    # sa plus grande premiere page (limit=50, offset=0), soit
+    # _chunk_budget(50) = 200 morceaux. Assez pour qu'un filtre trouve de quoi
+    # remplir plusieurs pages ; au-dela, le classement semantique ne rend plus
+    # que du bruit, et chaque morceau de plus transite avec son texte. Fixe :
+    # l'ensemble ne depend ni de la page ni des filtres, sans quoi les
+    # effectifs changeraient d'une page a l'autre.
+    FENETRE_ENSEMBLE = 50
+
+    async def _recherche_affinee(
+        self, request: SearchRequest, start_time: float
+    ) -> SearchResponse:
+        """
+        Filtres, tri et effectifs sur TOUT l'ensemble candidat, puis la page :
+        voir app/services/recherche_affinee.py.
+
+        L'ensemble est mis en cache seul (query_cache, cle sans page, tri ni
+        `refine`) : changer d'onglet, de tri ou de page le relit au lieu de
+        relancer la recherche.
+
+        `chunks` reste vide : seuls le chat et la comparaison les lisent, et ils
+        passent par le parcours classique.
+        """
+        cle = cle_de_l_ensemble(
+            CACHE_SCHEMA_VERSION, request.query, request.mode, request.semantic_query,
+            request.filters, self.FENETRE_ENSEMBLE,
+        )
+        ensemble: Optional[EnsembleCandidat] = None
+        if self.use_cache:
+            try:
+                deja = await get_from_pg_cache(self.db, cle)
+                ensemble = EnsembleCandidat.model_validate(deja) if deja else None
+            except Exception as e:
+                # Cache illisible ou de forme ancienne : on recalcule.
+                logger.warning(f"⚠️ Ensemble candidat en cache ignore : {e}")
+                ensemble = None
+
+        depuis_le_cache = ensemble is not None
+        if ensemble is None:
+            ensemble = await self._ensemble_candidat(request)
+
+        page, total, facettes = affiner(
+            ensemble.resultats, request.refine, request.sort, request.offset, request.limit
+        )
+        elapsed_ms = int((time.time() - start_time) * 1000)
+
+        a_mettre_en_cache = None
+        if self.use_cache and not depuis_le_cache and not self.semantique_degradee:
+            a_mettre_en_cache = (cle, ensemble.model_dump(mode="json"))
+        await self._ecrire_apres_la_reponse(
+            request, total, elapsed_ms, cached=depuis_le_cache, cache=a_mettre_en_cache,
+        )
+        logger.info(
+            f"✅ Recherche affinee : {total}/{len(ensemble.resultats)} resultats en "
+            f"{elapsed_ms}ms (cache={depuis_le_cache}, tri={request.sort or TRI_PAR_DEFAUT})"
+        )
         return SearchResponse(
             query=request.query,
             mode=request.mode,
-            results=results,
+            results=page,
             total=total,
             search_time_ms=elapsed_ms,
             filters_applied=request.filters.model_dump() if request.filters else None,
+            target_law_id=ensemble.target_law_id,
+            target_article=ensemble.target_article,
+            direct_navigation=ensemble.direct_navigation,
+            sort=request.sort or TRI_PAR_DEFAUT,
+            candidates=len(ensemble.resultats),
+            facets=facettes,
+        )
+
+    async def _ensemble_candidat(self, request: SearchRequest) -> "EnsembleCandidat":
+        """
+        L'ensemble candidat de la requete : le parcours classique pour une
+        premiere page de FENETRE_ENSEMBLE resultats (meme budget de morceaux,
+        meme fusion, meme re-ranking, meme regroupement par loi), en entier.
+
+        Les extraits sans <mark> (correspondance semantique, ligne de titre)
+        sont refaits autour des mots de la requete, sur le texte entier du
+        morceau, encore disponible ici. Le contenu est ensuite reduit a
+        l'apercu, comme dans le cache du parcours classique.
+        """
+        self.semantique_degradee = False
+        fenetre = request.model_copy(
+            update={"limit": self.FENETRE_ENSEMBLE, "offset": 0,
+                    "sort": None, "refine": None, "facets": False}
+        )
+        chunks = await self._execute_search_by_mode(fenetre)
+        if settings.RERANK_ENABLED and chunks:
+            chunks = await _reclasser(request.query, chunks)
+        resultats = self._chunks_to_search_results(chunks)
+
+        for resultat in resultats:
+            extrait = resultat.highlights.get("content") or ""
+            if "<mark>" not in extrait:
+                surligne = surligner(resultat.content, request.query)
+                if surligne:
+                    resultat.highlights = {**resultat.highlights, "content": surligne}
+            if resultat.content:
+                resultat.content = resultat.content[:APERCU_CONTENU_CARACTERES]
+
+        target_law_id, target_article, direct_navigation = await self._navigation(
+            request, resultats
+        )
+        return EnsembleCandidat(
+            resultats=resultats,
             target_law_id=target_law_id,
             target_article=target_article,
             direct_navigation=direct_navigation,
-            chunks=chunks[:request.limit],
         )
 
     # _handle_search_fallback a ete supprimee : elle etait injoignable.
