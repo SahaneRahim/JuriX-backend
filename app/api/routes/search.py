@@ -60,7 +60,11 @@ async def search(
     Point d'entrée principal pour la recherche.
 
     Effectue une recherche selon le mode spécifié:
-    - **text**: Recherche plein texte PostgreSQL (tsvector + GIN, <50ms)
+    - **text**: Recherche plein texte PostgreSQL (tsvector + GIN, <50ms).
+      Quand aucun mot ne correspond, une passe tolérante aux fautes
+      (trigrammes) prend le relais, bornée à une seconde : une question longue
+      sans correspondance exacte peut donc rendre une liste vide. L'hybride,
+      lui, rattrape les fautes par son volet sémantique.
     - **semantic**: Recherche sémantique par similarité (pgvector, <200ms)
     - **hybrid**: Combinaison optimale via RRF fusion (40/60, <200ms)
 
