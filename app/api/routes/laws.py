@@ -17,7 +17,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import List, Optional, cast
+from typing import List, Optional, Union, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
@@ -28,7 +28,7 @@ from sqlalchemy.orm import defer, load_only, selectinload
 
 from app.core.auth import get_current_admin_user
 from app.core.database import AsyncSessionLocal, get_db
-from app.models.law import Article, Law
+from app.models.law import Article, Category, Law
 from app.models.user import User
 from app.schemas.law import (
     ArticleExplanationRequest,
@@ -38,6 +38,8 @@ from app.schemas.law import (
     LawResponse,
     LawUpdate,
 )
+from app.schemas.law_list import LawListLightItem, LawListPage, TriDesListes
+from app.schemas.reperes import ReperesDuTexte
 from app.services.document_storage import (
     DocumentInaccessible,
     DocumentIntrouvable,
@@ -83,7 +85,7 @@ router = APIRouter(tags=["Laws"])
 # ==================== PUBLIC ENDPOINTS ====================
 
 
-class LawListItem(LawResponse):
+class LawListItem(LawResponse, ReperesDuTexte):
     """
     Ligne de GET /laws/ : un LawResponse dont le texte peut etre allege.
 
@@ -93,6 +95,9 @@ class LawListItem(LawResponse):
     ligne de liste et renvoie `content` tel quel par PUT /laws/admin/{id}.
     Tronquer par defaut ferait ecraser le texte d'un document par son extrait
     au premier enregistrement.
+
+    Les reperes d'une ligne dense (objet, numero, date_signature, annee,
+    statut) s'y ajoutent, calcules : voir app/schemas/reperes.py.
     """
 
     content: Optional[str] = Field(
@@ -153,8 +158,79 @@ async def _avec_nombre_d_articles(db: AsyncSession, law: Law) -> Law:
 # Railway, d'ou une seconde redirection 301 vers https (3,45 s mesurees avant
 # le premier octet). Servie directement, l'adresse ne coute plus de detour.
 # Hors du schema OpenAPI : c'est la meme route.
-@router.get("/", response_model=List[LawListItem])
-@router.get("", response_model=List[LawListItem], include_in_schema=False)
+def _ordre_des_lois(tri: Optional[str], colonnes=None) -> tuple:
+    """
+    ORDER BY d'une liste : date de l'acte, puis id dans le meme sens, pour un
+    ordre total (des dizaines de decrets partagent une date) et donc des pages
+    qui ne se chevauchent pas. Les textes sans date passent en dernier.
+    """
+    jour = colonnes.publication_date if colonnes is not None else Law.publication_date
+    ident = colonnes.id if colonnes is not None else Law.id
+    if tri == "date_asc":
+        return (jour.asc().nulls_last(), ident.asc())
+    return (jour.desc().nulls_last(), ident.desc())
+
+
+async def _page_de_lois(
+    db: AsyncSession, filtres: list, tri: str, page: int, page_size: int
+) -> LawListPage:
+    """
+    Une page legere et le total, en UNE instruction dans le cas courant.
+
+    Le total vient de count(*) OVER () : calcule sur toutes les lignes
+    filtrees avant le LIMIT, il evite un second aller-retour de comptage. Le
+    nombre d'articles est compte a l'exterieur, sur les seules lignes de la
+    page : dans la meme sous-requete que la fenetre, il le serait pour chaque
+    texte du domaine (1 277 pour la fonction publique). Une page au-dela de la
+    derniere ne rend aucune ligne, donc aucun total : un COUNT le donne alors.
+    """
+    tranche = (
+        select(
+            Law.id, Law.reference, Law.title, Law.type, Law.language, Law.status,
+            Law.category_id, Category.name.label("category_name"), Law.publication_date,
+            func.count().over().label("total"),
+        )
+        .select_from(Law)
+        .outerjoin(Category, Category.id == Law.category_id)
+        .where(*filtres)
+        .order_by(*_ordre_des_lois(tri))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .subquery("tranche")
+    )
+    articles = (
+        select(func.count(Article.id))
+        .where(Article.law_id == tranche.c.id)
+        .correlate(tranche)
+        .scalar_subquery()
+    )
+    rangees = (
+        await db.execute(
+            select(tranche, articles.label("article_count")).order_by(
+                *_ordre_des_lois(tri, tranche.c)
+            )
+        )
+    ).all()
+    if rangees:
+        total = rangees[0].total
+    else:
+        total = (
+            await db.execute(select(func.count()).select_from(Law).where(*filtres))
+        ).scalar_one()
+    return LawListPage(
+        items=[
+            LawListLightItem.model_validate(rangee, from_attributes=True) for rangee in rangees
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+        pages=-(-total // page_size),
+        sort=tri,
+    )
+
+
+@router.get("/", response_model=Union[List[LawListItem], LawListPage])
+@router.get("", response_model=Union[List[LawListItem], LawListPage], include_in_schema=False)
 async def get_laws(
     language: Optional[str] = Query(None, description="Filter by language (fr or en)"),
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
@@ -174,10 +250,39 @@ async def get_laws(
             "par la base."
         ),
     ),
+    sort: Optional[TriDesListes] = Query(
+        None,
+        description=(
+            "date_desc ou date_asc (date de l'acte, puis id). Absent : l'ordre "
+            "historique de la liste nue, sans tri ; date_desc avec `page`."
+        ),
+    ),
+    page: Optional[int] = Query(
+        None,
+        ge=1,
+        le=10_000_000,
+        description=(
+            "Page, a partir de 1. Present (ou `page_size`), la reponse devient "
+            "une page legere {items, total, page, page_size, pages, sort} ; "
+            "`skip`, `limit` et `content_max_chars` sont alors ignores."
+        ),
+    ),
+    page_size: Optional[int] = Query(
+        None, ge=1, le=100, description="Taille de page (defaut 20) ; voir `page`"
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Get list of laws with optional filters.
+
+    **Deux formes de reponse.** Sans `page` ni `page_size` : la liste nue
+    d'origine (tableau de LawListItem), pour le front deja deploye et
+    l'administration, avec `skip`/`limit`, `content_max_chars` et, s'il est
+    donne, `sort`. Avec `page` ou `page_size` : une page legere (LawListPage),
+    sans texte, avec le vrai total et un tri par date decroissante par defaut ;
+    c'est ce qui permet une pagination par lien (`?page=2`) sans JavaScript.
+    Les deux formes portent les reperes d'une ligne dense : objet, numero,
+    date_signature, annee, statut.
 
     **Filters:**
     - `language`: Filter by language code (fr or en)
@@ -198,8 +303,26 @@ async def get_laws(
     """
     logger.info(
         f"📋 GET /laws - language={language}, category_id={category_id}, "
-        f"status={law_status}, skip={skip}, limit={limit}"
+        f"status={law_status}, skip={skip}, limit={limit}, sort={sort}, page={page}"
     )
+
+    if page is not None or page_size is not None:
+        filtres = []
+        if language:
+            filtres.append(Law.language == language)
+        if category_id:
+            filtres.append(Law.category_id == category_id)
+        if law_status:
+            filtres.append(Law.status == law_status)
+        try:
+            return await _page_de_lois(
+                db, filtres, sort or "date_desc", page or 1, page_size or 20
+            )
+        except Exception as e:
+            logger.error(f"❌ Error fetching laws page: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error fetching laws"
+            )
 
     try:
         # UNE instruction : les lois, leur categorie (jointure, Law.category
@@ -227,6 +350,11 @@ async def get_laws(
 
         if law_status:
             query = query.where(Law.status == law_status)
+
+        # Sans `sort`, aucun ORDER BY, comme avant : le front deploye pagine
+        # sur cet ordre-la, et l'administration aussi.
+        if sort:
+            query = query.order_by(*_ordre_des_lois(sort))
 
         # Apply pagination
         query = query.offset(skip).limit(limit)
