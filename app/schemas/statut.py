@@ -1,8 +1,9 @@
 """
-Schemas du statut juridique d'un texte et de chacun de ses articles.
+Schemas du statut juridique d'un texte et de l'apercu d'un article.
 
-Tout y est ADDITIF : GET /laws/{id} gagne un bloc facultatif. Le front deploye
-ignore ce qu'il ne connait pas.
+Tout y est ADDITIF : GET /laws/{id} gagne un bloc facultatif, et une route
+s'ajoute (GET /laws/{id}/articles/{numero}). Le front deploye ignore ce qu'il
+ne connait pas.
 
 Le front compose lui-meme les phrases (« Modifié par la loi n° 2026/002 du 14
 avril 2026 ») dans la langue de l'interface : le site est bilingue. D'ou des
@@ -167,6 +168,13 @@ class StatutJuridique(BaseModel):
     )
 
 
+class ArticleHomonyme(BaseModel):
+    """Un autre article du meme numero dans le meme texte (compilation)."""
+
+    article_id: int
+    section: Optional[str] = None
+
+
 class StatutDeLArticle(BaseModel):
     """Le statut d'un article : celui de son texte, et les changements qui le touchent."""
 
@@ -178,3 +186,33 @@ class StatutDeLArticle(BaseModel):
         description="Changements qui touchent cet article ou qu'il porte, et ceux qui portent "
         "sur tout le texte ; historique compris (depasse, integre_au_texte)",
     )
+
+
+class ArticleApercuResponse(BaseModel):
+    """
+    Un article seul, pour la feuille d'apercu d'une citation du chat.
+
+    Leger : jamais le texte entier de la loi. `contenu` recolle les morceaux de
+    l'article (« 55.1 », « 55.2 ») sans repeter le chapeau que le decoupage
+    recopie en tete de chacun.
+    """
+
+    law_id: int
+    texte: TexteLie = Field(..., description="Le texte qui contient l'article")
+    numero: str = Field(..., description="Numéro de l'article, tel qu'en base, sans suffixe de morceau")
+    titre: Optional[str] = None
+    section: Optional[str] = None
+    page: Optional[int] = Field(None, description="Page du PDF, 1-indexée")
+    article_ids: List[int] = Field(..., description="Morceaux en base qui composent l'article, dans l'ordre")
+    contenu: str
+    tronque: bool = Field(False, description="Contenu coupé : lire la suite dans le texte intégral")
+    englobant: bool = Field(
+        False,
+        description="L'article n'a pas de morceau propre en base : `contenu` est celui du morceau "
+        "qui le contient, avec d'autres articles (le dire au lecteur)",
+    )
+    homonymes: List[ArticleHomonyme] = Field(
+        default_factory=list,
+        description="Autres articles du même numéro dans ce texte ; passer ?article_id= pour l'un d'eux",
+    )
+    statut: StatutDeLArticle

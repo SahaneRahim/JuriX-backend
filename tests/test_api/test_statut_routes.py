@@ -1,5 +1,6 @@
 """
-Statut juridique et dates d'un texte (GET /laws/{id}).
+Statut juridique et dates d'un texte (GET /laws/{id}), apercu d'un article
+(GET /laws/{id}/articles/{numero}).
 
 Tout est ADDITIF : le front deploye lit GET /laws/{id} tel qu'avant. Le premier
 test le verifie champ par champ.
@@ -245,3 +246,109 @@ async def test_les_textes_lies_sont_lus_une_fois(client, constitution, compteur)
     # Loi, articles, contenu des morceaux a repere (SECTION_2), textes lies.
     assert _instructions(froid) == 4
     assert _instructions(chaud) == 3
+
+
+# ==================== GET /laws/{id}/articles/{numero} ====================
+
+async def test_l_apercu_rend_l_article_entier_et_son_statut(client, constitution):
+    loi = constitution["loi"]
+
+    reponse = await client.get(f"/api/v1/laws/{loi.id}/articles/6")
+
+    assert reponse.status_code == 200
+    assert reponse.headers["cache-control"].startswith("public")
+    corps = reponse.json()
+    assert corps["numero"] == "6" and corps["englobant"] is False
+    # La fin de l'article, rangee sous SECTION_2, est recollee : le releve l'etablit.
+    assert corps["contenu"].startswith("(1) Le Président de la République est élu")
+    assert "par intérim" in corps["contenu"] and len(corps["article_ids"]) == 2
+    assert corps["texte"]["numero"] == "96/06" and corps["texte"]["id"] == loi.id
+    statut = corps["statut"]
+    assert statut["etat_du_texte"] == "modifie"
+    assert [(c["texte"]["numero"], c["depasse"]) for c in statut["changements"]] == [
+        ("2008/001", True), ("2026/002", False),
+    ]
+    assert "content" not in corps, "jamais le texte entier de la loi"
+
+
+async def test_un_article_non_touche_n_a_pas_de_changement(client, constitution):
+    corps = (await client.get(f"/api/v1/laws/{constitution['loi'].id}/articles/8")).json()
+
+    assert corps["statut"]["changements"] == []
+    assert corps["statut"]["etat_du_texte"] == "modifie"
+    assert "par intérim" not in corps["contenu"]
+
+
+async def test_un_article_en_morceaux_est_recolle_sans_chapeau_repete(client, db_session):
+    chapeau = "Sont nommés aux fonctions ci-après :"
+    loi = await _loi(db_session, "PRC-5000", "Décret N°2020/001 du 2 janvier 2020 portant nomination", [
+        ("1", "Le présent décret s'applique."),
+        ("2.1", f"{chapeau}\n- M. A, directeur ;"),
+        ("2.2", f"{chapeau}\n- M. B, sous-directeur ;"),
+        ("3", "Le présent décret sera publié."),
+    ], type="décret")
+
+    corps = (await client.get(f"/api/v1/laws/{loi.id}/articles/2.2")).json()
+
+    assert corps["numero"] == "2" and len(corps["article_ids"]) == 2
+    assert corps["contenu"] == f"{chapeau}\n- M. A, directeur ;\n- M. B, sous-directeur ;"
+
+
+async def test_les_homonymes_d_une_compilation_se_departagent_par_l_identifiant(client, db_session):
+    loi = await _loi(db_session, "PRC-5001", "Code de démonstration", [
+        ("53", "Table des matières : 53 …", "SOMMAIRE", "table"),
+        ("53", "Article 53 du titre 2.", "TITRE 2"),
+        ("53", "Article 53 du titre 5.", "TITRE 5"),
+    ], type="autre")
+    ids = (await db_session.execute(
+        text('SELECT id FROM articles WHERE law_id = :id ORDER BY "order"'), {"id": loi.id})
+    ).scalars().all()
+
+    premier = (await client.get(f"/api/v1/laws/{loi.id}/articles/53")).json()
+    designe = (await client.get(f"/api/v1/laws/{loi.id}/articles/53?article_id={ids[2]}")).json()
+
+    # Un vrai article plutot qu'une ligne de table des matieres.
+    assert premier["contenu"] == "Article 53 du titre 2."
+    assert {h["article_id"] for h in premier["homonymes"]} == {ids[0], ids[2]}
+    assert designe["contenu"] == "Article 53 du titre 5." and designe["section"] == "TITRE 5"
+
+
+async def test_un_article_colle_dans_un_autre_se_rend_avec_son_morceau(client, db_session):
+    """Article 5 de la loi 90/053, a la fin du morceau « 2 » : le releve des liens l'etablit."""
+    loi = await _loi(db_session, "LOI-1990-053", "Loi N°90/053 du 19 décembre 1990 portant sur la liberté d'association", [
+        ("1", "La présente loi régit la liberté d'association."),
+        ("2", "L'association est une convention. Art. 5 (4) les parties politiques et les syndicats sont régis."),
+    ], publication_date=date(1990, 12, 19))
+
+    corps = (await client.get(f"/api/v1/laws/{loi.id}/articles/5")).json()
+
+    assert corps["englobant"] is True and corps["numero"] == "5"
+    assert "les parties politiques" in corps["contenu"]
+    assert [c["texte"]["numero"] for c in corps["statut"]["changements"]] == ["99/011", "2020/009", "2021/022"]
+
+
+async def test_un_article_premier_se_demande_comme_on_l_ecrit(client, db_session):
+    loi = await _loi(db_session, "PRC-5002", "Décret N°2020/002 du 3 janvier 2020 portant", [
+        ("1", "Article premier du décret."), ("TROISIÈME", "Article troisième de la loi de finances."),
+    ], type="décret")
+
+    assert (await client.get(f"/api/v1/laws/{loi.id}/articles/1er")).json()["contenu"] == "Article premier du décret."
+    reponse = await client.get(f"/api/v1/laws/{loi.id}/articles/TROISIÈME")
+    assert reponse.json()["contenu"] == "Article troisième de la loi de finances."
+
+
+async def test_un_article_tres_long_est_coupe(client, db_session):
+    loi = await _loi(db_session, "PRC-5003", "Décret N°2020/003 du 4 janvier 2020 portant nomination",
+                     [("1", "- M. X, chef de service ;\n" * 2000)], type="décret")
+
+    corps = (await client.get(f"/api/v1/laws/{loi.id}/articles/1")).json()
+
+    assert corps["tronque"] is True and len(corps["contenu"]) <= 20_000
+
+
+@pytest.mark.parametrize("chemin", ["/api/v1/laws/999999/articles/1", "ARTICLE_INCONNU"])
+async def test_un_article_introuvable_repond_404(client, constitution, chemin):
+    if chemin == "ARTICLE_INCONNU":
+        chemin = f"/api/v1/laws/{constitution['loi'].id}/articles/999"
+
+    assert (await client.get(chemin)).status_code == 404
