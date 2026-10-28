@@ -31,12 +31,14 @@ from app.schemas.rag import (
     Citation,
     CitationIntrouvable,
     CitationPositionnee,
+    Progression,
     RAGRequest,
     RAGResponse,
     RAGStreamChunk,
     SourceCitee,
     StatutProuve,
     TexteConsulte,
+    TexteTrouve,
 )
 from app.schemas.search import ChunkResult, SearchFilters, SearchRequest
 from app.services.intent_classifier import (
@@ -51,6 +53,7 @@ from app.services.lecture_des_citations import (
     Occurrence,
     _citable_article_number,
     _normalize_article_number,
+    article_compte,
     indices_utf16,
     lire_les_citations,
 )
@@ -144,6 +147,37 @@ _ABSTENTION_MARKERS = (
     "not present in the documents",
     "i could not find",
 )
+
+
+def _pluriel(nombre: int, singulier: str, pluriel: str) -> str:
+    return f"{nombre} {singulier if nombre <= 1 else pluriel}"
+
+
+# Les lignes de progression du chat en flux, dans la langue de la question.
+# Elles disent ce qui se passe, pas ce qu'on espere : « Rédaction » n'est
+# emis qu'au moment ou le modele est appele.
+_LIBELLES_DE_PROGRESSION = {
+    "fr": {
+        "recherche": "Recherche dans les textes…",
+        "textes_trouves": lambda articles, textes: (
+            f"{_pluriel(articles, 'article trouvé', 'articles trouvés')} "
+            f"dans {_pluriel(textes, 'texte', 'textes')}"
+        ),
+        "textes_seuls": lambda textes: _pluriel(textes, "texte trouvé", "textes trouvés"),
+        "aucun": "Aucun texte trouvé",
+        "redaction": "Rédaction de la réponse…",
+    },
+    "en": {
+        "recherche": "Searching the texts…",
+        "textes_trouves": lambda articles, textes: (
+            f"{_pluriel(articles, 'article found', 'articles found')} "
+            f"in {_pluriel(textes, 'text', 'texts')}"
+        ),
+        "textes_seuls": lambda textes: _pluriel(textes, "text found", "texts found"),
+        "aucun": "No text found",
+        "redaction": "Writing the answer…",
+    },
+}
 
 
 def _sans_citation() -> Dict[str, list]:
@@ -591,6 +625,11 @@ class RAGService:
         Yields answer chunks as they're generated.
         Final chunk includes sources and confidence.
 
+        Avant le premier mot, des evenements de progression (`progression`,
+        `chunk` vide, `done` faux) : recherche lancee, textes trouves,
+        redaction en cours. Le front deploye les ignore : il n'y trouve ni
+        texte, ni fin, ni erreur.
+
         Yields:
             JSON strings for SSE: {"chunk": "...", "done": false}
         """
@@ -628,6 +667,7 @@ class RAGService:
                 # Une reponse de deux phrases n'a rien a gagner a etre
                 # decoupee : un chunk terminal unique, ce que le contrat SSE
                 # autorise deja (`chunk` et `done` dans le meme evenement).
+                # Aucune progression : rien n'est cherche.
                 reponse = await self._repondre_conversationnel(
                     request, conversation, history, intention, start_time
                 )
@@ -643,6 +683,12 @@ class RAGService:
                     textes_consultes_non_cites=reponse.textes_consultes_non_cites,
                 ).en_json()
                 return
+
+            # La recherche commence : le dire, avec l'identifiant de la
+            # conversation. Une reponse arretee par le lecteur n'a pas de
+            # dernier evenement ; sans lui, la question suivante en ouvrait une
+            # autre.
+            yield self._evenement_de_progression("recherche", request, conversation)
 
             # Meme recuperation que `ask` : le document ouvert (`law_id`) en
             # tete du contexte, la reponse directe quand l'article demande n'y
@@ -666,6 +712,10 @@ class RAGService:
             if not search_results:
                 search_results = await self._fallback_search(request.question, history)
             retrieval_time_ms = int((time.time() - retrieval_start) * 1000)
+
+            yield self._evenement_de_progression(
+                "textes_trouves", request, conversation, search_results
+            )
 
             if not search_results:
                 # Enregistre, comme `_handle_no_results` le fait sur `ask` : ce
@@ -711,6 +761,8 @@ class RAGService:
                 return
 
             await self._valider_avant_la_generation()
+
+            yield self._evenement_de_progression("redaction", request, conversation)
 
             answer_parts = []
             raison = {}
@@ -775,6 +827,21 @@ class RAGService:
             yield RAGStreamChunk(
                 chunk="", done=True, error=str(e), error_code=code
             ).en_json()
+
+    def _evenement_de_progression(
+        self,
+        etape: str,
+        request: RAGRequest,
+        conversation: Conversation,
+        extraits: Optional[List[ChunkResult]] = None,
+    ) -> str:
+        """Un evenement de progression du flux, pret a partir."""
+        return RAGStreamChunk(
+            chunk="", done=False,
+            progression=self._progression(etape, request.language, extraits),
+            session_id=conversation.session_id,
+            persona=conversation.persona,
+        ).en_json()
 
     async def _retrieve_chunks(
         self,
@@ -1549,6 +1616,54 @@ class RAGService:
             "articles_cites": cites,
             "textes_consultes_non_cites": textes,
         }
+
+    @staticmethod
+    def _progression(
+        etape: str, langue: str, extraits: Optional[List[ChunkResult]] = None
+    ) -> Progression:
+        """
+        Un evenement de progression, avec sa ligne lisible.
+
+        `textes_trouves` porte les textes dans l'ordre du classement, avec le
+        nombre d'articles de chacun : le front en tire « 8 articles trouvés :
+        Code du travail, … » avec le nom court qu'il donne deja aux sources.
+
+        Des ARTICLES, et non des extraits : les morceaux d'un article long
+        (« 55.1 », « 55.2 ») n'en font qu'un, et la ligne niveau loi d'un texte
+        n'en est pas un. Compter les extraits annoncait « 8 articles » pour
+        trois articles decoupes.
+        """
+        libelles = _LIBELLES_DE_PROGRESSION.get(langue, _LIBELLES_DE_PROGRESSION["fr"])
+        if etape != "textes_trouves":
+            return Progression(etape=etape, libelle=libelles[etape])
+        par_loi: Dict[int, TexteTrouve] = {}
+        articles: Dict[int, set] = {}
+        for extrait in extraits or []:
+            if extrait.law_id not in par_loi:
+                par_loi[extrait.law_id] = TexteTrouve(
+                    law_id=extrait.law_id,
+                    law_reference=extrait.reference,
+                    law_title=extrait.law_title,
+                    date_du_texte=extrait.publication_date,
+                    nb_articles=0,
+                )
+            article = article_compte(extrait.number)
+            if article is not None:
+                articles.setdefault(extrait.law_id, set()).add(article)
+        for law_id, trouve in par_loi.items():
+            trouve.nb_articles = len(articles.get(law_id, ()))
+        nb_articles = sum(trouve.nb_articles for trouve in par_loi.values())
+        nb_textes = len(par_loi)
+        if nb_textes == 0:
+            libelle = libelles["aucun"]
+        elif nb_articles == 0:
+            libelle = libelles["textes_seuls"](nb_textes)
+        else:
+            libelle = libelles["textes_trouves"](nb_articles, nb_textes)
+        return Progression(
+            etape=etape, libelle=libelle, nb_articles=nb_articles, nb_textes=nb_textes,
+            textes=list(par_loi.values()),
+        )
 
     def _peut_fabriquer_une_source(self, answer: str, chunks: List[ChunkResult]) -> bool:
         """

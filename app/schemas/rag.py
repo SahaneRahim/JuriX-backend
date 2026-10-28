@@ -260,6 +260,34 @@ class TexteConsulte(BaseModel):
     statut: StatutProuve = Field(default_factory=StatutProuve, description="Statut du texte entier")
 
 
+class TexteTrouve(BaseModel):
+    """Un texte trouve par la recherche, dans l'evenement de progression."""
+
+    law_id: int
+    law_reference: str
+    law_title: str
+    date_du_texte: Optional[date] = None
+    nb_articles: int = Field(..., description="Articles de ce texte remontes par la recherche")
+
+
+class Progression(BaseModel):
+    """
+    Une etape du chat en flux, avant le premier mot de la reponse.
+
+    Trois points animes ne disaient rien pendant les secondes de recherche et
+    de reflexion du modele. Ces evenements disent ou en est la reponse, avec un
+    libelle lisible dans la langue de la question.
+    """
+
+    etape: Literal["recherche", "textes_trouves", "redaction"]
+    libelle: str = Field(..., description="La ligne a afficher, dans la langue de la question")
+    nb_articles: Optional[int] = Field(None, description="textes_trouves : articles trouves")
+    nb_textes: Optional[int] = Field(None, description="textes_trouves : textes distincts")
+    textes: Optional[List[TexteTrouve]] = Field(
+        None, description="textes_trouves : du mieux classe au moins bien classe"
+    )
+
+
 class RAGResponse(BaseModel):
     """Response schema for RAG ask endpoint."""
 
@@ -332,16 +360,19 @@ class RAGStreamChunk(BaseModel):
         None,
         description="Confidence (only in final chunk)"
     )
+    # Aussi dans les evenements de progression : une reponse ARRETEE par le
+    # lecteur n'a jamais de dernier evenement, et sans identifiant la question
+    # suivante ouvrait une autre conversation.
     session_id: Optional[str] = Field(
         None,
-        description="Session ID (only in final chunk)"
+        description="Session ID (progression events and final chunk)"
     )
     # Le profil effectif de la conversation. Il peut differer de celui demande
     # sur une conversation existante : un changement de profil en ouvre une
     # nouvelle, avec un autre session_id.
     persona: Optional[str] = Field(
         None,
-        description="Profil de la conversation (only in final chunk)"
+        description="Profil de la conversation (progression events and final chunk)"
     )
     intent: Optional[str] = Field(
         None,
@@ -358,6 +389,11 @@ class RAGStreamChunk(BaseModel):
     error_code: Optional[Literal["quota", "overloaded", "server"]] = Field(
         None,
         description="Nature de la panne : quota, overloaded, server"
+    )
+    # Evenement de progression : `chunk` vide, `done` faux, et ce champ. Le
+    # front deploye n'y voit ni texte, ni fin, ni erreur : il l'ignore.
+    progression: Optional[Progression] = Field(
+        None, description="Etape en cours, avant le premier mot (evenements de progression)"
     )
     citations: Optional[List[CitationPositionnee]] = Field(
         None, description="Citations reperees dans le texte final (only in final chunk)"
@@ -395,9 +431,11 @@ class RAGStreamChunk(BaseModel):
         return json.dumps(donnees, ensure_ascii=False)
 
 
-# Champs de RAGStreamChunk serialises sans `exclude_none` (voir en_json).
+# Champs de RAGStreamChunk serialises sans `exclude_none` (voir en_json). La
+# progression garde l'omission : ses compteurs n'existent qu'a une etape.
 _CHAMPS_ENTIERS = (
-    "citations", "citations_introuvables", "articles_cites", "textes_consultes_non_cites",
+    "progression", "citations", "citations_introuvables", "articles_cites",
+    "textes_consultes_non_cites",
 )
 
 

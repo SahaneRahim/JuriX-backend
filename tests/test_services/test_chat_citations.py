@@ -1,8 +1,11 @@
 """
-Le chat rend ses citations cliquables, signale les introuvables, et separe les
-articles cites des textes seulement consultes.
+Le chat rend ses citations cliquables, signale les introuvables, separe les
+articles cites des textes seulement consultes, et dit ou il en est avant le
+premier mot.
 
 Ce que le front recoit, et sur quoi il s'appuie :
+- les evenements de progression (recherche, textes trouves, redaction), avant
+  tout morceau de texte, et ignores par le front deja deploye ;
 - dans le dernier evenement (et dans la reponse de /ask) : `citations`,
   `citations_introuvables`, `articles_cites`, `textes_consultes_non_cites`,
   avec des indices EXACTS dans le texte qu'il a affiche.
@@ -104,6 +107,127 @@ async def _evenements(service, requete):
 def _slice_js(texte, debut, fin):
     """`texte.slice(debut, fin)` en JavaScript : des unites UTF-16."""
     return texte.encode("utf-16-le")[2 * debut:2 * fin].decode("utf-16-le")
+
+
+# ==================== PROGRESSION ====================
+
+
+class TestProgression:
+
+    @pytest.mark.asyncio
+    async def test_trois_etapes_avant_le_premier_mot(self, base, extraits):
+        service = _service(base, extraits, ["Selon l'article 37 ", "du Code du travail, oui."])
+
+        evenements = await _evenements(service, _requete())
+
+        etapes = [e["progression"]["etape"] for e in evenements if "progression" in e]
+        assert etapes == ["recherche", "textes_trouves", "redaction"]
+        premier_texte = next(i for i, e in enumerate(evenements) if e["chunk"])
+        assert all("progression" in e for e in evenements[:premier_texte])
+
+    @pytest.mark.asyncio
+    async def test_le_front_deploye_n_y_voit_ni_texte_ni_fin_ni_erreur(self, base, extraits):
+        """Il teste `chunk`, `done` et `error` : rien de cela dans une progression."""
+        service = _service(base, extraits, ["Réponse."])
+
+        evenements = await _evenements(service, _requete())
+
+        for evenement in (e for e in evenements if "progression" in e):
+            assert evenement["chunk"] == "" and evenement["done"] is False
+            assert "error" not in evenement and "sources" not in evenement
+
+    @pytest.mark.asyncio
+    async def test_les_textes_trouves_sont_comptes_et_nommes(self, base, extraits):
+        service = _service(base, extraits, ["Réponse."])
+
+        evenements = await _evenements(service, _requete())
+
+        trouves = next(e["progression"] for e in evenements
+                       if e.get("progression", {}).get("etape") == "textes_trouves")
+        assert trouves["nb_articles"] == 3 and trouves["nb_textes"] == 2
+        assert trouves["libelle"] == "3 articles trouvés dans 2 textes"
+        assert [(t["law_id"], t["nb_articles"]) for t in trouves["textes"]] == [(3, 2), (8, 1)]
+        assert trouves["textes"][0]["law_title"] == CODE_DU_TRAVAIL
+
+    @pytest.mark.asyncio
+    async def test_la_progression_donne_l_identifiant_de_la_conversation(self, base, extraits):
+        """Une reponse ARRETEE n'a pas de dernier evenement : sans cela, la
+        question suivante ouvrait une autre conversation."""
+        service = _service(base, extraits, ["Réponse."])
+
+        evenements = await _evenements(service, _requete())
+
+        progressions = [e for e in evenements if "progression" in e]
+        assert evenements[-1]["session_id"]
+        assert {e["session_id"] for e in progressions} == {evenements[-1]["session_id"]}
+        assert {e["persona"] for e in progressions} == {"citoyen"}
+
+    @pytest.mark.asyncio
+    async def test_libelles_en_anglais(self, base, extraits):
+        service = _service(base, extraits, ["Answer."])
+
+        evenements = await _evenements(service, _requete(language="en"))
+
+        assert [e["progression"]["libelle"] for e in evenements if "progression" in e] == [
+            "Searching the texts…", "3 articles found in 2 texts", "Writing the answer…",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_des_articles_et_non_des_extraits(self, base):
+        """
+        Les morceaux d'un article long (« 55.1 », « 55.2 ») font un article, et
+        la ligne niveau loi d'un texte n'en est pas un.
+        """
+        electoral = "Loi N°2012/001 portant Code électoral"
+        extraits = [
+            _extrait(551, 5, "55.1", electoral, "PRC-5"),
+            _extrait(552, 5, "55.2", electoral, "PRC-5"),
+            _extrait(None, 8, None, "Décret N°2018/9387/CAB/PM fixant les modalités", "PRC-8"),
+        ]
+        service = _service(base, extraits, ["Réponse."])
+
+        evenements = await _evenements(service, _requete())
+
+        trouves = next(e["progression"] for e in evenements
+                       if e.get("progression", {}).get("etape") == "textes_trouves")
+        assert trouves["libelle"] == "1 article trouvé dans 2 textes"
+        assert [(t["law_id"], t["nb_articles"]) for t in trouves["textes"]] == [(5, 1), (8, 0)]
+
+    @pytest.mark.asyncio
+    async def test_des_textes_sans_article(self, base):
+        extraits = [_extrait(None, 8, None, "Décret N°2018/9387/CAB/PM fixant les modalités", "PRC-8")]
+        service = _service(base, extraits, ["Réponse."])
+
+        evenements = await _evenements(service, _requete())
+
+        trouves = next(e["progression"] for e in evenements
+                       if e.get("progression", {}).get("etape") == "textes_trouves")
+        assert trouves["libelle"] == "1 texte trouvé" and trouves["nb_articles"] == 0
+
+    @pytest.mark.asyncio
+    async def test_sans_resultat_ni_redaction_ni_appel_au_modele(self, base):
+        service = _service(base, [])
+
+        evenements = await _evenements(service, _requete())
+
+        etapes = [e["progression"] for e in evenements if "progression" in e]
+        assert [p["etape"] for p in etapes] == ["recherche", "textes_trouves"]
+        assert etapes[1]["nb_articles"] == 0 and etapes[1]["libelle"] == "Aucun texte trouvé"
+        service.llm.generate_stream.assert_not_called()
+        assert evenements[-1]["done"] is True and evenements[-1]["citations"] == []
+
+    @pytest.mark.asyncio
+    async def test_une_reponse_conversationnelle_n_a_pas_de_progression(
+        self, base, extraits, routage_juridique
+    ):
+        routage_juridique.return_value = IntentResult("smalltalk", 0.9, "test")
+        service = _service(base, extraits)
+        service.llm.generate = AsyncMock(return_value={"response": "Bonjour !"})
+
+        evenements = await _evenements(service, _requete())
+
+        assert len(evenements) == 1 and "progression" not in evenements[0]
+        assert evenements[0]["citations"] == [] and evenements[0]["citations_introuvables"] == []
 
 
 # ==================== CITATIONS DU DERNIER EVENEMENT ====================
