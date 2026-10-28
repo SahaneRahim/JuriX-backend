@@ -658,6 +658,14 @@ async def async_db_session(pg_engine) -> AsyncGenerator[AsyncSession, None]:
             await session.rollback()
             await session.close()
 
+    # Le journal et le cache d'une recherche s'ecrivent APRES elle, dans une
+    # tache (search_service._ecrire_apres_la_reponse). Purger sans les attendre
+    # laissait une ecriture atterrir apres le TRUNCATE : une ligne de
+    # search_events ou de query_cache venue du test precedent.
+    from app.services.search_service import ecritures_en_attente
+
+    await ecritures_en_attente(30)
+
     async with pg_engine.begin() as conn:
         await conn.execute(truncate)
 

@@ -1026,6 +1026,13 @@ async def record_search_event(
     NE LEVE JAMAIS. Une statistique manquante ne doit pas faire echouer la
     recherche de l'utilisateur — c'est exactement l'inversion de priorite qu'il
     faut eviter ici.
+
+    Mais l'echec se VOIT : WARNING, et non plus DEBUG. Le journal part
+    desormais apres la reponse, dans une tache (search_service) : une erreur
+    avalee au niveau DEBUG n'y laissait aucune trace en production, et la
+    statistique de recherche pouvait s'arreter sans que rien ne le dise.
+    Premiere ligne seulement : une ligne DETAIL de PostgreSQL peut citer la
+    question de l'utilisateur.
     """
     try:
         await db.execute(
@@ -1043,7 +1050,10 @@ async def record_search_event(
         )
         await db.commit()
     except Exception as e:
-        logger.debug(f"Journalisation de recherche impossible: {e}")
+        premiere_ligne = (str(e).strip().splitlines() or [""])[0][:200]
+        logger.warning(
+            f"⚠️ Journalisation de recherche impossible — {type(e).__name__}: {premiere_ligne}"
+        )
 
 
 def _seuil_trigramme(threshold: float) -> str:

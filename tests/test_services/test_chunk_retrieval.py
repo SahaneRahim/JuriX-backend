@@ -25,7 +25,7 @@ from app.schemas.search import SearchFilters, SearchRequest
 from app.services.embedding_service import EmbeddingService
 from app.services.legal_domain_classifier import CIVIL
 from app.services.postgres_search_service import search_articles_pg, search_laws_pg
-from app.services.search_service import SearchService
+from app.services.search_service import SearchService, ecritures_en_attente
 from app.services.search_vectors import REINDEX_ARTICLES_SQL, REINDEX_LAWS_SQL
 
 
@@ -432,6 +432,8 @@ class TestRerankWiring:
         response = await service.search(SearchRequest(
             query="responsabilité dirigeants", mode="text", limit=5,
         ))
+        # Le cache s'ecrit apres la reponse, dans une tache.
+        await ecritures_en_attente()
 
         assert written, "le cache doit avoir ete ecrit"
         cached_ids = [c["article_id"] for c in written["payload"]["chunks"]]

@@ -107,6 +107,12 @@ def _secret_key_refusee(cle: str) -> str:
 # pause pour inactivite.
 STATS_AGGREGATION_INTERVAL_S = 24 * 60 * 60
 
+# Attente maximale, a l'arret, des ecritures differees des recherches. Une
+# ecriture saine dure quelques dizaines de millisecondes ; cinq secondes
+# couvrent un reveil de base, et restent sous le delai de grace d'un arret
+# (dix secondes entre SIGTERM et SIGKILL pour `docker stop`, par defaut).
+ATTENTE_ECRITURES_A_L_ARRET_S = 5.0
+
 
 async def _agreger_les_statistiques() -> None:
     """
@@ -197,9 +203,16 @@ async def lifespan(app: FastAPI):
             tache.cancel()
             with suppress(asyncio.CancelledError):
                 await tache
-        # La connexion gardee vers le fournisseur d'embeddings (Voyage).
         from app.services import search_service
 
+        # Journal et cache des dernieres recherches, ecrits apres leur reponse
+        # (search_service._ecrire_apres_la_reponse) : fermer le pool sous eux
+        # les perdait a chaque redeploiement. L'attente est bornee — une base
+        # qui ne repond plus ne doit pas retenir l'arret.
+        restantes = await search_service.ecritures_en_attente(ATTENTE_ECRITURES_A_L_ARRET_S)
+        if restantes:
+            logger.warning(f"⚠️ {restantes} ecriture(s) differee(s) abandonnee(s) a l'arret")
+        # La connexion gardee vers le fournisseur d'embeddings (Voyage).
         fournisseur = getattr(search_service._embedding_service_instance, "provider", None)
         fermer = getattr(fournisseur, "fermer", None)
         if fermer is not None:

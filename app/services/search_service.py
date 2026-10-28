@@ -105,24 +105,36 @@ def _ecriture_terminee(tache: "asyncio.Task[None]") -> None:
         logger.warning(f"⚠️ Ecriture apres la reponse en echec : {erreur!r}")
 
 
-async def ecritures_en_attente() -> None:
+async def ecritures_en_attente(delai: Optional[float] = None) -> int:
     """
     Attend la fin des ecritures differees de cette boucle d'evenements.
 
-    Pour les tests, qui relisent la base juste apres une recherche, et pour un
-    script qui veut que son journal soit ecrit avant de se terminer. Une tache
-    d'une boucle deja fermee (fin d'un test precedent) ne finira jamais : elle
-    est oubliee.
+    Pour les tests, qui relisent la base juste apres une recherche ; pour un
+    script qui veut que son journal soit ecrit avant de se terminer ; et pour
+    l'arret de l'application, qui fermait le pool sous des ecritures encore en
+    vol : le journal et le cache des dernieres recherches etaient perdus a
+    chaque redeploiement. Une tache d'une boucle deja fermee (fin d'un test
+    precedent) ne finira jamais : elle est oubliee.
+
+    `delai` borne l'attente, en secondes : l'arret ne doit pas dependre d'une
+    base qui ne repond plus. Rend le nombre d'ecritures encore en cours a
+    l'echeance, 0 si toutes ont fini. Elles ne sont pas annulees ici.
     """
     boucle = asyncio.get_running_loop()
+    echeance = None if delai is None else boucle.time() + delai
     while True:
         for tache in list(_ECRITURES_EN_COURS):
             if tache.get_loop().is_closed():
                 _ECRITURES_EN_COURS.discard(tache)
         miennes = [t for t in _ECRITURES_EN_COURS if t.get_loop() is boucle]
         if not miennes:
-            return
-        await asyncio.wait(miennes)
+            return 0
+        reste = None if echeance is None else echeance - boucle.time()
+        if reste is not None and reste <= 0:
+            return len(miennes)
+        # Boucle et non un seul wait : une ecriture peut en lancer une autre
+        # pendant l'attente (une recherche servie entre-temps).
+        await asyncio.wait(miennes, timeout=reste)
 
 
 async def _ecrire_journal_et_cache(

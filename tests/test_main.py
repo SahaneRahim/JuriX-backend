@@ -212,6 +212,71 @@ async def test_le_demarrage_precharge_le_modele_d_embeddings(monkeypatch):
         assert appels == ["prechargement"]
 
 
+def _ecriture_differee(duree_s, fini):
+    """Une ecriture differee factice, enregistree comme celles des recherches."""
+    import asyncio
+
+    from app.services import search_service
+
+    async def _ecrire():
+        await asyncio.sleep(duree_s)
+        fini.append(True)
+
+    tache = asyncio.create_task(_ecrire())
+    search_service._ECRITURES_EN_COURS.add(tache)
+    tache.add_done_callback(search_service._ecriture_terminee)
+    return tache
+
+
+@pytest.mark.asyncio
+async def test_l_arret_attend_les_ecritures_differees(monkeypatch):
+    """
+    Le journal et le cache d'une recherche s'ecrivent apres sa reponse :
+    fermer le pool sans les attendre les perdait a chaque redeploiement.
+    """
+    import app.main as main
+
+    ordre = []
+
+    async def _fermer():
+        ordre.append("pool ferme")
+
+    monkeypatch.setattr(main, "precharger_les_embeddings", lambda: True)
+    monkeypatch.setattr(main, "close_db", _fermer)
+
+    async with main.lifespan(app):
+        _ecriture_differee(0.1, ordre)
+
+    assert ordre == [True, "pool ferme"]
+
+
+@pytest.mark.asyncio
+async def test_l_attente_des_ecritures_a_l_arret_est_bornee(monkeypatch, caplog):
+    """Une base qui ne repond plus ne retient pas l'arret."""
+    import asyncio
+    import time
+
+    import app.main as main
+
+    async def _fermer():
+        pass
+
+    monkeypatch.setattr(main, "precharger_les_embeddings", lambda: True)
+    monkeypatch.setattr(main, "close_db", _fermer)
+    monkeypatch.setattr(main, "ATTENTE_ECRITURES_A_L_ARRET_S", 0.05)
+
+    fini = []
+    debut = time.monotonic()
+    async with main.lifespan(app):
+        tache = _ecriture_differee(5, fini)
+    try:
+        assert time.monotonic() - debut < 2
+        assert "1 ecriture(s) differee(s) abandonnee(s)" in caplog.text
+    finally:
+        tache.cancel()
+        await asyncio.wait({tache})
+
+
 def test_les_journaux_de_l_application_sortent_en_info():
     """
     Sans gestionnaire, les logger.info de l'application etaient perdus : le

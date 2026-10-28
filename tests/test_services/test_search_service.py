@@ -40,6 +40,7 @@ from app.services.search_service import (
     # depend — une suite verte y aurait certifie du code cassé en production.
     # db_session vient desormais de conftest.py (PostgreSQL reel + rollback).
     SearchService,
+    ecritures_en_attente,
 )
 
 # ============================================================================
@@ -741,6 +742,8 @@ class TestCaching:
         first = await service.search(request)
         assert isinstance(first, SearchResponse)
 
+        # Le cache s'ecrit apres la reponse, dans une tache.
+        await ecritures_en_attente()
         rows = await db_session.execute(sa_text("SELECT count(*) FROM query_cache"))
         assert rows.scalar() == 1, "la reponse aurait du etre mise en cache"
 
@@ -775,6 +778,7 @@ class TestCaching:
         service.embedding_service = None
 
         await service.search(SearchRequest(query="responsabilite", mode="text"))
+        await ecritures_en_attente()
 
         rows = await db_session.execute(sa_text("SELECT count(*) FROM query_cache"))
         assert rows.scalar() == 0
@@ -793,6 +797,150 @@ class TestCaching:
         }
 
         assert len(cles) == 3
+
+
+class TestEcrituresDifferees:
+    """
+    Le journal (search_events) et le cache (query_cache) s'ecrivent APRES la
+    reponse, sur leur propre connexion. Ecrits avant, sur la session de la
+    requete, ils coutaient onze allers-retours et l'INSERT d'une ligne de
+    plusieurs Mo que l'utilisateur attendait sans que search_time_ms le montre.
+    """
+
+    @pytest.mark.asyncio
+    async def test_la_reponse_n_attend_pas_le_cache(self, db_session, sample_data, monkeypatch):
+        import asyncio
+
+        from app.services import search_service as module
+
+        libere = asyncio.Event()
+        ecrits = []
+
+        async def _cache_lent(db, cle, charge, ttl_seconds=None):
+            await libere.wait()
+            ecrits.append(cle)
+
+        monkeypatch.setattr(module, "store_in_pg_cache", _cache_lent)
+        service = SearchService(db_session, use_cache=True)
+        service.embedding_service = None
+
+        reponse = await service.search(SearchRequest(query="responsabilite", mode="text"))
+
+        assert reponse.total >= 1
+        assert ecrits == [], "la reponse est rendue avant l'ecriture du cache"
+        libere.set()
+        assert await ecritures_en_attente() == 0
+        assert len(ecrits) == 1
+
+    @pytest.mark.asyncio
+    async def test_le_journal_ne_valide_pas_la_transaction_de_l_appelant(
+        self, db_session, sample_data
+    ):
+        """
+        record_search_event faisait un COMMIT sur la session de l'appelant :
+        le chat voyait sa conversation en cours validee par une statistique.
+        """
+        from sqlalchemy import text as sa_text
+
+        from app.models.law import Category
+
+        db_session.add(Category(name="Ajout non valide", description="x"))
+        await db_session.flush()
+
+        service = SearchService(db_session, use_cache=True)
+        service.embedding_service = None
+        await service.search(SearchRequest(query="responsabilite", mode="text"))
+        await ecritures_en_attente()
+
+        assert (await db_session.execute(sa_text("SELECT count(*) FROM search_events"))).scalar() == 1
+        await db_session.rollback()
+        restant = await db_session.execute(
+            sa_text("SELECT count(*) FROM categories WHERE name = 'Ajout non valide'")
+        )
+        assert restant.scalar() == 0
+
+    @pytest.mark.asyncio
+    async def test_le_cache_garde_un_apercu_des_resultats_et_les_chunks_entiers(
+        self, db_session, sample_data
+    ):
+        """
+        Les lignes de cache pesaient 6 a 11 Mo : le texte integral des
+        resultats. Seuls les chunks, que le chat lit sur un succes du cache,
+        restent entiers.
+        """
+        import json
+
+        from sqlalchemy import text as sa_text
+
+        from app.schemas.search import APERCU_CONTENU_CARACTERES
+
+        long_texte = "responsabilite des dirigeants. " * 200
+        await db_session.execute(
+            sa_text("UPDATE articles SET content = :c WHERE id = 1"), {"c": long_texte}
+        )
+        await db_session.commit()
+
+        service = SearchService(db_session, use_cache=True)
+        service.embedding_service = None
+        reponse = await service.search(SearchRequest(query="responsabilite", mode="text"))
+        await ecritures_en_attente()
+
+        (brut,) = (await db_session.execute(sa_text("SELECT response_json FROM query_cache"))).one()
+        charge = brut if isinstance(brut, dict) else json.loads(brut)
+        assert charge["results"]
+        assert all(
+            len(r["content"] or "") <= APERCU_CONTENU_CARACTERES for r in charge["results"]
+        )
+        assert max(len(c["content"]) for c in charge["chunks"]) == len(long_texte)
+        # La reponse rendue a l'appelant, elle, n'est pas touchee.
+        assert any(len(r.content or "") == len(long_texte) for r in reponse.results)
+
+    @pytest.mark.asyncio
+    async def test_un_journal_refuse_se_voit_au_journal(self, caplog):
+        """
+        L'echec etait avale au niveau DEBUG : en tache de fond, il ne laissait
+        aucune trace. Premiere ligne seulement : la suite cite la question.
+        """
+        import logging
+
+        from app.services.postgres_search_service import record_search_event
+
+        class _SessionRefusee:
+            async def execute(self, *a, **k):
+                raise RuntimeError(
+                    'relation "search_events" does not exist\n[parameters: question privee]'
+                )
+
+            async def commit(self):
+                pass
+
+        with caplog.at_level(logging.WARNING, logger="app.services.postgres_search_service"):
+            await record_search_event(
+                _SessionRefusee(), query="question privee", mode="text",
+                results_count=0, duration_ms=1, cached=False,
+            )
+
+        assert "search_events" in caplog.text and "RuntimeError" in caplog.text
+        assert "question privee" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_l_attente_est_bornee(self):
+        import asyncio
+        import time
+
+        from app.services import search_service as module
+
+        tache = asyncio.create_task(asyncio.sleep(5))
+        module._ECRITURES_EN_COURS.add(tache)
+        tache.add_done_callback(module._ecriture_terminee)
+        try:
+            debut = time.monotonic()
+            assert await ecritures_en_attente(0.05) == 1
+            assert time.monotonic() - debut < 1
+        finally:
+            tache.cancel()
+            await asyncio.wait({tache})
+        assert tache not in module._ECRITURES_EN_COURS
 
 
 # ============================================================================
@@ -974,12 +1122,15 @@ class TestRepliDuVoletSemantique:
         service.embedding_service = mock_embedding_service
 
         await service.search(SearchRequest(query="responsabilité", mode="hybrid"))
+        # Attendre l'ecriture differee : sinon le compte nul ne prouverait rien.
+        await ecritures_en_attente()
         assert (await db_session.execute(sa_text("SELECT count(*) FROM query_cache"))).scalar() == 0
 
         # Le fournisseur revient : la reponse complete, elle, est gardee.
         mock_embedding_service.generate_embedding_async = AsyncMock(return_value=_unit_vector(0))
         await service.search(SearchRequest(query="responsabilité", mode="hybrid"))
         assert service.semantique_degradee is False
+        await ecritures_en_attente()
         assert (await db_session.execute(sa_text("SELECT count(*) FROM query_cache"))).scalar() == 1
 
     @pytest.mark.asyncio
@@ -1004,8 +1155,9 @@ class TestRepliDuVoletSemantique:
         assert reponse.total >= 1
         assert search_service.semantique_degradee is True
 
-        # La session repond encore : le journal a recu sa ligne, et une
-        # seconde recherche passe.
+        # La session repond encore : le journal a recu sa ligne (ecrite apres
+        # la reponse, d'ou l'attente), et une seconde recherche passe.
+        await ecritures_en_attente()
         evenements = (await db_session.execute(sa_text("SELECT count(*) FROM search_events"))).scalar()
         assert evenements >= 1
         mock_embedding_service.generate_embedding_async = AsyncMock(return_value=_unit_vector(0))
