@@ -245,7 +245,6 @@ def cle_de_l_ensemble(
 # chercher le passage : un article tient en quelques milliers de caracteres.
 LONGUEUR_EXTRAIT = 300
 LECTURE_MAX = 20_000
-_MOT = re.compile(r"\w+")
 _MOTS_VIDES = {
     "".join(c for c in unicodedata.normalize("NFKD", m) if not unicodedata.combining(c))
     for m in STOPWORDS
@@ -255,6 +254,28 @@ _MOTS_VIDES = {
 def _replier(mot: str) -> str:
     decompose = unicodedata.normalize("NFKD", mot.lower())
     return "".join(c for c in decompose if not unicodedata.combining(c))
+
+
+def _table_de_repli() -> Dict[int, str]:
+    """
+    Minuscule sans accent, caractere pour caractere : « É » → « e ».
+
+    str.translate garde la longueur du texte, donc les positions : on cherche
+    dans le texte replie et on marque le texte d'origine aux memes indices.
+    Replier mot a mot (_replier) coutait 5,7 ms sur les 20 000 premiers
+    caracteres du Code du travail, meme sans aucune correspondance ; ici, une
+    seule passe en C. Seuls les caracteres qui se replient en UN caractere
+    sont dans la table (« œ » reste « œ », comme avec _replier).
+    """
+    table: Dict[int, str] = {}
+    for code in range(0x41, 0x250):
+        replie = _replier(chr(code))
+        if len(replie) == 1 and replie != chr(code):
+            table[code] = replie
+    return table
+
+
+_REPLI = _table_de_repli()
 
 
 def racines_de_la_requete(requete: str) -> List[str]:
@@ -298,13 +319,15 @@ def surligner(contenu: Optional[str], requete: str, longueur: int = LONGUEUR_EXT
     if not racines:
         return None
     texte = contenu[:LECTURE_MAX]
-    trouves = []  # (debut, fin, indice de racine)
-    for m in _MOT.finditer(texte):
-        replie = _replier(m.group())
-        for i, racine in enumerate(racines):
-            if replie.startswith(racine):
-                trouves.append((m.start(), m.end(), i))
-                break
+    # Un mot entier qui COMMENCE par une racine : « licencie » marque
+    # « licenciement ». Cherche dans le texte replie, de meme longueur, puis
+    # marque aux memes indices dans le texte d'origine. L'alternance garde
+    # l'ordre des racines : la premiere qui convient l'emporte.
+    motif = re.compile(
+        r"(?<!\w)(?:" + "|".join(f"({re.escape(racine)})" for racine in racines) + r")\w*"
+    )
+    # (debut, fin, indice de racine)
+    trouves = [(m.start(), m.end(), m.lastindex - 1) for m in motif.finditer(texte.translate(_REPLI))]
     if not trouves:
         return None
 
