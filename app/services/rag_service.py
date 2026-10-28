@@ -221,6 +221,12 @@ async def _ferme_a_la_sortie(flux):
             await fermer()
 
 
+# « la Loi N°2008/001… » -> « Loi N°2008/001… » : l'intitule d'un texte nomme
+# par un lien, comme titre de citation. Un espace exige apres « la », « le »,
+# « les » : sans lui, « le » mordait sur « les » et laissait « s textes ».
+_SANS_ARTICLE_DEFINI = re.compile(r"^(?:(?:la|les|le)\s+|l['’]\s*)", re.IGNORECASE)
+
+
 def _requete_des_identifiants(references: List[str]):
     """
     (reference, identifiant) des textes en base parmi `references`. Une
@@ -1599,7 +1605,7 @@ class RAGService:
         for extrait in extraits:
             if extrait.law_id in lois_citees:
                 continue
-            premier, numeros = non_cites.setdefault(extrait.law_id, (extrait, []))
+            _, numeros = non_cites.setdefault(extrait.law_id, (extrait, []))
             numero = _citable_article_number(extrait.number)
             if numero and numero not in numeros:
                 numeros.append(numero)
@@ -1645,7 +1651,7 @@ class RAGService:
                 if law_id is not None:
                     citations.append(CitationPositionnee(
                         **bornes, law_id=law_id, reference=nomme.reference,
-                        titre=re.sub(r"^(?:la|le|les|l['’])\s*", "", nomme.titre),
+                        titre=_SANS_ARTICLE_DEFINI.sub("", nomme.titre),
                         date_du_texte=nomme.date, statut=statut_de(unite(occurrence)),
                     ))
                 continue

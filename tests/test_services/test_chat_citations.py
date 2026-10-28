@@ -373,6 +373,20 @@ class TestCitationsDuFlux:
         assert evenements[-1]["citations_introuvables"] == []
 
 
+@pytest.mark.parametrize("intitule, titre", [
+    ("la Loi N°2008/001 du 14 avril 2008", "Loi N°2008/001 du 14 avril 2008"),
+    ("l'Ordonnance N°2025/002", "Ordonnance N°2025/002"),
+    ("le Décret N°2019/143", "Décret N°2019/143"),
+    # « le » ne mord pas sur « les », ni sur le debut d'un mot.
+    ("les dispositions transitoires", "dispositions transitoires"),
+    ("lesdits textes", "lesdits textes"),
+])
+def test_le_titre_d_un_texte_nomme_perd_son_article(intitule, titre):
+    from app.services.rag_service import _SANS_ARTICLE_DEFINI
+
+    assert _SANS_ARTICLE_DEFINI.sub("", intitule) == titre
+
+
 # ==================== IDENTIFIANTS, SUR LA VRAIE BASE ====================
 
 
