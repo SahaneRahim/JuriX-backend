@@ -125,6 +125,13 @@ class Citation(BaseModel):
 # ne correspondent a aucun texte consulte. Tous sont NOUVEAUX et facultatifs :
 # `sources` garde son contenu et son sens pour le front deja deploye.
 
+# Une seule regle de date pour tout ce que le front affiche d'un texte : la page
+# (date_signature), les listes et le chat (rag_service._date_affichee).
+_DATE_DU_TEXTE = (
+    "Date de l'acte, meme regle que `date_signature` de GET /laws/{id} : null quand "
+    "l'intitule ne donne que l'annee ou ne date que sa publication au Journal officiel"
+)
+
 
 class LienProuve(BaseModel):
     """
@@ -201,7 +208,7 @@ class CitationPositionnee(BaseModel):
     article_id: Optional[int] = Field(None, description="La ligne d'article en base, pour l'apercu")
     reference: str = Field(..., description="Reference du texte en base")
     titre: str = Field(..., description="Intitule du texte")
-    date_du_texte: Optional[date] = Field(None, description="Date du texte (publication), si connue")
+    date_du_texte: Optional[date] = Field(None, description=_DATE_DU_TEXTE)
     statut: StatutProuve = Field(default_factory=StatutProuve)
 
 
@@ -237,7 +244,7 @@ class SourceCitee(BaseModel):
     article_id: Optional[int] = None
     excerpt: str = Field("", max_length=300)
     relevance_score: float = Field(0.0, ge=0.0, le=1.0)
-    date_du_texte: Optional[date] = None
+    date_du_texte: Optional[date] = Field(None, description=_DATE_DU_TEXTE)
     statut: StatutProuve = Field(default_factory=StatutProuve)
 
 
@@ -253,7 +260,7 @@ class TexteConsulte(BaseModel):
     law_id: int
     law_reference: str
     law_title: str
-    date_du_texte: Optional[date] = None
+    date_du_texte: Optional[date] = Field(None, description=_DATE_DU_TEXTE)
     articles: List[str] = Field(
         default_factory=list, description="Numeros des articles lus par le modele, dans l'ordre"
     )
@@ -266,7 +273,7 @@ class TexteTrouve(BaseModel):
     law_id: int
     law_reference: str
     law_title: str
-    date_du_texte: Optional[date] = None
+    date_du_texte: Optional[date] = Field(None, description=_DATE_DU_TEXTE)
     nb_articles: int = Field(..., description="Articles de ce texte remontes par la recherche")
 
 

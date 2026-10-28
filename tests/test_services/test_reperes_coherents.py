@@ -1,0 +1,102 @@
+"""
+Un meme texte, decrit de la meme facon partout ou le front l'affiche.
+
+Trois branches ont ajoute, chacune de son cote, les reperes d'un texte : la
+page d'un texte et les textes nommes par un statut (app/schemas/law.py,
+app/services/statut_juridique.py), les lignes de liste et de recherche
+(app/schemas/reperes.py), le chat (app/services/rag_service.py). Fusionnees,
+elles se contredisaient ; ces tests fixent :
+
+- la DATE : deux Actes uniformes OHADA dont l'intitule ne date que la
+  publication au Journal officiel etaient « signés le 15 novembre 2023 » en
+  liste et sans date de signature sur leur page ; le chat montrait la date
+  brute en base, 1er janvier de remplissage compris.
+
+Fonctions pures et doublures : ni base, ni reseau.
+"""
+
+from datetime import date, datetime
+
+import pytest
+
+from app.schemas.law import LawDetailResponse
+from app.schemas.law_list import LawListLightItem
+from app.services.prompts import _date_du_texte
+from app.services.rag_service import _date_affichee
+from app.services.reperes_textes import dates_de_l_acte
+
+pytestmark = pytest.mark.unit
+
+AUPSRVE = (
+    "Acte uniforme portant organisation des procédures simplifiées de recouvrement et des voies "
+    "d'exécution, révisé, publié au Journal officiel de l'OHADA du 15 novembre 2023"
+)
+
+# (date en base, intitule) : les cas ou une regle de date peut diverger.
+CAS_DE_DATES = [
+    (date(2023, 11, 15), AUPSRVE),
+    (date(2024, 1, 1), "Décret N°2024/193 juin 10 portant avancement d'échelon"),
+    (date(2015, 1, 1), "Décret N°2015/405 fixant les modalités de rémunération"),
+    (date(2020, 1, 1), "Décret N°2020/001 du 1er janvier 2020 portant convocation"),
+    (date(2020, 1, 1), "Décret N°2020/001 du 01 JANV. 2020 portant convocation"),
+    (date(2021, 12, 28), "Décret N°2021/745 du 28 décembre 2021 fixant les modalités"),
+    (None, "Code civil applicable au Cameroun"),
+]
+
+
+def _ligne(jour, titre):
+    return LawListLightItem(
+        id=1, reference="PRC-1", title=titre, type="décret", status="published",
+        publication_date=jour,
+    )
+
+
+def _page(jour, titre):
+    return LawDetailResponse(
+        id=1, reference="PRC-1", title=titre, type="décret", status="published",
+        content="Contenu du texte.", publication_date=jour,
+        created_at=datetime(2026, 10, 3, 12, 0),
+    )
+
+
+# ==================== DATES ====================
+
+
+@pytest.mark.parametrize("jour,titre", CAS_DE_DATES)
+def test_la_liste_et_la_page_datent_le_texte_de_la_meme_facon(jour, titre):
+    ligne = _ligne(jour, titre).model_dump(mode="json")
+    page = _page(jour, titre).model_dump(mode="json")
+
+    for champ in ("date_signature", "annee", "date_publication_jo"):
+        assert ligne[champ] == page[champ], champ
+
+
+def test_une_date_de_journal_officiel_n_est_pas_signee_en_liste():
+    ligne = _ligne(date(2023, 11, 15), AUPSRVE)
+
+    assert ligne.date_signature is None
+    assert ligne.annee == 2023
+    assert ligne.date_publication_jo == date(2023, 11, 15)
+
+
+@pytest.mark.parametrize("jour,titre", [c for c in CAS_DE_DATES if c[0] is not None])
+def test_le_chat_date_comme_la_page(jour, titre):
+    """`date_du_texte` des citations, sources et textes trouves du chat."""
+    assert _date_affichee(jour, titre) == dates_de_l_acte(jour, titre).date_signature
+
+
+@pytest.mark.parametrize("jour,titre", [c for c in CAS_DE_DATES if c[0] is not None])
+def test_le_modele_lit_l_annee_seule_quand_la_page_n_a_qu_elle(jour, titre):
+    """
+    Le contexte du modele et la page appliquent la meme regle du 1er janvier
+    (« 01 JANV. 2020 » est une vraie date pour les deux). La date de Journal
+    officiel seule reste lue telle quelle par le modele : il la voit dans
+    l'intitule.
+    """
+    dates = dates_de_l_acte(jour, titre)
+    if dates.date_publication_jo is not None:
+        return
+    extrait = type("Extrait", (), {"publication_date": jour, "law_title": titre})()
+    annee_seule = "jour non indiqué" in _date_du_texte(extrait)
+
+    assert annee_seule == (dates.date_signature is None)

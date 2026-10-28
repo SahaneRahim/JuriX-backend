@@ -16,7 +16,7 @@ import re
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import anyio
@@ -81,6 +81,7 @@ from app.services.prompts import (
     get_system_prompt,
     message_sans_resultat,
 )
+from app.services.reperes_textes import dates_de_l_acte
 from app.services.reranker import rerank_with_llm
 from app.services.search_service import SearchService
 from app.services.statut_des_sources import (
@@ -225,6 +226,18 @@ async def _ferme_a_la_sortie(flux):
 # par un lien, comme titre de citation. Un espace exige apres « la », « le »,
 # « les » : sans lui, « le » mordait sur « les » et laissait « s textes ».
 _SANS_ARTICLE_DEFINI = re.compile(r"^(?:(?:la|les|le)\s+|l['’]\s*)", re.IGNORECASE)
+
+
+def _date_affichee(jour: Optional[date], titre: Optional[str]) -> Optional[date]:
+    """
+    La date d'un texte dans les champs du chat (`date_du_texte`), selon la
+    regle de sa page et des listes (reperes_textes.dates_de_l_acte) : None
+    pour un 1er janvier de remplissage ou pour la seule date de publication au
+    Journal officiel. La date brute en base faisait lire « 1er janvier 2024 »
+    sous un decret dont l'intitule ne donne que l'annee, la ou sa page dit
+    « 2024 ».
+    """
+    return dates_de_l_acte(jour, titre).date_signature
 
 
 def _requete_des_identifiants(references: List[str]):
@@ -1652,7 +1665,8 @@ class RAGService:
                     citations.append(CitationPositionnee(
                         **bornes, law_id=law_id, reference=nomme.reference,
                         titre=_SANS_ARTICLE_DEFINI.sub("", nomme.titre),
-                        date_du_texte=nomme.date, statut=statut_de(unite(occurrence)),
+                        date_du_texte=_date_affichee(nomme.date, nomme.titre),
+                        statut=statut_de(unite(occurrence)),
                     ))
                 continue
             article = occurrence.article if occurrence.forme == "article" else None
@@ -1661,7 +1675,7 @@ class RAGService:
                 **bornes, law_id=extrait.law_id, article=article,
                 article_id=extrait.article_id if occurrence.forme == "article" else None,
                 reference=extrait.reference, titre=extrait.law_title,
-                date_du_texte=extrait.publication_date, statut=statut,
+                date_du_texte=_date_affichee(extrait.publication_date, extrait.law_title), statut=statut,
             ))
             # Une source par article cite ; un texte cite sans article n'en est
             # une que si aucun de ses articles ne l'est deja.
@@ -1685,7 +1699,7 @@ class RAGService:
                     if occurrence.forme == "article" else ""
                 ),
                 relevance_score=extrait.relevance_score,
-                date_du_texte=extrait.publication_date,
+                date_du_texte=_date_affichee(extrait.publication_date, extrait.law_title),
                 statut=statut,
             ))
 
@@ -1694,7 +1708,7 @@ class RAGService:
                 law_id=extrait.law_id,
                 law_reference=extrait.reference,
                 law_title=extrait.law_title,
-                date_du_texte=extrait.publication_date,
+                date_du_texte=_date_affichee(extrait.publication_date, extrait.law_title),
                 articles=numeros,
                 statut=statut_de((extrait.reference, None, None, None)),
             )
@@ -1739,7 +1753,7 @@ class RAGService:
                     law_id=extrait.law_id,
                     law_reference=extrait.reference,
                     law_title=extrait.law_title,
-                    date_du_texte=extrait.publication_date,
+                    date_du_texte=_date_affichee(extrait.publication_date, extrait.law_title),
                     nb_articles=0,
                 )
             article = article_compte(extrait.number)

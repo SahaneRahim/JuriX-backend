@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from app.core.personas import PROFIL_GENERAL, normaliser_profil
 from app.services.textes_successifs import abreger_les_repetitions, lignes_en_deux
 from app.utils.chunk_refiner import est_pseudo_numero
+from app.utils.titre_officiel import date_du_texte
 
 logger = logging.getLogger(__name__)
 
@@ -321,12 +322,14 @@ def _date_du_texte(chunk) -> str:
 
     Un 1er janvier que l'intitule ne mentionne pas est une date de remplissage
     (« Décret N°2024/193 juin 10 », date en base 2024-01-01) : seule l'annee
-    est sure.
+    est sure. Regle partagee avec la page du texte et les listes
+    (titre_officiel.date_du_texte), pour que le modele et l'ecran disent la
+    meme chose.
     """
     jour = chunk.publication_date
     if not jour:
         return "Date du texte : non indiquée"
-    if (jour.day, jour.month) == (1, 1) and "janvier" not in (chunk.law_title or "").lower():
+    if date_du_texte(jour, chunk.law_title) is None:
         return f"Date du texte : {jour.year} (jour non indiqué)"
     return f"Date du texte : {jour:%d/%m/%Y}"
 

@@ -185,8 +185,10 @@ def date_du_texte(publication_date: Optional[date], titre: Optional[str]) -> Opt
     (scripts/ingest_corpus._infer_date) ; faute de jour et de mois, elle y vaut
     le 1er janvier de l'annee du numero. Cette date de remplissage n'est PAS
     une date juridique : None, et seule l'annee de `publication_date` est sure.
-    Meme regle que prompts._date_du_texte, pour que le chat et les listes
-    disent la meme chose.
+
+    C'est la regle du 1er janvier, et elle seule : pour AFFICHER une date,
+    passer par reperes_textes.dates_de_l_acte, qui l'applique et isole en plus
+    l'intitule qui ne date que sa publication au Journal officiel.
     """
     if publication_date is None:
         return None

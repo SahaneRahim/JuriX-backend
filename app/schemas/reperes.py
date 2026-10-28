@@ -17,15 +17,16 @@ from typing import Optional
 
 from pydantic import BaseModel, computed_field
 
+from app.services.reperes_textes import dates_de_l_acte
 from app.services.statut_en_bref import StatutEnBref, statut_en_bref
-from app.utils.titre_officiel import date_du_texte, numero_du_titre, objet_du_titre
+from app.utils.titre_officiel import numero_du_titre, objet_du_titre
 
 
 class ReperesDuTexte(BaseModel):
     """
     A heriter par un modele qui porte `title`, `reference` et
-    `publication_date` : il y gagne objet, numero, date_signature, annee et
-    statut.
+    `publication_date` : il y gagne objet, numero, date_signature, annee,
+    date_publication_jo et statut.
     """
 
     @computed_field(  # type: ignore[prop-decorator]
@@ -45,21 +46,42 @@ class ReperesDuTexte(BaseModel):
     def numero(self) -> Optional[str]:
         return numero_du_titre(getattr(self, "title", None))
 
+    # Les trois dates suivent dates_de_l_acte, comme la page du texte
+    # (LawDetailResponse) et les textes nommes par un statut (TexteLie) : une
+    # liste et la page ne peuvent pas dater differemment le meme texte. Les deux
+    # Actes uniformes OHADA dont l'intitule ne date que la publication au
+    # Journal officiel affichaient ici « 15 nov. 2023 » comme date de l'acte, et
+    # null sur leur page.
     @computed_field(  # type: ignore[prop-decorator]
         description=(
             "Date de l'acte lue dans son intitule ; null quand l'intitule ne donne "
-            "que l'annee (voir `annee`)"
+            "que l'annee (voir `annee`) ou ne date que sa publication au Journal "
+            "officiel (voir `date_publication_jo`)"
         )
     )
     @property
     def date_signature(self) -> Optional[date]:
-        return date_du_texte(getattr(self, "publication_date", None), getattr(self, "title", None))
+        return self._dates().date_signature
 
     @computed_field(description="Annee de l'acte")  # type: ignore[prop-decorator]
     @property
     def annee(self) -> Optional[int]:
-        jour = getattr(self, "publication_date", None)
-        return jour.year if jour else None
+        return self._dates().annee
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Date de publication au Journal officiel, seulement quand l'intitule ne "
+            "donne que celle-la (« publié au Journal officiel de l'OHADA du … ») ; null sinon"
+        )
+    )
+    @property
+    def date_publication_jo(self) -> Optional[date]:
+        return self._dates().date_publication_jo
+
+    def _dates(self):
+        return dates_de_l_acte(
+            getattr(self, "publication_date", None), getattr(self, "title", None)
+        )
 
     @computed_field(  # type: ignore[prop-decorator]
         description=(

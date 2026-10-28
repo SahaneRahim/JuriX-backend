@@ -24,6 +24,8 @@ import re
 from datetime import date
 from typing import NamedTuple, Optional
 
+from app.utils.titre_officiel import date_du_texte
+
 # Le numero se lit AVANT l'objet de l'acte : « Décret N°82/241 du 24 juin 1982
 # modifiant […] du décret n°77/245 » porte deux numeros, et seul le premier est
 # le sien. Meme liste de verbes que scripts/ingest_corpus.py (_DEBUT_OBJET), qui
@@ -139,16 +141,17 @@ def dates_de_l_acte(jour: Optional[date], titre: Optional[str]) -> DatesDeLActe:
 
     Un 1er janvier que l'intitule ne mentionne pas est une date de
     remplissage : l'ingestion (_infer_date) l'ecrit quand l'intitule ne donne
-    ni jour ni mois. Seule l'annee est alors sure. Meme regle que
-    prompts._date_du_texte (un test verifie qu'elles s'accordent), et que les
-    lignes de liste de la recherche, ou `date_signature` vaut aussi None dans
-    ce cas.
+    ni jour ni mois. Seule l'annee est alors sure. La regle est UNE, celle de
+    titre_officiel.date_du_texte : la page d'un texte, ses lignes de liste
+    (app/schemas/reperes.py), les textes nommes par un statut, le chat et le
+    contexte du modele (prompts._date_du_texte) la partagent. Deux copies
+    avaient deja diverge (« janvier » ici, « janv » abrege la-bas).
     """
     if jour is None:
         return DatesDeLActe(None, None, None)
     if _PUBLIE_AU_JO.search(titre or ""):
         return DatesDeLActe(None, jour.year, jour)
-    if (jour.day, jour.month) == (1, 1) and "janvier" not in (titre or "").lower():
+    if date_du_texte(jour, titre) is None:
         return DatesDeLActe(None, jour.year, None)
     return DatesDeLActe(jour, jour.year, None)
 

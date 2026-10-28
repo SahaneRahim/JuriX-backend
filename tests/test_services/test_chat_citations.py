@@ -303,6 +303,39 @@ class TestCitationsDuFlux:
         assert len(fin["citations"]) == 3
 
     @pytest.mark.asyncio
+    async def test_une_date_de_remplissage_n_est_pas_montree(self, base, extraits):
+        """
+        `date_du_texte` suit la regle de la page du texte (date_signature) : le
+        1er janvier que l'ingestion ecrit faute de jour et de mois n'est pas
+        une date de l'acte. Le chat montrait « 2024-01-01 » partout ou la page
+        dit seulement « 2024 ».
+        """
+        avancement = "Décret N°2024/193 juin 10 portant avancement d'échelon"
+        extraits = [
+            *extraits[:2],
+            ChunkResult(
+                article_id=91, law_id=9, number="2", content="Le présent décret prend effet.",
+                reference="PRC-10017", law_title=avancement, publication_date=date(2024, 1, 1),
+                relevance_score=0.7,
+            ),
+        ]
+        service = _service(base, extraits, [
+            "Selon l'article 37 du Code du travail, l'indemnité est due.",
+        ])
+
+        evenements = await _evenements(service, _requete())
+
+        trouves = next(e["progression"] for e in evenements
+                       if e.get("progression", {}).get("etape") == "textes_trouves")
+        dates = {t["law_id"]: t["date_du_texte"] for t in trouves["textes"]}
+        assert dates == {3: "1992-08-14", 9: None}
+        fin = evenements[-1]
+        assert fin["citations"][0]["date_du_texte"] == "1992-08-14"
+        assert fin["articles_cites"][0]["date_du_texte"] == "1992-08-14"
+        consultes = {t["law_id"]: t["date_du_texte"] for t in fin["textes_consultes_non_cites"]}
+        assert consultes == {9: None}
+
+    @pytest.mark.asyncio
     async def test_la_source_de_repli_n_est_pas_une_citation(self, base, extraits):
         """
         `sources` garde la source de repli pour le front deploye ; les champs
