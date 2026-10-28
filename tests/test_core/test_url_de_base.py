@@ -98,3 +98,32 @@ def test_alembic_retire_la_chaine_de_requete():
         "alembic/env.py ne retire plus la chaine de requete : "
         "le conteneur ne demarrera pas avec une URL de pooler"
     )
+
+
+def test_les_blancs_autour_de_l_url_sont_retires():
+    """
+    Une URL collee dans le tableau de bord de l'hebergeur garde volontiers son
+    retour a la ligne final, qui finissait dans le nom de la base (7346ff5).
+    """
+    assert Settings(DATABASE_URL=f"  {BASE}\n").DATABASE_URL == BASE
+
+
+def test_le_moteur_synchrone_retire_la_chaine_de_requete():
+    """
+    Le meme piege qu'alembic/env.py, cote application : le pipeline et le cache
+    d'embeddings des documents passent par psycopg2, qui refusait l'URL du
+    pooler avant tout acces reseau — d'ou un cache qui n'a jamais atteint la
+    base de production.
+    """
+    import psycopg2
+    from psycopg2.extensions import parse_dsn
+
+    from app.core.database import url_synchrone
+
+    url = f"{BASE}?prepared_statement_cache_size=0"
+    with pytest.raises(psycopg2.ProgrammingError):
+        parse_dsn(url.replace("+asyncpg", ""))
+
+    synchrone = url_synchrone(url)
+    assert synchrone == "postgresql://user:motdepasse@hote.example:5432/base"
+    assert parse_dsn(synchrone)["dbname"] == "base"

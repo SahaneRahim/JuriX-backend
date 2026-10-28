@@ -121,6 +121,16 @@ class TestStartup:
         """Il ecrivait le jeton d'administration du WebSocket (?token=...) en clair."""
         assert "--no-access-log" in DOCKERFILE
 
+    def test_les_redirections_restent_en_https_derriere_le_proxy(self):
+        """
+        Sans ces options, uvicorn ne croit pas le X-Forwarded-Proto du proxy de
+        Railway : GET /api/v1/categories/ redirigeait vers http://, que le
+        proxy renvoyait vers https — deux detours, 3,45 s mesurees.
+        """
+        commande = DOCKERFILE[DOCKERFILE.index("CMD ["):]
+        assert "--proxy-headers" in commande
+        assert "--forwarded-allow-ips='*'" in commande
+
 
 class TestCouches:
 

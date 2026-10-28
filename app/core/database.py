@@ -192,7 +192,12 @@ AsyncSessionLocal = async_sessionmaker(
 # pg_stat_statements), et l'erreur etait avalee au niveau DEBUG. Rien d'utile
 # n'est perdu : le TLS se regle par PGSSLMODE, que libpq lit comme asyncpg, et
 # a defaut libpq tente TLS d'abord (sslmode=prefer).
-SYNC_DATABASE_URL = settings.DATABASE_URL.replace("+asyncpg", "").split("?", 1)[0]
+def url_synchrone(url: str) -> str:
+    """L'URL psycopg2 tiree de DATABASE_URL : schema asyncpg et chaine de requete retires."""
+    return url.replace("+asyncpg", "").split("?", 1)[0]
+
+
+SYNC_DATABASE_URL = url_synchrone(settings.DATABASE_URL)
 
 sync_engine = create_engine(
     SYNC_DATABASE_URL,

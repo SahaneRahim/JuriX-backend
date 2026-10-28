@@ -97,3 +97,33 @@ async def test_close_db_disposes_both_engines(monkeypatch):
     await database.close_db()
 
     assert disposed == {"async": True, "sync": True}
+
+
+def test_une_erreur_du_moteur_synchrone_est_signalee_une_fois(monkeypatch, caplog):
+    """
+    Une URL refusee par psycopg2 a coupe le cache d'embeddings en production
+    sans rien dire : l'erreur etait avalee au niveau DEBUG. Elle est signalee
+    une fois par cause, premiere ligne seulement, et jamais pour un sondage.
+    """
+    import logging
+
+    from app.core import database
+
+    monkeypatch.setattr(database, "_CAUSES_SIGNALEES", set())
+
+    class _Contexte:
+        def __init__(self, message, sondage=False):
+            self.is_pre_ping = sondage
+            self.original_exception = RuntimeError(message)
+
+    with caplog.at_level(logging.WARNING, logger="app.core.database"):
+        for _ in range(3):
+            database._signaler_une_fois(
+                _Contexte("invalid dsn: invalid URI query parameter\nDETAIL: valeur privee")
+            )
+        database._signaler_une_fois(_Contexte("server closed the connection", sondage=True))
+
+    assert caplog.text.count("Moteur synchrone (psycopg2) en echec") == 1
+    assert "invalid URI query parameter" in caplog.text
+    assert "valeur privee" not in caplog.text
+    assert "server closed" not in caplog.text
