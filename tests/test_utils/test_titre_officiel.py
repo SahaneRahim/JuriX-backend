@@ -13,6 +13,7 @@ deux verbes coordonnes).
 import json
 from datetime import date
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -380,3 +381,21 @@ def test_date_du_texte_garde_les_vraies_dates():
     assert date_du_texte(date(2020, 1, 1), "Décret N°2020/001 du 1er janvier 2020") == date(2020, 1, 1)
     assert date_du_texte(date(2020, 1, 1), "Décret N°2020/001 du 01 JANV. 2020") == date(2020, 1, 1)
     assert date_du_texte(None, "Décret sans date") is None
+
+
+def test_les_lectures_de_l_intitule_sont_memorisees():
+    """
+    Revue du 2026-10-28 : relues a chaque serialisation d'une ligne (166 µs et
+    85 µs par intitule), elles faisaient passer la liste de l'administration
+    (2 287 lignes) de 706 a 1 520 ms, dans la boucle d'evenements. Un
+    intitule n'est plus lu qu'une fois, et le cache tient le corpus entier.
+    """
+    titre = f"Décret N°2099/{uuid4().int % 1000:03d} du 3 mars 2099 portant essai {uuid4().hex}"
+    for lire in (objet_du_titre, numero_du_titre):
+        avant = lire.cache_info()
+        premiere, seconde = lire(titre), lire(titre)
+        apres = lire.cache_info()
+
+        assert premiere == seconde
+        assert (apres.misses - avant.misses, apres.hits - avant.hits) == (1, 1)
+        assert apres.maxsize >= 2287

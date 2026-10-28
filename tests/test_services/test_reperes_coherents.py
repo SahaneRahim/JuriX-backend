@@ -22,6 +22,7 @@ Fonctions pures et doublures : ni base, ni reseau.
 import json
 from datetime import date, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -33,7 +34,7 @@ from app.services.rag_service import _date_affichee
 from app.services.reperes_textes import dates_de_l_acte
 from app.services.statut_en_bref import statut_en_bref
 from app.services.statut_juridique import InfoTexte, construire_statut, texte_lie
-from app.utils.titre_officiel import numero_du_titre
+from app.utils.titre_officiel import numero_du_titre, objet_du_titre
 
 pytestmark = pytest.mark.unit
 
@@ -112,6 +113,25 @@ def test_le_modele_lit_l_annee_seule_quand_la_page_n_a_qu_elle(jour, titre):
     annee_seule = "jour non indiqué" in _date_du_texte(extrait)
 
     assert annee_seule == (dates.date_signature is None)
+
+
+def test_une_ligne_de_liste_lit_son_intitule_une_fois():
+    """
+    Revue du 2026-10-28 : chaque serialisation d'une ligne relisait son
+    intitule (objet, numero) et calculait trois fois ses dates, dans la boucle
+    d'evenements. Une ligne les calcule une fois ; un second affichage, plus
+    du tout.
+    """
+    titre = f"Décret N°2099/123 du 3 mars 2099 portant essai de mémorisation {uuid4().hex}"
+    ligne = _ligne(date(2099, 3, 3), titre)
+    lectures = (objet_du_titre, numero_du_titre, dates_de_l_acte)
+    avant = [lire.cache_info().misses for lire in lectures]
+
+    premiere, seconde = ligne.model_dump_json(), ligne.model_dump_json()
+
+    assert premiere == seconde
+    assert [lire.cache_info().misses - n for lire, n in zip(lectures, avant)] == [1, 1, 1]
+    assert ligne.objet == "Essai de mémorisation " + titre.rsplit(" ", 1)[-1]
 
 
 # ==================== NUMERO D'ACTE ====================

@@ -236,7 +236,11 @@ async def test_un_statut_en_echec_ne_prive_pas_du_texte(client, constitution, mo
 
 
 async def test_les_textes_lies_sont_lus_une_fois(client, constitution, compteur):
-    """Une requete pour les textes lies, gardee en memoire ; puis plus rien."""
+    """
+    Une requete pour les textes lies, gardee en memoire ; le statut aussi, tant
+    que les morceaux du texte sont les memes : ensuite, la loi et ses articles
+    seulement, comme avant le statut.
+    """
     loi = constitution["loi"]
 
     froid = await client.get(f"/api/v1/laws/{loi.id}")
@@ -245,7 +249,28 @@ async def test_les_textes_lies_sont_lus_une_fois(client, constitution, compteur)
     assert froid.json() == chaud.json()
     # Loi, articles, contenu des morceaux a repere (SECTION_2), textes lies.
     assert _instructions(froid) == 4
-    assert _instructions(chaud) == 3
+    assert _instructions(chaud) == 2
+
+
+async def test_un_nouveau_decoupage_recalcule_le_statut(client, constitution, db_session):
+    """
+    Le statut garde est celui de CES morceaux : un morceau ajoute (nouvelle
+    ingestion du texte) change l'empreinte, et la page marque le nouveau.
+    """
+    loi_id = constitution["loi"].id
+    avant = (await client.get(f"/api/v1/laws/{loi_id}")).json()["statut_juridique"]
+
+    db_session.add(Article(law_id=loi_id, number="14", content="(1) Le pouvoir législatif.",
+                           section="TITRE III", kind="article", order=10))
+    await db_session.commit()
+    # La session du test sert aussi l'API : sans cela, la loi deja chargee
+    # garderait sa liste d'articles d'avant (une requete reelle a sa session).
+    db_session.expire_all()
+    apres = (await client.get(f"/api/v1/laws/{loi_id}")).json()
+
+    [nouveau] = [a for a in apres["articles"] if a["number"] == "14"]
+    assert str(nouveau["id"]) not in avant["par_morceau"]
+    assert str(nouveau["id"]) in apres["statut_juridique"]["par_morceau"]
 
 
 # ==================== GET /laws/{id}/articles/{numero} ====================

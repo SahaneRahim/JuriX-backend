@@ -22,6 +22,7 @@ Fonctions pures, sans base : testables sur les intitules reels du corpus.
 
 import re
 from datetime import date
+from functools import lru_cache
 from typing import NamedTuple, Optional
 
 from app.utils.titre_officiel import date_du_texte
@@ -135,6 +136,7 @@ class DatesDeLActe(NamedTuple):
 _PUBLIE_AU_JO = re.compile(r"\bpubli[ée]e?s?\s+au\s+journal\s+officiel\b", re.IGNORECASE)
 
 
+@lru_cache(maxsize=4096)
 def dates_de_l_acte(jour: Optional[date], titre: Optional[str]) -> DatesDeLActe:
     """
     Les dates d'un acte d'apres `laws.publication_date` (`jour`) et son intitule.
@@ -146,6 +148,11 @@ def dates_de_l_acte(jour: Optional[date], titre: Optional[str]) -> DatesDeLActe:
     (app/schemas/reperes.py), les textes nommes par un statut, le chat et le
     contexte du modele (prompts._date_du_texte) la partagent. Deux copies
     avaient deja diverge (« janvier » ici, « janv » abrege la-bas).
+
+    Memorisee, comme la lecture de l'intitule (titre_officiel) : une ligne de
+    liste en lit trois champs (date_signature, annee, date_publication_jo), et
+    chacun l'appelait. Elle n'est plus calculee qu'une fois par ligne, et plus
+    du tout au second affichage. Le resultat est un tuple, que nul ne modifie.
     """
     if jour is None:
         return DatesDeLActe(None, None, None)

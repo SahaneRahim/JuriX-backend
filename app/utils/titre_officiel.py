@@ -18,12 +18,25 @@ client affiche alors l'intitule entier. Les regles ont ete eprouvees sur les
 2 287 intitules de la base de developpement (voir les tests).
 
 Fonctions pures, sans base ni reseau : appelees pour chaque ligne d'une liste.
+
+MEMORISEES. `objet_du_titre` (166 µs par intitule) et `numero_du_titre`
+(85 µs) sont recalculees a chaque serialisation d'une ligne, dans la boucle
+d'evenements : la liste de l'administration (2 287 lignes) passait de 706 a
+1 520 ms, et bloquait d'autant les flux du chat et les recherches en cours sur
+le processus unique de Railway (revue du 2026-10-28). Fonctions pures d'une
+chaine : 4 096 entrees couvrent tout le corpus, et seul le premier affichage
+d'un intitule paie la lecture.
 """
 
 import re
 import unicodedata
 from datetime import date
+from functools import lru_cache
 from typing import Optional
+
+# Plus que les 2 287 intitules de la base : une liste entiere tient dans le
+# cache, sans eviction d'une ligne a l'autre.
+_INTITULES_MEMORISES = 4096
 
 # ==================== NORMALISATION ====================
 
@@ -153,6 +166,7 @@ _NUMERO = re.compile(
 )
 
 
+@lru_cache(maxsize=_INTITULES_MEMORISES)
 def numero_du_titre(titre: Optional[str]) -> Optional[str]:
     """
     Le numero de l'acte tel que l'intitule l'ecrit : « 2018/763 »,
@@ -432,6 +446,7 @@ def _nominaliser(nom: str, reste: str) -> Optional[str]:
     return f"{nom} " + _de(reste)
 
 
+@lru_cache(maxsize=_INTITULES_MEMORISES)
 def objet_du_titre(titre: Optional[str]) -> Optional[str]:
     """
     L'objet d'un texte, tire de son intitule officiel : « Décret N°2018/763 du

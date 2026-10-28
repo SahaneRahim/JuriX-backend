@@ -540,10 +540,41 @@ _DUREE_CACHE_S = 600.0
 _cache_infos: Optional[Tuple[float, Dict[str, InfoTexte]]] = None
 
 
+class _StatutGarde(NamedTuple):
+    infos: Dict[str, InfoTexte]
+    """Les textes lies dont il est tire : d'autres infos, et il est recalcule."""
+    empreinte: int
+    statut: StatutJuridique
+
+
+# Le statut de la page d'un texte lie, par reference (une soixantaine au plus).
+# POURQUOI. Le Code civil (2 134 morceaux, 29 liens) coutait 27 ms de calcul a
+# chaque affichage, dans la boucle d'evenements, et surtout des milliers
+# d'objets vivants le temps de la requete : le ramasse-miettes passait deux
+# fois plus souvent, et la mediane de GET /laws/2285 etait passee de 62 a
+# 162 ms (mesure du 2026-10-28). Le statut ne depend que du releve (constant),
+# des textes lies (`infos`, gardes dix minutes) et des morceaux du texte : il
+# est garde tant que ces deux-la n'ont pas change.
+_cache_statuts: Dict[str, _StatutGarde] = {}
+
+
 def invalider_cache_statut() -> None:
-    """Oublie les textes lies en cache : la prochaine lecture repasse par la base."""
+    """Oublie les textes lies et les statuts en cache : la prochaine lecture repasse par la base."""
     global _cache_infos
     _cache_infos = None
+    _cache_statuts.clear()
+
+
+def _empreinte(articles: Sequence) -> int:
+    """
+    Les morceaux tels que le statut les lit (id, numero, section) : un nouveau
+    decoupage du texte change l'empreinte, et le statut est recalcule. Sans
+    tuple de 2 134 elements : chaque etape est liberee aussitot.
+    """
+    empreinte = len(articles)
+    for article in articles:
+        empreinte = hash((empreinte, article.id, article.number, article.section))
+    return empreinte
 
 
 def _references_liees() -> List[str]:
@@ -628,7 +659,9 @@ async def contenus_a_lire(
     contenus = dict(
         (await db.execute(select(Article.id, Article.content).where(Article.id.in_(a_lire)))).all()
     )
-    return [m._replace(contenu=contenus.get(m.id, m.contenu)) for m in morceaux]
+    # Seuls les morceaux lus changent : recopier les 2 134 du Code civil pour en
+    # completer une poignee creait autant d'objets pour rien.
+    return [m._replace(contenu=contenus[m.id]) if m.id in contenus else m for m in morceaux]
 
 
 async def statut_du_texte(
@@ -637,13 +670,23 @@ async def statut_du_texte(
     """
     Le statut d'un texte pour GET /laws/{id}. `articles` : ses lignes `articles`
     (id, number, section), deja chargees pour le sommaire.
+
+    Garde en memoire tant que les textes lies et les morceaux du texte sont les
+    memes (voir _cache_statuts) ; le statut rendu est partage : ne pas le
+    modifier.
     """
     if not reference_liee(reference):
         return construire_statut(reference, {})
     infos = await infos_des_textes_lies(db)
+    empreinte = _empreinte(articles)
+    garde = _cache_statuts.get(reference)
+    if garde is not None and garde.infos is infos and garde.empreinte == empreinte:
+        return garde.statut
     morceaux = [MorceauDuTexte(a.id, a.number, a.section) for a in articles]
     morceaux = await contenus_a_lire(db, reference, morceaux)
-    return construire_statut(reference, infos, morceaux)
+    statut = construire_statut(reference, infos, morceaux)
+    _cache_statuts[reference] = _StatutGarde(infos, empreinte, statut)
+    return statut
 
 
 async def statut_d_un_article(

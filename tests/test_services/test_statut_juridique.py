@@ -15,6 +15,7 @@ Usage:
 
 import re
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 
@@ -448,3 +449,90 @@ def test_le_regime_foncier_en_base_est_consolide():
     integres = [t.numero for t in statut.version_en_base.textes_integres]
     assert integres == ["77/1", "80-21"]
     assert statut.etat == "modifie", "la loi 83-19 n'est pas integree au texte en base"
+
+
+# ==================== STATUT GARDE EN MEMOIRE ====================
+
+class TestStatutGarde:
+    """
+    Le statut d'un texte lie est garde tant que les textes lies et les morceaux
+    du texte sont les memes : le Code civil (2 134 morceaux, 29 liens) coutait
+    27 ms et des milliers d'objets a chaque affichage de sa page, et la
+    mediane de GET /laws/2285 etait passee de 62 a 162 ms (revue du
+    2026-10-28). Aucune base : les lectures sont doublees.
+    """
+
+    @pytest.fixture
+    def calculs(self, monkeypatch):
+        from app.services import statut_juridique as module
+
+        textes_lies = {"courants": dict(INFOS)}
+
+        async def infos(db):
+            return textes_lies["courants"]
+
+        async def contenus(db, reference, morceaux):
+            return list(morceaux)
+
+        appels = []
+        construire = module.construire_statut
+
+        def compter(*args, **kwargs):
+            appels.append(args[0])
+            return construire(*args, **kwargs)
+
+        monkeypatch.setattr(module, "infos_des_textes_lies", infos)
+        monkeypatch.setattr(module, "contenus_a_lire", contenus)
+        monkeypatch.setattr(module, "construire_statut", compter)
+        module.invalider_cache_statut()
+        yield appels, textes_lies
+        module.invalider_cache_statut()
+
+    @staticmethod
+    def _articles(*numeros, depuis=100):
+        """Des lignes `articles` comme les charge la page (id, number, section)."""
+        return [
+            SimpleNamespace(id=depuis + rang, number=numero, section=None)
+            for rang, numero in enumerate(numeros)
+        ]
+
+    @pytest.mark.asyncio
+    async def test_un_second_affichage_ne_recalcule_rien(self, calculs):
+        from app.services.statut_juridique import statut_du_texte
+
+        appels, _ = calculs
+        articles = self._articles("5", "6", "53")
+
+        premier = await statut_du_texte(None, "PRC-6283", articles)
+        second = await statut_du_texte(None, "PRC-6283", list(articles))
+
+        assert second is premier and appels == ["PRC-6283"]
+
+    @pytest.mark.asyncio
+    async def test_un_decoupage_d_autres_textes_lies_ou_une_invalidation_recalculent(self, calculs):
+        from app.services.statut_juridique import invalider_cache_statut, statut_du_texte
+
+        appels, textes_lies = calculs
+        articles = self._articles("5", "6", "53")
+        await statut_du_texte(None, "PRC-6283", articles)
+
+        # Un morceau de plus (nouvelle ingestion) : autre empreinte.
+        await statut_du_texte(None, "PRC-6283", articles + self._articles("14", depuis=200))
+        # Les textes lies relus (dix minutes passees) : un autre dictionnaire.
+        textes_lies["courants"] = dict(INFOS)
+        await statut_du_texte(None, "PRC-6283", articles)
+        # Un texte publie, archive ou supprime par l'administration.
+        invalider_cache_statut()
+        await statut_du_texte(None, "PRC-6283", articles)
+
+        assert len(appels) == 4
+
+    @pytest.mark.asyncio
+    async def test_un_texte_sans_lien_ne_garde_rien(self, calculs):
+        """Rien a lire ni a garder : son statut ne coute deja aucune requete."""
+        from app.services import statut_juridique as module
+
+        statut = await module.statut_du_texte(None, "PRC-292", self._articles("1"))
+
+        assert statut.etat == "aucune_modification_connue"
+        assert "PRC-292" not in module._cache_statuts
