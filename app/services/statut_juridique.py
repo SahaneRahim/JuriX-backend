@@ -325,6 +325,15 @@ def _etendue(lien: Lien) -> str:
     return "texte"
 
 
+def vise_le_texte_entier(lien: Lien) -> bool:
+    """
+    Le lien porte-t-il sur tout le texte (etendue « texte ») ? Public : le
+    statut en bref des lignes de liste (statut_en_bref) ne dit un texte abroge
+    ou remplace que si sa page le dit, avec la meme regle.
+    """
+    return _etendue(lien) == "texte"
+
+
 def cle_article(designation: Optional[str]) -> Optional[str]:
     """
     Cle de `par_article` : le numero normalise comme le fait le front

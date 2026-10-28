@@ -172,6 +172,17 @@ def _actuels(statut):
     return [c for c in statut.modifie_par if not c.depasse and not c.integre_au_texte]
 
 
+def _nature_en_liste(changement):
+    """
+    Ce que la page montre, dit comme la ligne : une abrogation ou un
+    remplacement qui ne vise pas tout le texte (etendue « articles » ou
+    « inconnue ») s'y lit « en partie ».
+    """
+    if changement.type in ("abroge", "remplace") and changement.etendue != "texte":
+        return f"{changement.type}_partiellement"
+    return changement.type
+
+
 @pytest.mark.parametrize("reference", sorted({lien.texte for lien in LIENS}))
 def test_la_ligne_de_liste_resume_ce_que_la_page_dit_actuel(reference):
     """Pour chaque texte du releve : meme abrogation, memes textes, memes natures."""
@@ -181,7 +192,7 @@ def test_la_ligne_de_liste_resume_ce_que_la_page_dit_actuel(reference):
     par_nature = {}
     for changement in actuels:
         qui = changement.texte.reference or changement.texte.titre
-        par_nature.setdefault(changement.type, set()).add(qui)
+        par_nature.setdefault(_nature_en_liste(changement), set()).add(qui)
 
     assert bref is not None
     assert bref.abroge == statut.abroge
