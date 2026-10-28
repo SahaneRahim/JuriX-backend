@@ -17,7 +17,9 @@ Date: 2026-01-10
 from datetime import date
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.schemas.reperes import ReperesDuTexte
 
 # ============================================================================
 # Filter Schemas
@@ -97,6 +99,40 @@ class SearchFilters(BaseModel):
         return v
 
 
+class SearchRefine(BaseModel):
+    """
+    Filtres appliques a l'ENSEMBLE CANDIDAT d'une requete, apres le classement
+    et avant la pagination (voir app/services/recherche_affinee.py).
+
+    A ne pas confondre avec SearchFilters, dont les filtres entrent dans le SQL
+    de chaque branche et delimitent l'ensemble lui-meme. Ceux-ci le
+    restreignent sans le recalculer : leurs resultats sont exactement ceux que
+    comptent les effectifs (`facets`) de la meme requete.
+    """
+
+    types: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Natures retenues, valeurs de `type` (« décret », « loi », « arrêté », "
+            "« acte uniforme »…). Accents, casse, « _ » et « - » ignores : "
+            "« decret » et « acte_uniforme » conviennent."
+        ),
+    )
+    category_ids: Optional[List[int]] = Field(None, description="Domaines retenus (ids)")
+    year_from: Optional[int] = Field(None, ge=1900, le=2100, description="Annee minimale du texte")
+    year_to: Optional[int] = Field(None, ge=1900, le=2100, description="Annee maximale du texte")
+    date_from: Optional[date] = Field(None, description="Date minimale du texte (incluse)")
+    date_to: Optional[date] = Field(None, description="Date maximale du texte (incluse)")
+
+    @model_validator(mode="after")
+    def _bornes_ordonnees(self) -> "SearchRefine":
+        if self.year_from is not None and self.year_to is not None and self.year_to < self.year_from:
+            raise ValueError(f"year_to ({self.year_to}) must be >= year_from ({self.year_from})")
+        if self.date_from is not None and self.date_to is not None and self.date_to < self.date_from:
+            raise ValueError(f"date_to ({self.date_to}) must be >= date_from ({self.date_from})")
+        return self
+
+
 # ============================================================================
 # Request Schemas
 # ============================================================================
@@ -145,6 +181,30 @@ class SearchRequest(BaseModel):
         ge=0,
         description="Number of results to skip (for pagination)"
     )
+    # Les trois champs suivants sont ADDITIFS et facultatifs. Sans aucun d'eux,
+    # la recherche suit le parcours classique, a l'identique : le front deja
+    # deploye, le chat et la comparaison n'en envoient jamais. Avec l'un d'eux,
+    # elle passe par la recherche affinee (ensemble candidat fixe, filtres puis
+    # tri puis page, effectifs) : voir app/services/recherche_affinee.py.
+    sort: Optional[Literal["pertinence", "date_desc", "date_asc"]] = Field(
+        None,
+        description=(
+            "Tri de l'ensemble filtre : pertinence (defaut), date_desc ou date_asc. "
+            "Les textes sans date passent en dernier."
+        ),
+    )
+    refine: Optional[SearchRefine] = Field(
+        None,
+        description="Filtres sur l'ensemble candidat, avant la pagination, coherents avec `facets`",
+    )
+    facets: bool = Field(
+        False,
+        description="Rendre les effectifs par nature, domaine et annee (recherche affinee)",
+    )
+
+    def recherche_affinee(self) -> bool:
+        """Vrai si l'appelant a envoye l'un des parametres de la recherche affinee."""
+        return self.sort is not None or self.refine is not None or self.facets
 
     @field_validator("semantic_query", mode="before")
     @classmethod
@@ -335,6 +395,45 @@ class SearchResult(BaseModel):
         from_attributes = True
 
 
+# ============================================================================
+# Effectifs de la recherche affinee
+# ============================================================================
+
+
+class FacetteValeur(BaseModel):
+    """Une nature et son effectif : « décret », 77."""
+
+    value: str = Field(..., description="Valeur de `type`, telle qu'en base")
+    count: int = Field(..., ge=1, description="Resultats de cette nature")
+
+
+class FacetteCategorie(BaseModel):
+    """Un domaine et son effectif."""
+
+    id: Optional[int] = Field(None, description="Id du domaine ; null : sans domaine")
+    name: Optional[str] = Field(None, description="Nom du domaine, tel qu'en base")
+    count: int = Field(..., ge=1, description="Resultats de ce domaine")
+
+
+class FacetteAnnee(BaseModel):
+    """Une annee et son effectif."""
+
+    value: Optional[int] = Field(None, description="Annee du texte ; null : sans date")
+    count: int = Field(..., ge=1, description="Resultats de cette annee")
+
+
+class SearchFacets(BaseModel):
+    """
+    Effectifs sur l'ensemble candidat de la requete. Chaque facette compte les
+    resultats qui passent tous les filtres de `refine` SAUF le sien (facettes
+    disjonctives) ; une valeur absente a un effectif nul.
+    """
+
+    types: List[FacetteValeur] = Field(default_factory=list)
+    categories: List[FacetteCategorie] = Field(default_factory=list)
+    years: List[FacetteAnnee] = Field(default_factory=list)
+
+
 class SearchResponse(BaseModel):
     """
     Complete search response with results and metadata.
@@ -387,6 +486,20 @@ class SearchResponse(BaseModel):
         default_factory=list,
         description="Resultats au niveau chunk (article), ordonnes par pertinence"
     )
+    # Champs de la recherche affinee, ADDITIFS et en dernier comme `chunks` :
+    # null sur le parcours classique. `total` y compte alors les resultats
+    # filtres, ceux que la pagination parcourt.
+    sort: Optional[str] = Field(
+        None, description="Tri applique (recherche affinee) ; null sur le parcours classique"
+    )
+    candidates: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Taille de l'ensemble candidat avant les filtres de `refine` (recherche affinee)",
+    )
+    facets: Optional[SearchFacets] = Field(
+        None, description="Effectifs par nature, domaine et annee (recherche affinee)"
+    )
 
     class Config:
         json_schema_extra = {
@@ -432,10 +545,13 @@ class SearchResponse(BaseModel):
 APERCU_CONTENU_CARACTERES = 300
 
 
-class SearchResultPublic(SearchResult):
+class SearchResultPublic(SearchResult, ReperesDuTexte):
     """
     Un resultat tel que POST /api/v1/search le renvoie : `content` reduit a un
-    apercu, tout le reste tel quel.
+    apercu, tout le reste tel quel, et les reperes d'une ligne de liste dense
+    (objet, numero, date_signature, annee, statut : voir app/schemas/reperes.py),
+    sur les deux parcours, classique et affine. Ce sont des champs de plus, que
+    le front deja deploye ignore.
 
     `content` portait le texte INTEGRAL de l'article, ou de la loi entiere pour
     une ligne niveau loi : mesure, 7,13 M de caracteres sur une reponse de
@@ -481,6 +597,17 @@ class SearchResponsePublic(BaseModel):
     )
     direct_navigation: bool = Field(
         False, description="If true, client should redirect directly to the document"
+    )
+    sort: Optional[str] = Field(
+        None, description="Tri applique (recherche affinee) ; null sur le parcours classique"
+    )
+    candidates: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Taille de l'ensemble candidat avant les filtres de `refine` (recherche affinee)",
+    )
+    facets: Optional[SearchFacets] = Field(
+        None, description="Effectifs par nature, domaine et annee (recherche affinee)"
     )
 
     @classmethod
