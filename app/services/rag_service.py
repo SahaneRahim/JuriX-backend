@@ -473,6 +473,8 @@ class RAGService:
         if self.llm is None:
             raise RAGServiceError(MESSAGE_LLM_ABSENT)
 
+        await self._valider_avant_la_generation()
+
         # 1000 jetons ne suffisent pas a un modele a raisonnement : la
         # reflexion consomme le budget avant la reponse, et ce qui remonte est
         # un morceau de monologue interne. Observe sur une question de suivi,
@@ -705,6 +707,8 @@ class RAGService:
                     error=MESSAGE_LLM_ABSENT,
                 ).model_dump_json(exclude_none=True)
                 return
+
+            await self._valider_avant_la_generation()
 
             answer_parts = []
             raison = {}
@@ -1511,6 +1515,24 @@ class RAGService:
             score += 0.05
 
         return round(min(score, 1.0), 2)
+
+    async def _valider_avant_la_generation(self) -> None:
+        """
+        Valide la transaction en cours, et rend sa connexion au pool, avant
+        d'appeler le modele.
+
+        POURQUOI. La recherche validait jusqu'ici la transaction de cette
+        session a chaque question : son journal y faisait un COMMIT. La
+        conversation creee etait donc enregistree, et la connexion rendue,
+        avant la generation. Le journal part desormais sur sa propre connexion
+        (search_service._ecrire_apres_la_reponse) : sans ce COMMIT, la
+        transaction ouverte au chargement de la conversation restait ouverte
+        pendant toute la generation, plusieurs secondes, parfois une minute.
+        Chaque chat en cours tenait une des dix connexions du pool — et une
+        connexion serveur derriere le pooler de Neon, en mode transaction —, et
+        un echec de la generation annulait la conversation creee.
+        """
+        await self.db.commit()
 
     async def _save_interaction(
         self,

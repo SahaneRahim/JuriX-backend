@@ -365,7 +365,9 @@ class TestCoreFunctionality:
 
         # Verify database operations
         assert mock_db_session.add.call_count >= 2  # Conversation + 2 messages
-        mock_db_session.commit.assert_called_once()
+        # Deux COMMIT : avant la generation (la conversation est enregistree et
+        # la connexion rendue au pool), puis a l'enregistrement des messages.
+        assert mock_db_session.commit.await_count == 2
 
 
 # ==================== TESTS CONTEXT RETRIEVAL ====================
@@ -1297,3 +1299,96 @@ class TestUnProfilParConversation:
         assert sum(isinstance(objet, Conversation) for objet in ajoutees) == 1
         assert "Consultez un avocat" not in reponse.answer
         assert reponse.persona == "avocat"
+
+
+# ==================== AUCUNE TRANSACTION PENDANT LA GENERATION ====================
+
+class TestTransactionPendantLaGeneration:
+    """
+    La generation dure de quelques secondes a une minute. La recherche
+    validait la transaction du chat a chaque question (son journal y faisait
+    un COMMIT) ; ses ecritures partent desormais sur leur propre connexion.
+    Rien ne doit pour autant rester ouvert pendant la generation : une
+    connexion du pool tenue par chat en cours, et une conversation annulee
+    si la generation echoue.
+    """
+
+    @staticmethod
+    def _service(db_session, pg_engine, chunks, vu):
+        from sqlalchemy import text
+
+        service = RAGService(db_session)
+        service.search_service = AsyncMock()
+        service.search_service.search = AsyncMock(
+            return_value=MagicMock(chunks=chunks, results=[], search_time_ms=1)
+        )
+
+        async def _noter_l_etat():
+            # Vu d'une AUTRE connexion : la conversation est-elle validee ?
+            async with pg_engine.connect() as autre:
+                conversations = (
+                    await autre.execute(text("SELECT count(*) FROM conversations"))
+                ).scalar()
+            vu.append((db_session.in_transaction(), conversations))
+
+        return service, _noter_l_etat
+
+    @pytest.mark.asyncio
+    async def test_ask_valide_la_conversation_avant_de_generer(
+        self, db_session, pg_engine, mock_search_results, sample_rag_request
+    ):
+        vu = []
+        service, noter = self._service(db_session, pg_engine, mock_search_results, vu)
+
+        async def _generer(**kwargs):
+            await noter()
+            return {"response": "Selon l'article 161, les dirigeants sont responsables."}
+
+        service.llm = MagicMock()
+        service.llm.generate = _generer
+
+        await service.ask(sample_rag_request)
+
+        assert vu == [(False, 1)]
+
+    @pytest.mark.asyncio
+    async def test_le_flux_valide_la_conversation_avant_de_generer(
+        self, db_session, pg_engine, mock_search_results, sample_rag_request
+    ):
+        vu = []
+        service, noter = self._service(db_session, pg_engine, mock_search_results, vu)
+
+        async def _flux(**kwargs):
+            await noter()
+            yield "Selon l'article 161, les dirigeants sont responsables."
+
+        service.llm = MagicMock()
+        service.llm.generate_stream = _flux
+
+        morceaux = [m async for m in service.ask_stream(sample_rag_request)]
+
+        assert vu == [(False, 1)]
+        assert '"done":true' in morceaux[-1].replace(" ", "")
+
+    @pytest.mark.asyncio
+    async def test_une_generation_en_echec_garde_la_conversation(
+        self, db_session, pg_engine, mock_search_results, sample_rag_request
+    ):
+        """Le comportement d'avant les ecritures differees, documente dans ask_stream."""
+        from sqlalchemy import text
+
+        service, _ = self._service(db_session, pg_engine, mock_search_results, [])
+
+        async def _panne(**kwargs):
+            raise RuntimeError("generation interrompue")
+            yield  # pragma: no cover - generateur
+
+        service.llm = MagicMock()
+        service.llm.generate_stream = _panne
+
+        morceaux = [m async for m in service.ask_stream(sample_rag_request)]
+        await db_session.rollback()
+
+        assert '"error"' in morceaux[-1]
+        async with pg_engine.connect() as autre:
+            assert (await autre.execute(text("SELECT count(*) FROM conversations"))).scalar() == 1
