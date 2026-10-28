@@ -292,9 +292,13 @@ _SUITES = frozenset({
     "notamment", "toutefois", "cependant", "néanmoins", "pour", "selon", "afin", "dans",
     "avec", "sans", "sous", "entre", "contre", "depuis", "pendant", "après", "avant",
     "lors", "il", "elle", "ils", "elles", "on",
+    # Jamais dans le nom d'un texte : « l'article 312 du Code pénal ne
+    # s'applique pas » soulignait « Code pénal ne ».
+    "ne", "se", "y", "lui", "leur",
     "provides", "states", "says", "sets", "requires", "prohibits", "allows", "is", "are",
     "was", "were", "may", "shall", "must", "can", "which", "that", "where", "when", "if",
-    "who", "under", "for", "with", "as",
+    "who", "under", "for", "with", "as", "does", "do", "did", "has", "have", "will",
+    "would", "should", "could", "not", "also",
 })
 _ELISIONS_DE_SUITE = frozenset({"qu", "s", "n"})  # « qu'il », « s'applique », « n'est »
 _MOTS_DU_NOM_AU_PLUS = 12

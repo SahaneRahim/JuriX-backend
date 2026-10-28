@@ -362,6 +362,8 @@ class TestNoms:
             "Acte uniforme relatif au droit commercial général"
         )),
         ("Code de la famille de", "Code de la famille"),
+        ("Code pénal ne s'applique pas", "Code pénal"),
+        ("Labour Code does not apply", "Labour Code"),
     ])
     def test_etendue_d_un_nom_inconnu(self, mention, nom):
         assert mention[:etendue_du_nom(mention)] == nom
