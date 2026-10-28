@@ -543,42 +543,39 @@ class TestEcheance:
         assert not lent.fils[-1].startswith("embed-question")
 
     @pytest.mark.asyncio
-    async def test_une_question_deja_en_cache_ne_passe_pas_par_les_fils_dedies(self, monkeypatch):
+    async def test_une_question_deja_vue_ne_passe_ni_par_un_fil_ni_par_le_fournisseur(
+        self, monkeypatch, faux
+    ):
         """
         Quand le fournisseur ne repond plus, ses appels occupent les fils
-        dedies : une question deja vectorisee ne doit pas attendre derriere.
+        dedies : une question deja vectorisee est servie dans la boucle, par
+        le cache en memoire, sans attendre derriere eux.
         """
-        fournisseur = VoyageProvider(api_key=CLE)
-        service = EmbeddingService(use_cache=False, provider=fournisseur)
-        service.use_cache = True
-        attendu = np.ones(DIM, dtype=np.float32) / np.sqrt(DIM)
-        lectures = []
+        doublure = faux()
+        service = EmbeddingService(use_cache=True, provider=VoyageProvider(api_key=CLE))
 
-        def _depuis_le_cache(cle):
-            lectures.append(threading.current_thread().name)
-            return attendu
+        premier = await service.generate_embedding_async("question deja posee", task_type=QUERY)
 
-        monkeypatch.setattr(service, "_get_from_pg_cache", _depuis_le_cache)
-        monkeypatch.setattr(fournisseur, "embed", lambda *a: pytest.fail("aucun appel attendu"))
+        class _AucunFil:
+            def submit(self, *a, **k):
+                raise AssertionError("une question deja vue est partie sur un fil")
 
-        v = await service.generate_embedding_async("question deja posee", task_type=QUERY)
+        monkeypatch.setattr(module, "_EXECUTEUR_QUESTIONS", _AucunFil())
+        second = await service.generate_embedding_async("question deja posee", task_type=QUERY)
 
-        np.testing.assert_array_equal(v, attendu)
-        # Sur les fils du cache : ni la boucle (psycopg2 la gelerait), ni ceux
-        # des appels au fournisseur.
-        assert lectures == [lectures[0]] and lectures[0].startswith("embed-cache")
+        np.testing.assert_array_equal(second, premier)
+        assert len(doublure.requetes) == 1
         # Servie par le cache : elle ne dit rien du fournisseur.
-        assert suivi_semantique.etat()["appels"] == 0
+        assert suivi_semantique.etat()["appels"] == 1
 
     @pytest.mark.asyncio
-    async def test_une_question_en_cache_passe_meme_fils_des_questions_bloques(self, monkeypatch):
+    async def test_une_question_deja_vue_passe_meme_fils_des_questions_bloques(self):
         """Voyage ne repond plus : ses appels tiennent les quatre fils des questions."""
         lent = _Lent(delai=0.5, sommeil=2.0)
         service = EmbeddingService(use_cache=False, provider=lent)
         service.use_cache = True
         attendu = np.ones(DIM, dtype=np.float32) / np.sqrt(DIM)
-        cle_connue = service._cache_key("deja posee", QUERY)
-        monkeypatch.setattr(service, "_get_from_pg_cache", lambda cle: attendu if cle == cle_connue else None)
+        service._vecteurs_questions.garder(service._cache_key("deja posee", QUERY), attendu)
 
         bloquees = [
             asyncio.create_task(service.generate_embedding_async(f"nouvelle {i}", task_type=QUERY))
@@ -595,19 +592,116 @@ class TestEcheance:
                 await tache
 
     @pytest.mark.asyncio
-    async def test_une_question_nouvelle_ne_lit_le_cache_qu_une_fois(self, monkeypatch, faux):
-        faux()
+    async def test_une_question_nouvelle_est_gardee_en_lecture_seule(self, faux):
+        """
+        Un appelant qui ecrirait dans le vecteur rendu corromprait la question
+        suivante : il recoit une erreur a la place.
+        """
+        doublure = faux()
+        service = EmbeddingService(use_cache=True, provider=VoyageProvider(api_key=CLE))
+
+        v = await service.generate_embedding_async("question nouvelle", task_type=QUERY)
+
+        assert len(doublure.requetes) == 1
+        assert len(service._vecteurs_questions) == 1
+        with pytest.raises(ValueError):
+            v[0] = 1.0
+        assert float(np.linalg.norm(v)) == pytest.approx(1.0, abs=1e-5)
+
+    @pytest.mark.asyncio
+    async def test_un_echec_du_fournisseur_n_est_pas_garde(self, faux):
+        """Une panne passagere ne doit pas condamner la question suivante."""
+        doublure = faux(reponse=_refus(503, "Service indisponible"))
+        service = EmbeddingService(use_cache=True, provider=VoyageProvider(api_key=CLE))
+
+        with pytest.raises(EmbeddingServiceError):
+            await service.generate_embedding_async("question", task_type=QUERY)
+        doublure.reponse = None
+        await service.generate_embedding_async("question", task_type=QUERY)
+
+        assert len(doublure.requetes) == 2
+        assert len(service._vecteurs_questions) == 1
+
+    @pytest.mark.asyncio
+    async def test_un_document_ne_passe_pas_par_le_cache_des_questions(self, faux, monkeypatch):
+        doublure = faux()
+        service = EmbeddingService(use_cache=True, provider=VoyageProvider(api_key=CLE))
+        # Le cache des DOCUMENTS (table embedding_cache, psycopg2) est hors sujet ici.
+        monkeypatch.setattr(service, "_get_from_pg_cache", lambda cle: None)
+        monkeypatch.setattr(service, "_store_in_pg_cache", lambda cle, v: None)
+
+        for _ in range(2):
+            await service.generate_embedding_async("article 1", task_type=DOCUMENT)
+
+        assert len(doublure.requetes) == 2
+        assert len(service._vecteurs_questions) == 0
+
+    @pytest.mark.asyncio
+    async def test_sans_cache_chaque_question_part_au_fournisseur(self, faux):
+        doublure = faux()
         service = EmbeddingService(use_cache=False, provider=VoyageProvider(api_key=CLE))
-        service.use_cache = True
-        lectures, ecritures = [], []
-        monkeypatch.setattr(service, "_get_from_pg_cache", lambda cle: lectures.append(cle))
-        monkeypatch.setattr(service, "_store_in_pg_cache", lambda cle, v: ecritures.append(cle))
 
-        await service.generate_embedding_async("question nouvelle", task_type=QUERY)
-        module._EXECUTEUR_CACHE.submit(lambda: None).result(timeout=5)
+        for _ in range(2):
+            await service.generate_embedding_async("question", task_type=QUERY)
 
-        assert len(lectures) == 1
-        assert ecritures == lectures
+        assert len(doublure.requetes) == 2
+        assert len(service._vecteurs_questions) == 0
+
+
+class TestVecteursRecents:
+    """Le cache en memoire des vecteurs de questions (_VecteursRecents)."""
+
+    def test_la_cle_suit_le_modele_la_dimension_et_le_texte_au_blanc_pres(self, monkeypatch):
+        """
+        Un vecteur d'un autre modele ou d'une autre dimension, resservi, serait
+        d'apparence saine et dans un autre espace. La casse compte : le
+        francais juridique la porte.
+        """
+        service = EmbeddingService(use_cache=True, provider=VoyageProvider(api_key=CLE))
+        cle = service._cache_key("Article PREMIER", QUERY)
+
+        assert service._cache_key("  Article PREMIER \n", QUERY) == cle
+        assert service._cache_key("article premier", QUERY) != cle
+        assert service._cache_key("Article PREMIER", DOCUMENT) != cle
+
+        monkeypatch.setattr(settings, "VOYAGE_EMBEDDING_MODEL", "voyage-4-lite")
+        autre_modele = EmbeddingService(use_cache=True, provider=VoyageProvider(api_key=CLE))
+        assert autre_modele._cache_key("Article PREMIER", QUERY) != cle
+
+        service.EMBEDDING_DIM = 512
+        assert service._cache_key("Article PREMIER", QUERY) != cle
+
+    def test_la_taille_est_bornee_et_l_ordre_est_celui_des_lectures(self):
+        """LRU et non FIFO : une question relue reste, la plus ancienne part."""
+        from app.services.embedding_service import _VecteursRecents
+
+        recents = _VecteursRecents(3)
+        for cle in ("a", "b", "c"):
+            recents.garder(cle, np.zeros(4, dtype=np.float32))
+        assert recents.lire("a") is not None
+        recents.garder("d", np.zeros(4, dtype=np.float32))
+
+        assert len(recents) == 3
+        assert recents.lire("b") is None
+        assert all(recents.lire(cle) is not None for cle in ("a", "c", "d"))
+
+    def test_un_service_garde_au_plus_512_questions(self):
+        service = EmbeddingService(use_cache=True, provider=VoyageProvider(api_key=CLE))
+
+        assert module.VECTEURS_QUESTIONS_MAX == 512
+        assert service._vecteurs_questions.taille == module.VECTEURS_QUESTIONS_MAX
+
+    def test_le_vecteur_garde_est_une_copie(self):
+        """Modifier l'original apres coup ne change pas le vecteur garde."""
+        from app.services.embedding_service import _VecteursRecents
+
+        recents = _VecteursRecents(2)
+        original = np.ones(4, dtype=np.float32)
+        garde = recents.garder("q", original)
+        original[0] = 9.0
+
+        assert recents.lire("q")[0] == 1.0
+        assert garde is recents.lire("q")
 
 
 # ==================== SUIVI DU VOLET SEMANTIQUE ====================
