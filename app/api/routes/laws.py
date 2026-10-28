@@ -38,6 +38,7 @@ from app.schemas.law import (
     LawResponse,
     LawUpdate,
 )
+from app.schemas.statut import StatutJuridique
 from app.services.document_storage import (
     DocumentInaccessible,
     DocumentIntrouvable,
@@ -52,6 +53,7 @@ from app.services.explanation_service import (
     ExplanationService,
 )
 from app.services.search_service import invalidate_search_cache
+from app.services.statut_juridique import statut_du_texte
 from app.tasks.process_law import delete_from_search_index
 
 
@@ -322,8 +324,10 @@ async def get_law(
         # compte 230, et aucune page de PDF. `article_count` se lit sur cette
         # collection chargee.
         law.articles.sort(key=lambda a: (a.order or 0, a.id))
+        reponse = LawDetailResponse.model_validate(law)
+        reponse.statut_juridique = await _statut_ou_rien(db, law)
         logger.info(f"✅ Law {law_id} found: {law.title} ({len(law.articles)} articles)")
-        return law
+        return reponse
 
     except HTTPException:
         raise
@@ -332,6 +336,21 @@ async def get_law(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error fetching law"
         )
+
+
+async def _statut_ou_rien(db: AsyncSession, law: Law) -> Optional[StatutJuridique]:
+    """
+    Le statut juridique du texte, ou None s'il n'a pas pu etre calcule.
+
+    Le bloc est facultatif : une erreur dans son calcul ne doit pas priver le
+    lecteur du texte lui-meme. Le front deploye ne le lit pas, le nouveau sait
+    qu'il peut manquer.
+    """
+    try:
+        return await statut_du_texte(db, law.reference, law.articles)
+    except Exception as e:
+        logger.error(f"❌ Statut juridique de la loi {law.id} non calcule: {e}", exc_info=True)
+        return None
 
 
 def get_explanation_service(db: AsyncSession = Depends(get_db)) -> ExplanationService:
