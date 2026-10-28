@@ -16,11 +16,22 @@ statut fausse egare le modele plus surement qu'une ligne absente. Puis :
     python scripts/maintenance/verifier_liens_textes.py --detail
 qui rejoue les lignes sur les vrais morceaux. A relancer aussi apres toute
 ingestion ou re-decoupage d'un texte lie.
+
+L'HISTORIQUE. LIENS ne garde que l'etat actuel : la loi 2008/001 a reecrit
+l'article 6 de la Constitution, la loi 2026/002 l'a reecrit depuis, et seul le
+second lien y figure (le chat ne doit suivre que la redaction en vigueur). La
+page d'un texte montre aussi la chaine : les liens anterieurs prouves sont dans
+LIENS_HISTORIQUES, en fin de module, et ne servent qu'a l'historique.
 """
 
 from dataclasses import dataclass
 from datetime import date
 from typing import Optional, Tuple
+
+# Date du releve : la page d'un texte dit « aucune modification relevée par
+# JuriX au 14 octobre 2026 », pas « aucune modification ». A changer quand le
+# releve est refait, pas a chaque lien ajoute.
+RELEVE_LE = date(2026, 10, 14)
 
 
 @dataclass(frozen=True)
@@ -2524,5 +2535,245 @@ LIENS: Tuple[Lien, ...] = (
             "recettes et les dépenses initialement affectées audit Fonds sont entièrement reversées "
             "dans le Budget Général de l'Etat (article 38)"
         ),
+    ),
+)
+
+
+# ============================================================================
+# Historique : liens anterieurs, prouves, que LIENS ne garde pas
+# ============================================================================
+
+
+@dataclass(frozen=True)
+class LienHistorique:
+    """
+    Un lien prouve qui ne decrit plus l'etat actuel du texte.
+
+    Deux cas, et un seul a la fois :
+    - DEPASSE : un texte plus recent a reecrit ou abroge depuis les memes
+      dispositions (la loi 2008/001 sur l'article 6 de la Constitution, reecrit
+      en 2026). Le saisir dans LIENS ferait dire au chat « Pour ce qui a changé,
+      ce texte fait foi » sous le nom d'un texte qui ne fait plus foi.
+    - INTEGRE : le document en base est une version consolidee qui contient
+      deja la modification (l'ordonnance 77/1 dans l'ordonnance 74/1 sur le
+      regime foncier). Une ligne « modifié par » ferait croire le texte affiche
+      perime, alors qu'il est la version modifiee.
+
+    Ces liens ne servent qu'a l'historique de la page d'un texte (GET
+    /laws/{id}, app/services/statut_juridique.py) ; textes_successifs ne lit
+    que LIENS. Meme exigence de preuve que LIENS : la disposition est citee en
+    commentaire, relue en base.
+    """
+
+    lien: Lien
+    depasse_par_titre: Optional[str] = None
+    """Le texte qui a reecrit ou abroge depuis les memes dispositions, comme `Lien.par_titre`."""
+    depasse_par_reference: Optional[str] = None
+    """Sa reference en base ; None quand il manque au corpus."""
+    depasse_le: Optional[date] = None
+    integre_au_texte: bool = False
+    """Le document en base contient deja la modification."""
+
+
+# Releves verifies le 2026-10-28, en relisant en base les textes cites. La
+# detection automatique a ete essayee sur tout le corpus (intitules « modifiant
+# », listes « Les dispositions des articles … », marques « (nouveau) ») et
+# ecartee : liste d'articles illisible a l'OCR (celle de la loi 2008/001), alineas
+# reecrits a l'interieur d'un article, numeros d'acte partages par une loi et un
+# decret de la meme annee, articles du Code general des impots recopies dans les
+# lois de finances, documents en double. Seuls les liens relus figurent ici.
+LIENS_HISTORIQUES: Tuple[LienHistorique, ...] = (
+    # Constitution. Loi 2008/001 (PRC-6284), morceau DISPOSITIF : « […] sont
+    # modifiées et complétées ainsi qu'il suit : «ARTICLE 6. (2) (nouveau) : Le
+    # Président de la République est élu pour un mandat de sept (07) ans. Il est
+    # rééligible. (4) (nouveau) : En cas de vacance de la Présidence […] le
+    # scrutin pour l'élection du nouveau Président de la République doit
+    # impérativement avoir lieu vingt (20) jours au moins et cent vingt (120)
+    # jours au plus après l'ouverture de la vacance. » ; morceau « 53 » :
+    # « (nouveau) (1) La Haute Cour de Justice est compétente pour juger […] ».
+    # Depasse : loi 2026/002 (PRC-10679), art. 1er (« Les dispositions des
+    # articles 5, 6, 7, 10, 53 et 66 […] sont modifiées et complétées »),
+    # morceaux « 6 » et « 53 » : « (nouveau) », articles donnes en entier. Le
+    # lien de LIENS sur la loi 2008/001 ne garde que les articles 14, 15, 51 et
+    # 67, pour cette raison. Comme ce lien-la, la fin de l'article 6 est le
+    # morceau SECTION_2.
+    LienHistorique(
+        lien=Lien(
+            texte="PRC-6283",
+            texte_nom=_CONSTITUTION,
+            nature="modifie",
+            par_titre="la Loi N°2008/001 du 14 avril 2008",
+            par_date=date(2008, 4, 14),
+            par_reference="PRC-6284",
+            articles=("6", "53"),
+            par_articles=("DISPOSITIF", "53"),
+            morceaux=(("SECTION_2", "6", "par intérim"),),
+            portee=(
+                "alinéas 2 et 4 de l'article 6 réécrits : mandat de sept ans, le Président de la "
+                "République est rééligible ; en cas de vacance, l'élection a lieu vingt jours au moins "
+                "et cent vingt jours au plus après l'ouverture de la vacance ; article 53 (Haute Cour "
+                "de justice) réécrit en entier"
+            ),
+        ),
+        depasse_par_titre="la Loi N°2026/002 du 14 avril 2026",
+        depasse_par_reference="PRC-10679",
+        depasse_le=date(2026, 4, 14),
+    ),
+    # Liberte d'association, article 5, alinea 4 : trois redactions avant celle
+    # de la loi 2021/022, seule saisie dans LIENS (voir les liens ecartes du
+    # groupe association_cyber).
+    # 1) Loi n° 99/011 du 20 juillet 1999, absente du corpus, recopiee dans le
+    # morceau SIGNATURE de LOI-1990-053 (« (Source : www.minsep.cm) ») :
+    # « Article 1ºr : - Les dispositions de l'article 5 (4) de la loi n°90/053
+    # du 19 décembre 1990 relative à la liberté d'association sont modifiées et
+    # complétées ainsi qu'il :sut Article 5 (4) (nouveau)- « Les partis
+    # politiques, les syndicats, les associations sportives et les
+    # organisations non gouvernementales sont régies sont régis par des textes
+    # particuliers ». » Depassee par la loi 2020/009, qui reecrit le meme
+    # alinea. L'ancien alinea est dans le morceau « 2 » (articles 2 a 5) ; la
+    # copie du morceau SIGNATURE n'est pas marquee : c'est la loi de 1999
+    # elle-meme, pas l'article qu'elle modifie.
+    LienHistorique(
+        lien=Lien(
+            texte="LOI-1990-053",
+            texte_nom="la Loi N°90/053 du 19 décembre 1990 portant sur la liberté d'association",
+            nature="modifie",
+            par_titre="la Loi N°99/011 du 20 juillet 1999",
+            par_date=date(1999, 7, 20),
+            articles=("5",),
+            morceaux=(("2", "5", "les parties politiques et les syndicats"),),
+            portee=(
+                "seul l'alinéa 4 est réécrit : les partis politiques, les syndicats, les associations "
+                "sportives et les organisations non gouvernementales sont régis par des textes "
+                "particuliers"
+            ),
+        ),
+        depasse_par_titre="la Loi n° 2020/009 du 20 juillet 2020",
+        depasse_par_reference="PRC-8413",
+        depasse_le=date(2020, 7, 20),
+    ),
+    # 2) Loi 2020/009 (PRC-8413), art. 1er (morceau « 1 ») : « Les dispositions
+    # de l'article 5 alinéa 4 de la loi n° 90/053 du 19 décembre 1990 relative
+    # à la liberté d'association sont modifiées et complétées ainsi qu'il suit :
+    # «ARTICLE 5.- (4) (nouveau) Les partis politiques, les syndicats, les
+    # associations sportives, les organisations non gouvernementales, ainsi qus
+    # es a es a e ae aues es particuliers. » » (fin illisible en base).
+    # Depassee par la loi 2021/022 (PRC-9115), art. 1er : meme alinea, « (4)
+    # (nouveau) » ; LIENS porte deja le lien PRC-8413 <- PRC-9115 (« remplace »).
+    LienHistorique(
+        lien=Lien(
+            texte="LOI-1990-053",
+            texte_nom="la Loi N°90/053 du 19 décembre 1990 portant sur la liberté d'association",
+            nature="modifie",
+            par_titre="la Loi n° 2020/009 du 20 juillet 2020",
+            par_date=date(2020, 7, 20),
+            par_reference="PRC-8413",
+            articles=("5",),
+            par_articles=("1",),
+            morceaux=(("2", "5", "les parties politiques et les syndicats"),),
+            portee=(
+                "seul l'alinéa 4 est réécrit : il nomme les partis politiques, les syndicats, les "
+                "associations sportives et les organisations non gouvernementales, la suite étant "
+                "illisible en base"
+            ),
+        ),
+        depasse_par_titre="la Loi N°2021/022 du 16 décembre 2021",
+        depasse_par_reference="PRC-9115",
+        depasse_le=date(2021, 12, 16),
+    ),
+    # Loi de finances 2020, article 22 (Fonds Special des Telecommunications).
+    # LF 2023 (PRC-9449), art. 34 (morceau « 34 ») : « Les dispositions des
+    # articles dix-neuvième, vingtdeuxième et vingt-cinquième de la loi
+    # n°2019/023 du 24 décembre 2019 portant loi de finances de la République
+    # du Cameroun pour l'exercice 2020 sont modifiées et complétées ainsi qu'il
+    # suit » ; l'article 22 nouveau est le morceau « 22 » d'ordre 121
+    # (« (nouveau): (1) il est ouvert un compte d'affectation spéciale intitulé
+    # « Fonds Spécial des Télécommunications » »). Depasse : LF 2024 (PRC-9875),
+    # art. 38, abroge cet article (liens de LIENS sur PRC-8034 et PRC-9449).
+    # `par_articles` ne nomme que le morceau « 34 » : le numero « 22 » designe
+    # aussi, dans la LF 2023, son propre article 22 (visa de travail).
+    # Les articles 19 et 25 de la LF 2020, reecrits par le meme article 34, ne
+    # sont pas ici : aucun texte posterieur relu ne les a reecrits, ce ne sont
+    # pas des liens depasses mais des liens que le releve n'a pas couverts.
+    LienHistorique(
+        lien=Lien(
+            texte="PRC-8034",
+            texte_nom=(
+                "la Loi N°2019/023 du 24 décembre 2019 portant loi de finances pour l'exercice 2020"
+            ),
+            nature="modifie",
+            par_titre=(
+                "la Loi N°2022/020 du 27 décembre 2022 portant loi de finances pour l'exercice 2023"
+            ),
+            par_date=date(2022, 12, 27),
+            par_reference="PRC-9449",
+            articles=("22",),
+            par_articles=("34",),
+            portee=(
+                "réécrit en entier (compte d'affectation spéciale « Fonds Spécial des "
+                "Télécommunications », ses recettes et ses dépenses)"
+            ),
+        ),
+        depasse_par_titre=(
+            "la Loi N°2023/019 du 19 décembre 2023 portant loi de finances pour l'exercice 2024"
+        ),
+        depasse_par_reference="PRC-9875",
+        depasse_le=date(2023, 12, 19),
+    ),
+    # Regime foncier. Le document en base est une version consolidee (voir les
+    # liens ecartes du groupe foncier) : chaque article reecrit le signale en
+    # tete. Morceaux « 4 » : « (Ordonnance 77-1) du 10 janvier 1977). Les
+    # titulaires de livrets fonciers […] » ; « 5 » : « (Ordonnance 77-1 du 10
+    # janvier 1977). Les titulaires de jugements définitifs constitutifs […] » ;
+    # « 18 » : « (Ordonnance77-1 du 10 janvier 1977) En vue de la réalisation
+    # des opérations d'intérêt public […] ». L'ordonnance manque au corpus.
+    LienHistorique(
+        lien=Lien(
+            texte="ORD-1974-001",
+            texte_nom="l'Ordonnance N°74/1 du 6 juillet 1974 fixant le régime foncier",
+            nature="modifie",
+            par_titre="l'Ordonnance N°77/1 du 10 janvier 1977",
+            par_date=date(1977, 1, 10),
+            articles=("4", "5", "18"),
+            portee="nouvelle rédaction déjà intégrée au texte affiché, qui la signale en tête de l'article",
+        ),
+        integre_au_texte=True,
+    ),
+    # Meme document, morceau « 10 » : « (Loi N° 80-21 du 14 juillet 1980) - 1)
+    # Les personnes physiques ou morales de nationalité étrangère désirant
+    # investir au Cameroun […] ». La loi manque au corpus.
+    LienHistorique(
+        lien=Lien(
+            texte="ORD-1974-001",
+            texte_nom="l'Ordonnance N°74/1 du 6 juillet 1974 fixant le régime foncier",
+            nature="modifie",
+            par_titre="la Loi N°80-21 du 14 juillet 1980",
+            par_date=date(1980, 7, 14),
+            articles=("10",),
+            portee="nouvelle rédaction déjà intégrée au texte affiché, qui la signale en tête de l'article",
+        ),
+        integre_au_texte=True,
+    ),
+    # Code electoral. Le document en base est l'edition consolidee de la
+    # Direction generale des elections (voir les liens ecartes en tete de
+    # LIENS) : intitule « Loi N°2012/001 du 19 avril 2012 portant Code
+    # électoral, modifiée et complétée par la loi n°2012/017 du 21 décembre
+    # 2012 », repris en titre courant de ses pages (« DGE Loi n° 2012/001 du 19
+    # avril 2012 portant Code Electoral, modifiée et complétée par la loi
+    # n°2012/017 du 21 décembre 2012 »). La loi 2012/017 manque au corpus ; ses
+    # articles ne sont pas nommes en base.
+    LienHistorique(
+        lien=Lien(
+            texte="LOI-2012-001",
+            texte_nom="la Loi N°2012/001 du 19 avril 2012 portant Code électoral",
+            nature="modifie",
+            par_titre="la Loi n° 2012/017 du 21 décembre 2012",
+            par_date=date(2012, 12, 21),
+            portee=(
+                "les articles modifiés ne sont pas connus ; le texte affiché, édition consolidée, "
+                "intègre déjà cette modification"
+            ),
+        ),
+        integre_au_texte=True,
     ),
 )
