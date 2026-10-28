@@ -125,7 +125,8 @@ def test_un_texte_lie_porte_le_numero_de_sa_ligne_de_liste():
     """233 intitules reels relus a la main, plus les fautes d'OCR reparees en liste."""
     titres = _titres_du_corpus() + [
         "Décret N°202l/345 du 17 juin 2021 portant révocation d'un Magistrat",
-        "Arrêté N°0095/CAB/PR/du 16 février 2026 portant nomination de trente-huit (38) Inspecteurs",
+        "Arrêté N°0095/CAB/PR/du 16 février 2026 portant nomination de trente-huit (38) "
+        "Inspecteurs",
         "Arrêté N1078/CAB/PR du 31 décembre 2022 portant avancement de grade au choix",
     ]
     assert len(titres) > 200
@@ -137,9 +138,8 @@ def test_un_texte_lie_porte_le_numero_de_sa_ligne_de_liste():
 
 def test_un_texte_absent_du_corpus_garde_son_numero():
     """Intitules du releve, ecrits pour une phrase : l'article retire, le numero lu."""
-    assert texte_lie(None, "la Loi n° 2012/015 du 21 décembre 2012", date(2012, 12, 21), {}).numero == (
-        "2012/015"
-    )
+    loi = texte_lie(None, "la Loi n° 2012/015 du 21 décembre 2012", date(2012, 12, 21), {})
+    assert loi.numero == "2012/015"
     # La nature n'ouvre pas l'intitule : seule la seconde lecture trouve le numero.
     constitution = "la Constitution (Loi N°96/06 du 18 janvier 1996 portant révision)"
     assert texte_lie(None, constitution, date(1996, 1, 18), {}).numero == "96/06"

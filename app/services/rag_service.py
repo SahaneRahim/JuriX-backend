@@ -1675,7 +1675,8 @@ class RAGService:
                 **bornes, law_id=extrait.law_id, article=article,
                 article_id=extrait.article_id if occurrence.forme == "article" else None,
                 reference=extrait.reference, titre=extrait.law_title,
-                date_du_texte=_date_affichee(extrait.publication_date, extrait.law_title), statut=statut,
+                date_du_texte=_date_affichee(extrait.publication_date, extrait.law_title),
+                statut=statut,
             ))
             # Une source par article cite ; un texte cite sans article n'en est
             # une que si aucun de ses articles ne l'est deja.
