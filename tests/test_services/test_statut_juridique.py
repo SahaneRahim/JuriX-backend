@@ -13,19 +13,28 @@ Usage:
     pytest tests/test_services/test_statut_juridique.py -v
 """
 
+import re
 from datetime import date
 
 import pytest
 
-from app.services.liens_entre_textes import RELEVE_LE, LienHistorique
+from app.services.liens_entre_textes import LIENS, LIENS_HISTORIQUES, RELEVE_LE, LienHistorique
 from app.services.statut_juridique import (
     InfoTexte,
     MorceauDuTexte,
+    _IndexDesMorceaux,
     cle_article,
     construire_statut,
     construire_statut_d_un_article,
 )
-from app.services.textes_successifs import NATURES, Lien, lignes_de_statut
+from app.services.textes_successifs import (
+    NATURES,
+    Lien,
+    lignes_de_statut,
+    morceau_touche,
+    porte_le_changement,
+    reperes_a_lire,
+)
 
 ANCIEN = "T-ANCIEN"
 RECENT = "T-RECENT"
@@ -126,6 +135,63 @@ def test_la_page_et_le_chat_marquent_les_memes_morceaux():
     for morceau in morceaux:
         chat = lignes_de_statut(ANCIEN, morceau.numero, morceau.contenu, morceau.section, [lien])
         assert bool(chat) == (morceau.id in marques), morceau
+
+
+# ==================== L'INDEX DES MORCEAUX ====================
+
+
+def _morceaux_autour(lien: Lien) -> list:
+    """
+    Des morceaux autour de ce que le lien designe : numeros voisins, milieu des
+    plages, suffixe de morceau, zero en tete, « bis », pseudo-numeros, section
+    du lien et une autre, avec et sans les reperes du lien.
+    """
+    designations = [*lien.articles, *lien.par_articles, *(m for m, _, _ in lien.morceaux), *(m for m, _ in lien.sauf)]
+    numeros = {"SECTION_1", "SECTION_2", "PREAMBULE", "LEGAL_BASIS", "SIGNATURE", "DISPOSITIF", "1er",
+               "VINGT-DEUXIÈME", *designations}
+    for designation in designations:
+        bornes = [int(n) for n in re.findall(r"\d+", designation)]
+        if len(bornes) == 2:
+            bornes.append(sum(bornes) // 2)
+        for borne in bornes:
+            for n in (borne - 1, borne, borne + 1):
+                numeros.update({str(n), f"{n}.2", f"0{n}", f"{n} bis"})
+    reperes = " ".join([r for _, _, r in lien.morceaux] + [r for _, r in lien.sauf])
+    morceaux = []
+    for numero in sorted(numeros):
+        for section in (None, "TITRE 99 Sans rapport.", lien.section):
+            for contenu in ("Texte sans repère.", f"Texte. {reperes}"):
+                morceaux.append(MorceauDuTexte(len(morceaux) + 1, numero, section, contenu))
+    morceaux.append(MorceauDuTexte(len(morceaux) + 1, None, None, "Sans numéro."))
+    return morceaux
+
+
+@pytest.mark.parametrize(
+    "lien", [*LIENS, *(h.lien for h in LIENS_HISTORIQUES)],
+    ids=lambda lien: f"{lien.texte}<{lien.par_reference or lien.par_titre[:25]}",
+)
+def test_l_index_ne_perd_aucun_morceau_que_la_regle_marquerait(lien):
+    """
+    L'index ne fait que pre-trier les morceaux (le Code civil en compte 2 134) :
+    sur chaque lien du releve, la regle appliquee a ses candidats marque
+    exactement ce qu'elle marquerait sur tous les morceaux.
+    """
+    morceaux = _morceaux_autour(lien)
+    index = _IndexDesMorceaux(morceaux)
+
+    def touche(m):
+        return morceau_touche(lien, m.numero, m.contenu, m.section)[0]
+
+    candidats = index.designes(lien.articles, [numero for numero, _, _ in lien.morceaux])
+    assert [m for m in candidats if touche(m)] == [m for m in morceaux if touche(m)]
+    candidats = index.designes(lien.par_articles)
+    assert [m for m in candidats if porte_le_changement(lien, m.numero)] == [
+        m for m in morceaux if porte_le_changement(lien, m.numero)
+    ]
+    candidats = index.a_reperes([lien])
+    assert [m for m in candidats if reperes_a_lire(lien, m.numero)] == [
+        m for m in morceaux if reperes_a_lire(lien, m.numero)
+    ]
 
 
 def test_une_compilation_dit_la_section_de_chaque_changement():

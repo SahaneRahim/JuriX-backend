@@ -23,7 +23,9 @@ le chat ne peuvent pas se contredire sur un meme morceau.
 COUT. Le releve est en memoire. Les textes lies (une soixantaine) sont lus en
 UNE requete, gardee dix minutes ; un texte sans lien ne coute aucune requete.
 Seuls les morceaux dont la decision depend d'un repere (`morceaux`, `sauf`)
-sont relus, jamais le texte entier.
+sont relus, jamais le texte entier. La regle n'est appliquee qu'aux morceaux
+qu'une liste d'articles peut designer (_IndexDesMorceaux) : quelques
+millisecondes pour le Code civil, au lieu de 450.
 """
 
 import logging
@@ -190,6 +192,86 @@ def _depasse_par(lien: Lien, liens: Sequence[Lien]) -> Optional[Lien]:
 # ============================================================================
 
 
+def _cle_de_base(base: Optional[str]) -> Optional[str]:
+    """« 0012 » et « 12 » sous la meme cle : l'index rend un peu trop, la regle tranche."""
+    return str(int(base)) if base and base.isdigit() else base
+
+
+class _IndexDesMorceaux:
+    """
+    Les morceaux d'un texte, retrouves par leur numero exact ou par leur numero
+    de base.
+
+    POURQUOI. Le Code civil compte 2 134 morceaux et 29 liens : passer chaque
+    lien sur chaque morceau (morceau_touche normalise a chaque appel les deux
+    intitules de section compares) coutait 450 ms a chaque affichage de la
+    page. L'index ne rend que les morceaux qu'une liste d'articles PEUT
+    designer, un sur-ensemble ; la decision reste a la regle du chat
+    (morceau_touche, porte_le_changement, reperes_a_lire), appliquee a ces
+    seuls morceaux. Un test verifie sur tous les liens du releve qu'il ne
+    perd rien.
+    """
+
+    def __init__(self, morceaux: Sequence[MorceauDuTexte]):
+        self.morceaux = list(morceaux)
+        self._par_numero: Dict[str, List[int]] = {}
+        self._par_base: Dict[Optional[str], List[int]] = {}
+        self._sans_numero: List[int] = []
+        for rang, morceau in enumerate(self.morceaux):
+            if morceau.numero is None:
+                self._sans_numero.append(rang)
+                continue
+            numero = str(morceau.numero).strip()
+            self._par_numero.setdefault(numero, []).append(rang)
+            self._par_base.setdefault(_cle_de_base(_numero_de_base(numero)), []).append(rang)
+
+    def _rendre(self, rangs: Set[int]) -> List[MorceauDuTexte]:
+        # Un morceau sans numero n'est designe par aucune liste, mais la regle
+        # l'accepte parfois (porte_le_changement le traite en ligne « niveau
+        # loi ») : il reste candidat, et la regle decide. Ordre du texte.
+        return [self.morceaux[rang] for rang in sorted(rangs.union(self._sans_numero))]
+
+    def designes(self, designations: Sequence[str], exacts: Iterable[str] = ()) -> List[MorceauDuTexte]:
+        """
+        Les morceaux que `designations` peut designer selon _designe (numero
+        tel quel, numero de base, plage « 34 à 101 »), plus ceux dont le numero
+        est dans `exacts` (les `morceaux` d'un lien). Sans designation : tous.
+        """
+        if not designations:
+            return list(self.morceaux)
+        rangs: Set[int] = set()
+        for numero in list(designations) + list(exacts):
+            rangs.update(self._par_numero.get(numero, ()))
+        for designation in designations:
+            # « 67.3 » ne designe que ce morceau-la (_designe) : deja vu ci-dessus.
+            if "." in designation:
+                continue
+            plage = _PLAGE.fullmatch(designation.strip())
+            if plage:
+                debut, fin = int(plage.group(1)), int(plage.group(2))
+                if fin - debut > _PLAGE_MAX:
+                    return list(self.morceaux)
+                for numero in range(debut, fin + 1):
+                    rangs.update(self._par_base.get(str(numero), ()))
+            else:
+                base = _numero_de_base(designation)
+                if base is not None:
+                    rangs.update(self._par_base.get(_cle_de_base(base), ()))
+        return self._rendre(rangs)
+
+    def a_reperes(self, liens: Iterable[Lien]) -> List[MorceauDuTexte]:
+        """Les morceaux que reperes_a_lire peut retenir : `morceaux` par numero, `sauf` par base."""
+        rangs: Set[int] = set()
+        for lien in liens:
+            for numero, _, _ in lien.morceaux:
+                rangs.update(self._par_numero.get(numero, ()))
+            for numero, _ in lien.sauf:
+                rangs.update(self._par_base.get(_cle_de_base(_numero_de_base(numero)), ()))
+        return self._rendre(rangs)
+
+
+
+
 def texte_lie(
     reference: Optional[str],
     intitule: str,
@@ -345,6 +427,7 @@ def _construire(
 
     par_article: Dict[str, List[str]] = {}
     par_morceau: Dict[str, List[str]] = {}
+    index = _IndexDesMorceaux(morceaux)
     for entree, changement in paires:
         lien = entree.lien
         if entree.sens == "modifie_par":
@@ -353,12 +436,13 @@ def _construire(
                 # tete, pas sous chacun des articles.
                 continue
             cles = _cles(lien.articles)
-            vises = [m for m in morceaux if morceau_touche(lien, m.numero, m.contenu, m.section)[0]]
+            candidats = index.designes(lien.articles, [numero for numero, _, _ in lien.morceaux])
+            vises = [m for m in candidats if morceau_touche(lien, m.numero, m.contenu, m.section)[0]]
         else:
             if not lien.par_articles:
                 continue
             cles = _cles(lien.par_articles)
-            vises = [m for m in morceaux if porte_le_changement(lien, m.numero)]
+            vises = [m for m in index.designes(lien.par_articles) if porte_le_changement(lien, m.numero)]
         for cle in cles:
             par_article.setdefault(cle, []).append(changement.id)
         for morceau in vises:
@@ -530,7 +614,7 @@ async def contenus_a_lire(
         return list(morceaux)
     liens = _liens_du_texte(reference)
     a_lire = [
-        m.id for m in morceaux
+        m.id for m in _IndexDesMorceaux(morceaux).a_reperes(liens)
         if m.contenu is None and any(reperes_a_lire(lien, m.numero) for lien in liens)
     ]
     if not a_lire:
