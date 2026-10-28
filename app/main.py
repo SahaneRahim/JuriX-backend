@@ -21,6 +21,7 @@ from app.api.routes import (
     categories,
     classifier,
     comparison,
+    corpus,
     language,
     laws,
     ocr,
@@ -378,6 +379,7 @@ app.include_router(comparison.router, prefix="/api/v1/compare", tags=["compare"]
 app.include_router(upload.router, prefix="/api/v1/upload", tags=["upload"])
 app.include_router(ocr.router, prefix="/api/v1/ocr", tags=["ocr"])
 app.include_router(laws.router, prefix="/api/v1/laws", tags=["laws"])
+app.include_router(corpus.router, prefix="/api/v1/corpus", tags=["corpus"])
 app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["analytics"])
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
 app.include_router(batch_upload.router, prefix="/api/v1/batch-upload", tags=["batch"])

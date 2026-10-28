@@ -19,7 +19,8 @@ import time
 from pathlib import Path
 from typing import List, Optional, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import Path as PathParam
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -38,6 +39,9 @@ from app.schemas.law import (
     LawResponse,
     LawUpdate,
 )
+from app.schemas.statut import ArticleApercuResponse, ArticleHomonyme, StatutJuridique
+from app.services.article_reference import normalize_number
+from app.services.chiffres_du_corpus import invalider_cache_corpus
 from app.services.document_storage import (
     DocumentInaccessible,
     DocumentIntrouvable,
@@ -52,7 +56,18 @@ from app.services.explanation_service import (
     ExplanationService,
 )
 from app.services.search_service import invalidate_search_cache
+from app.services.statut_juridique import (
+    InfoTexte,
+    MorceauDuTexte,
+    contient_le_repere,
+    invalider_cache_statut,
+    morceaux_etablis,
+    statut_d_un_article,
+    statut_du_texte,
+    texte_lie,
+)
 from app.tasks.process_law import delete_from_search_index
+from app.utils.chunk_refiner import est_pseudo_numero
 
 
 class LawIngestRequest(BaseModel):
@@ -72,6 +87,18 @@ router = APIRouter(tags=["Laws"])
 
 
 # ==================== DEPENDENCIES ====================
+
+
+def _oublier_les_chiffres_du_corpus() -> None:
+    """
+    Vide les caches memoire tires du corpus : les chiffres de GET /corpus et les
+    textes nommes par le statut juridique. Sans cela, un texte qu'un
+    administrateur publie, archive ou supprime resterait compte, ou lien
+    consultable, jusqu'a dix minutes. Une ingestion par script, dans un autre
+    processus, n'y passe pas : la duree du cache la couvre.
+    """
+    invalider_cache_corpus()
+    invalider_cache_statut()
 
 
 # L'authentification reelle vit dans app/core/auth.py (JWT + bcrypt + roles).
@@ -322,8 +349,10 @@ async def get_law(
         # compte 230, et aucune page de PDF. `article_count` se lit sur cette
         # collection chargee.
         law.articles.sort(key=lambda a: (a.order or 0, a.id))
+        reponse = LawDetailResponse.model_validate(law)
+        reponse.statut_juridique = await _statut_ou_rien(db, law)
         logger.info(f"✅ Law {law_id} found: {law.title} ({len(law.articles)} articles)")
-        return law
+        return reponse
 
     except HTTPException:
         raise
@@ -332,6 +361,309 @@ async def get_law(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error fetching law"
         )
+
+
+async def _statut_ou_rien(db: AsyncSession, law: Law) -> Optional[StatutJuridique]:
+    """
+    Le statut juridique du texte, ou None s'il n'a pas pu etre calcule.
+
+    Le bloc est facultatif : une erreur dans son calcul ne doit pas priver le
+    lecteur du texte lui-meme. Le front deploye ne le lit pas, le nouveau sait
+    qu'il peut manquer.
+    """
+    try:
+        return await statut_du_texte(db, law.reference, law.articles)
+    except Exception as e:
+        logger.error(f"❌ Statut juridique de la loi {law.id} non calcule: {e}", exc_info=True)
+        return None
+
+
+# Un article peut etre tres long (listes de nominations, tableaux) : l'apercu en
+# garde le debut et renvoie au texte integral, au lieu de transporter 100 Ko
+# sur un reseau mobile pour une feuille d'apercu.
+APERCU_MAX_CARACTERES = 20_000
+
+# L'apercu change aussi peu que le texte : le navigateur le garde cinq minutes,
+# un cache partage dix. Meme logique que CACHE_CONTROL_CATEGORIES.
+CACHE_CONTROL_APERCU = "public, max-age=300, s-maxage=600, stale-while-revalidate=3600"
+
+# Variantes ecrites en base pour l'article premier : la recherche normalise
+# « 1er » en « 1 », mais des numeros « 1ER » ou « PREMIER » restent possibles.
+_PREMIER = ("1ER", "1ERE", "1ÈRE", "PREMIER", "PREMIERE", "PREMIÈRE")
+
+
+# Colonnes d'un morceau pour l'apercu : jamais l'embedding ni embed_text.
+_COLONNES_APERCU = (
+    Article.id, Article.number, Article.title, Article.section,
+    Article.page_number, Article.content, Article.order, Article.kind,
+)
+
+
+def _base_normalisee(numero: Optional[str]) -> str:
+    """« 55.2 » -> « 55 », « 1er » -> « 1 » ; un pseudo-numero reste tel quel."""
+    if not numero:
+        return ""
+    if est_pseudo_numero(numero):
+        return str(numero).strip().upper()
+    return normalize_number(str(numero).split(".")[0])
+
+
+def _sequences(lignes: List) -> List[List]:
+    """
+    Les morceaux candidats, regroupes en articles.
+
+    Un article long est coupe en morceaux qui se suivent (« 55.1 », « 55.2 »,
+    ordres consecutifs) ; une compilation repete un numero dans plusieurs
+    titres (« 53 » du Code civil), loin l'un de l'autre. Une sequence est une
+    suite d'ordres consecutifs ; un numero sans suffixe en ouvre toujours une.
+    """
+    sequences: List[List] = []
+    for ligne in sorted(lignes, key=lambda candidat: (candidat.order, candidat.id)):
+        precedente = sequences[-1][-1] if sequences else None
+        if (
+            precedente is not None
+            and "." in str(ligne.number)
+            and ligne.order == precedente.order + 1
+        ):
+            sequences[-1].append(ligne)
+        else:
+            sequences.append([ligne])
+    return sequences
+
+
+def _choisir(sequences: List[List], demande: str, article_id: Optional[int]) -> List:
+    """
+    La sequence a montrer quand le numero en designe plusieurs.
+
+    D'abord celle qui contient le morceau cite (`article_id`, porte par la
+    citation du chat). Sinon, un vrai article plutot qu'un bout de tableau ou de
+    liste qui porte le meme numero (le Code CIMA a un morceau « 13 » qui n'est
+    qu'une ligne de table des matieres) ; puis le numero exact demande (« 55.2 »)
+    ; puis l'ordre du texte.
+    """
+    for sequence in sequences:
+        if any(m.id == article_id for m in sequence):
+            return sequence
+
+    def rang(sequence):
+        vrai_article = (sequence[0].kind or "article") == "article"
+        exact = any(str(m.number).strip().upper() == demande.upper() for m in sequence)
+        return (not vrai_article, not exact, sequence[0].order)
+
+    return min(sequences, key=rang)
+
+
+def _recoller(contenus: List[str]) -> str:
+    """
+    Le texte d'un article coupe en morceaux, sans le chapeau recopie.
+
+    Le decoupage (chunk_refiner) recopie en tete de chaque morceau suivant les
+    200 premiers caracteres du chapeau, suivis d'un saut de ligne : utiles au
+    modele, ils feraient lire deux fois la meme phrase dans l'apercu. On retire
+    du morceau suivant le plus long debut qu'il partage avec le premier, coupe
+    a un saut de ligne.
+    """
+    if not contenus:
+        return ""
+    premier = contenus[0] or ""
+    parties = [premier.strip()]
+    for suite in contenus[1:]:
+        suite = suite or ""
+        commun = 0
+        for a, b in zip(premier, suite):
+            if a != b:
+                break
+            commun += 1
+        coupe = suite.rfind("\n", 0, commun + 1)
+        parties.append((suite[coupe + 1:] if coupe > 0 else suite).strip())
+    return "\n".join(p for p in parties if p)
+
+
+@router.get("/{law_id}/articles/{numero}", response_model=ArticleApercuResponse)
+async def get_law_article(
+    law_id: int,
+    response: Response,
+    numero: str = PathParam(
+        ..., min_length=1, max_length=64,
+        description="Numéro de l'article, tel qu'affiché ou cité (« 6 », « 1er », « L 94 bis »)",
+    ),
+    article_id: Optional[int] = Query(
+        None,
+        ge=1,
+        description=(
+            "Identifiant d'un article de ce numéro (citation du chat) : départage les "
+            "homonymes d'une compilation"
+        ),
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Un article seul, avec son texte entier et son statut juridique.
+
+    Pour la feuille d'apercu d'une citation du chat : jamais le texte entier de
+    la loi, seulement les morceaux de l'article (trois instructions au plus). Un
+    article coupe en morceaux (« 55.1 », « 55.2 ») est recolle ; un article dont
+    la fin est rangee sous un pseudo-numero (fin de l'article 6 de la
+    Constitution, morceau SECTION_2) est complete quand le releve des liens l'a
+    etabli.
+
+    Raises:
+        404: texte ou article introuvable
+    """
+    loi = (
+        await db.execute(
+            select(
+                Law.id, Law.reference, Law.type, Law.title, Law.publication_date, Law.status
+            ).where(Law.id == law_id)
+        )
+    ).one_or_none()
+    if loi is None:
+        raise HTTPException(status_code=404, detail=f"Law with ID {law_id} not found")
+
+    demande = numero.strip()
+    vise = _base_normalisee(demande)
+    # La forme demandee elle-meme aussi : normalize_number ramene « TROISIÈME »
+    # a « 3 », alors que les lois de finances gardent en base leurs numeros en
+    # toutes lettres.
+    brut = demande.upper()
+    candidats = {vise, brut, brut.split(".")[0], *(_PREMIER if vise == "1" else ())}
+    numero_majuscule = func.upper(Article.number)
+    lignes = (
+        await db.execute(
+            select(*_COLONNES_APERCU).where(
+                Article.law_id == law_id,
+                numero_majuscule.in_(candidats)
+                | func.split_part(numero_majuscule, ".", 1).in_(candidats),
+            )
+        )
+    ).all()
+
+    englobant = False
+    if lignes:
+        sequences = _sequences(lignes)
+        choisie = _choisir(sequences, demande, article_id)
+    else:
+        # Aucun morceau de ce numero : l'article est colle dans un autre
+        # (l'article 5 de la loi 90/053 est a la fin du morceau « 2 »). On ne le
+        # rend que si la citation designe ce morceau, ou si le releve des liens
+        # l'a etabli ; jamais en devinant.
+        sequences = []
+        englobe = await _morceau_englobant(db, loi.reference, law_id, vise, article_id)
+        if englobe is None:
+            raise HTTPException(
+                status_code=404, detail=f"Article {numero} introuvable dans le document {law_id}"
+            )
+        choisie, englobant = [englobe], True
+
+    morceaux = [MorceauDuTexte(m.id, m.number, m.section, m.content) for m in choisie]
+    suite = None if englobant else await _suite_etablie(db, loi.reference, law_id, vise, choisie[-1])
+    if suite is not None:
+        morceaux.append(suite)
+
+    contenu = _recoller([m.contenu for m in morceaux])
+    tronque = len(contenu) > APERCU_MAX_CARACTERES
+    if tronque:
+        contenu = contenu[:APERCU_MAX_CARACTERES].rstrip()
+
+    premier = choisie[0]
+    infos = {
+        loi.reference: InfoTexte(
+            loi.id, loi.reference, loi.type, loi.title, loi.publication_date, loi.status
+        )
+    }
+    response.headers["Cache-Control"] = CACHE_CONTROL_APERCU
+    return ArticleApercuResponse(
+        law_id=law_id,
+        texte=texte_lie(loi.reference, loi.title, loi.publication_date, infos),
+        numero=vise if englobant else _numero_affiche(premier.number, len(choisie)),
+        titre=premier.title,
+        section=premier.section,
+        page=premier.page_number,
+        article_ids=[m.id for m in morceaux],
+        contenu=contenu,
+        tronque=tronque,
+        englobant=englobant,
+        homonymes=[
+            ArticleHomonyme(article_id=s[0].id, section=s[0].section)
+            for s in sequences
+            if s is not choisie
+        ],
+        statut=await statut_d_un_article(db, loi.reference, morceaux),
+    )
+
+
+def _numero_affiche(numero: str, morceaux: int) -> str:
+    """« 55.1 » ouvre un article en plusieurs morceaux : c'est l'article 55."""
+    numero = str(numero).strip()
+    if morceaux > 1 and "." in numero and not est_pseudo_numero(numero):
+        return numero.split(".")[0]
+    return numero
+
+
+async def _morceau_englobant(
+    db: AsyncSession, reference: str, law_id: int, vise: str, article_id: Optional[int]
+):
+    """
+    Le morceau qui contient l'article, quand celui-ci n'a pas de morceau propre.
+
+    Deux preuves seulement : la citation qui designe ce morceau (`article_id`,
+    du meme texte), ou le releve des liens (`morceaux` : l'article 8 de la loi
+    sur la Cour supreme est a la fin du morceau « 7 », repere « ARTICLE 8 »).
+    """
+    if article_id is not None:
+        ligne = (
+            await db.execute(
+                select(*_COLONNES_APERCU).where(Article.id == article_id, Article.law_id == law_id)
+            )
+        ).first()
+        if ligne is not None:
+            return ligne
+    for morceau, article, repere in morceaux_etablis(reference):
+        if _base_normalisee(article) != vise:
+            continue
+        for ligne in (
+            await db.execute(
+                select(*_COLONNES_APERCU)
+                .where(Article.law_id == law_id, Article.number == morceau)
+                .order_by(Article.order)
+            )
+        ).all():
+            if contient_le_repere(ligne.content, repere):
+                return ligne
+    return None
+
+
+async def _suite_etablie(
+    db: AsyncSession, reference: str, law_id: int, vise: str, dernier
+) -> Optional[MorceauDuTexte]:
+    """
+    Le morceau qui suit l'article et en porte la fin, quand le releve l'a etabli.
+
+    Seul le releve des liens le sait (`morceaux` : « SECTION_2 » contient la fin
+    de l'article 6 de la Constitution, repere « par intérim »). On ne devine
+    rien : ni un pseudo-numero voisin ni un intertitre ne suffisent.
+    """
+    attendus = [
+        (morceau, repere)
+        for morceau, article, repere in morceaux_etablis(reference)
+        if _base_normalisee(article) == vise
+    ]
+    if not attendus:
+        return None
+    suivant = (
+        await db.execute(
+            select(Article.id, Article.number, Article.section, Article.content)
+            .where(Article.law_id == law_id, Article.order == dernier.order + 1)
+            .order_by(Article.id)
+            .limit(1)
+        )
+    ).first()
+    if suivant is None:
+        return None
+    for morceau, repere in attendus:
+        if str(suivant.number).strip() == morceau and contient_le_repere(suivant.content, repere):
+            return MorceauDuTexte(suivant.id, suivant.number, suivant.section, suivant.content)
+    return None
 
 
 def get_explanation_service(db: AsyncSession = Depends(get_db)) -> ExplanationService:
@@ -754,6 +1086,7 @@ async def ingest_law(
                 # Invalider le cache après traitement
                 async with AsyncSessionLocal() as cache_db:
                     await invalidate_search_cache(cache_db)
+                _oublier_les_chiffres_du_corpus()
             except Exception as bg_err:
                 logger.error(f"❌ Background processing failed: {bg_err}", exc_info=True)
 
@@ -846,6 +1179,7 @@ async def create_law(
         await db.refresh(new_law)
         # Creee a l'instant : aucun article ne la reference encore.
         new_law.article_count = 0
+        _oublier_les_chiffres_du_corpus()
 
         logger.info(f"✅ Law created: ID={new_law.id}, reference={new_law.reference}")
         return new_law
@@ -909,6 +1243,7 @@ async def update_law(
 
         await db.commit()
         await db.refresh(existing_law)
+        _oublier_les_chiffres_du_corpus()
 
         logger.info(f"✅ Law {law_id} updated")
         return await _avec_nombre_d_articles(db, existing_law)
@@ -969,6 +1304,7 @@ async def delete_law(
 
         # Invalider le cache de recherche
         await invalidate_search_cache(db)
+        _oublier_les_chiffres_du_corpus()
         
         logger.info(f"✅ Law {law_id} deleted")
         return None

@@ -9,6 +9,7 @@ Usage:
     pytest tests/test_scripts/test_verifier_liens_textes.py -v
 """
 
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -90,3 +91,39 @@ def test_un_texte_absent_est_un_defaut_un_texte_archive_une_note(base, capsys):
 def test_une_exception_sans_objet_est_signalee(base, capsys):
     assert script.controler([_lien(sauf=(("6", "nom patronymique"),))]) == 1
     assert "exception « 6 » / « nom patronymique » sans objet" in capsys.readouterr().out
+
+
+# ==================== LIENS D'HISTORIQUE (--historiques) ====================
+
+
+def _historique(**kwargs):
+    from app.services.liens_entre_textes import LienHistorique
+
+    valeurs = dict(
+        lien=_lien(par_reference=None, par_titre="la Loi N°2008/001 du 14 avril 2008",
+                   par_date=date(2008, 4, 14), articles=("6",), par_articles=(),
+                   morceaux=(("SECTION_2", "6", "par intérim"),)),
+        depasse_par_titre="la Loi N°2026/002 du 14 avril 2026",
+        depasse_par_reference="T-RECENT",
+        depasse_le=date(2026, 4, 14),
+    )
+    valeurs.update(kwargs)
+    return LienHistorique(**valeurs)
+
+
+def test_un_lien_d_historique_juste_passe(base, capsys):
+    assert script.controler_historiques([_historique()]) == 0
+    assert "ok" in capsys.readouterr().out
+
+
+def test_un_lien_d_historique_mal_ancre_est_signale_comme_un_lien_actuel(base, capsys):
+    """Memes controles que LIENS : l'article doit etre porte par un morceau."""
+    mal_ancre = _historique(lien=replace(_historique().lien, articles=("6", "9")))
+
+    assert script.controler_historiques([mal_ancre]) == 1
+    assert "article « 9 » porte par aucun morceau" in capsys.readouterr().out
+
+
+def test_le_texte_qui_depasse_doit_etre_en_base(base, capsys):
+    assert script.controler_historiques([_historique(depasse_par_reference="T-INCONNU")]) == 1
+    assert "texte qui le depasse T-INCONNU absent de la base" in capsys.readouterr().out

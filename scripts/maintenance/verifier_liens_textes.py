@@ -21,11 +21,16 @@ A lancer apres chaque ingestion, re-decoupage ou reclassement d'un texte lie.
 Usage :
     python scripts/maintenance/verifier_liens_textes.py
     python scripts/maintenance/verifier_liens_textes.py --detail
+    python scripts/maintenance/verifier_liens_textes.py --historiques
     python scripts/maintenance/verifier_liens_textes.py --candidats liens.py
 
 `--candidats` charge un fichier Python qui definit LIENS (des
 textes_successifs.Lien) a la place de ceux du module : pour verifier un
 lien avant de le saisir.
+
+`--historiques` controle aussi LIENS_HISTORIQUES (liens depasses ou integres,
+que seule la page d'un texte affiche) : memes morceaux a designer, et le texte
+qui les a depasses doit etre en base quand sa reference est saisie.
 
 Codes de sortie :
     0  aucun defaut
@@ -45,6 +50,7 @@ from sqlalchemy import text
 
 from app.core.database import SyncSessionLocal
 from app.services import textes_successifs
+from app.services.liens_entre_textes import LIENS_HISTORIQUES, LienHistorique
 from app.services.textes_successifs import Lien, _numero_de_base, _vise, lignes_de_statut
 
 
@@ -150,15 +156,40 @@ def controler(liens: Sequence[Lien], detail: bool = False) -> int:
     return defauts
 
 
+def controler_historiques(historiques: Sequence[LienHistorique], detail: bool = False) -> int:
+    """
+    Les liens de l'historique : les memes controles que LIENS, plus le texte
+    qui les a depasses, quand sa reference est saisie. Un lien d'historique
+    mal pose ne fausse pas le chat, mais il ferait dire a la page d'un texte
+    qu'un article a ete reecrit par un texte qui ne l'a pas touche.
+    """
+    defauts = controler([h.lien for h in historiques], detail)
+    with SyncSessionLocal() as session:
+        for historique in historiques:
+            reference = historique.depasse_par_reference
+            if reference and _statut_du_texte(session, reference) is None:
+                print(f"DEFAUT {historique.lien.texte} <- {historique.lien.par_reference or '(absent)'} : "
+                      f"texte qui le depasse {reference} absent de la base")
+                defauts += 1
+    return defauts
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Controle en base des liens entre textes successifs.")
     parser.add_argument("--candidats", help="fichier Python definissant LIENS")
     parser.add_argument("--detail", action="store_true", help="liste les morceaux marques")
+    parser.add_argument(
+        "--historiques", action="store_true", help="controle aussi LIENS_HISTORIQUES (page d'un texte)"
+    )
     args = parser.parse_args(argv)
 
     liens = runpy.run_path(args.candidats)["LIENS"] if args.candidats else textes_successifs.LIENS
     defauts = controler(liens, args.detail)
     print(f"\n{len(liens)} lien(s), {defauts} en defaut")
+    if args.historiques:
+        en_defaut = controler_historiques(LIENS_HISTORIQUES, args.detail)
+        print(f"{len(LIENS_HISTORIQUES)} lien(s) d'historique, {en_defaut} defaut(s)")
+        defauts += en_defaut
     return 1 if defauts else 0
 
 

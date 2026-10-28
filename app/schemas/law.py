@@ -15,7 +15,10 @@ Date: 2026-01-10
 from datetime import date, datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
+
+from app.schemas.statut import StatutJuridique
+from app.services.reperes_textes import dates_de_l_acte
 
 # ============================================================================
 # Category Schemas
@@ -368,12 +371,66 @@ class LawDetailResponse(LawResponse):
     Volontairement SEPAREE de LawResponse : la route de LISTE charge deja les
     articles par `selectinload`, et les exposer la ferait transiter tout le
     corpus a chaque affichage de liste. Seul `GET /laws/{id}` rend ce schema.
+
+    DATES NOMMEES. `publication_date` n'est pas la publication au Journal
+    officiel : c'est la date que l'intitule donne a l'acte (« du 28 décembre
+    2021 »), lue a l'ingestion (scripts/ingest_corpus.py, _infer_date) ; et
+    `updated_at` est la derniere ecriture de la ligne en base, qu'une page
+    lisait comme une modification de la loi. D'ou des champs au nom explicite,
+    calcules (app/services/reperes_textes.dates_de_l_acte) : `date_signature`,
+    `annee`, `date_publication_jo` et `ajoute_le`. Les anciens restent, pour le
+    front deploye.
     """
 
     articles: List[ArticleSummary] = Field(
         default_factory=list,
         description="Articles du document, dans l'ordre, avec leur page",
     )
+    statut_juridique: Optional[StatutJuridique] = Field(
+        None,
+        description=(
+            "Liens prouvés avec d'autres textes (modifié, complété, abrogé, remplacé), "
+            "historique compris. Null seulement si le calcul a échoué : la page reste servie."
+        ),
+    )
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Date de l'acte, lue dans son intitulé (« Signé le … »). Null quand l'intitulé ne "
+            "la donne pas au jour près (afficher `annee`) ou ne date que sa publication au "
+            "Journal officiel (afficher `date_publication_jo`)"
+        )
+    )
+    @property
+    def date_signature(self) -> Optional[date]:
+        return dates_de_l_acte(self.publication_date, self.title).date_signature
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description="Année de l'acte, sûre même quand le jour ne l'est pas"
+    )
+    @property
+    def annee(self) -> Optional[int]:
+        return dates_de_l_acte(self.publication_date, self.title).annee
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Date de publication au Journal officiel, seulement quand l'intitulé ne donne que "
+            "celle-là (« publié au Journal officiel de l'OHADA du … ») ; null sinon"
+        )
+    )
+    @property
+    def date_publication_jo(self) -> Optional[date]:
+        return dates_de_l_acte(self.publication_date, self.title).date_publication_jo
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Jour où le texte a été ajouté à JuriX (« Ajouté à JuriX le … ») : date technique "
+            "de création de la fiche, jamais une date juridique"
+        )
+    )
+    @property
+    def ajoute_le(self) -> date:
+        return self.created_at.date()
 
 
 # ============================================================================
