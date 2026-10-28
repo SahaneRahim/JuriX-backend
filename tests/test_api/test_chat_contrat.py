@@ -44,6 +44,7 @@ CLES_SOURCE_CITEE = {
 CLES_TEXTE_CONSULTE = {
     "law_id", "law_reference", "law_title", "date_du_texte", "articles", "statut",
 }
+CLES_TEXTE_TROUVE = {"law_id", "law_reference", "law_title", "date_du_texte", "nb_articles"}
 
 
 def _service():
@@ -138,6 +139,13 @@ def test_le_flux_par_http(client):
         # Le front deploye n'y voit ni texte, ni fin, ni erreur.
         assert set(p) == {"chunk", "done", "session_id", "persona", "progression"}
         assert p["chunk"] == "" and p["done"] is False
+    # Les compteurs n'existent qu'a l'etape « textes_trouves » ; un texte
+    # trouve garde toutes ses cles, date inconnue comprise (null).
+    assert set(progressions[0]["progression"]) == {"etape", "libelle"}
+    trouves = progressions[1]["progression"]
+    assert set(trouves) == {"etape", "libelle", "nb_articles", "nb_textes", "textes"}
+    assert [set(t) for t in trouves["textes"]] == [CLES_TEXTE_TROUVE] * 2
+    assert trouves["textes"][1]["date_du_texte"] is None
     morceaux = [e for e in evenements if e.get("chunk")]
     assert all(set(e) == {"chunk", "done"} for e in morceaux)  # inchanges
 

@@ -427,7 +427,13 @@ class RAGStreamChunk(BaseModel):
             if isinstance(valeur, list):
                 donnees[champ] = [element.model_dump(mode="json") for element in valeur]
             else:
+                # La progression : ses compteurs n'existent qu'a une etape, et
+                # sont omis aux autres. Un texte trouve, lui, garde toutes ses
+                # cles : sans date connue, `date_du_texte` vaut null, comme dans
+                # les listes du dernier evenement.
                 donnees[champ] = valeur.model_dump(mode="json", exclude_none=True)
+                if getattr(valeur, "textes", None) is not None:
+                    donnees[champ]["textes"] = [t.model_dump(mode="json") for t in valeur.textes]
         return json.dumps(donnees, ensure_ascii=False)
 
 
