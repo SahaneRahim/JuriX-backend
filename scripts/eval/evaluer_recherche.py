@@ -1,9 +1,11 @@
 """
 Mesure le classement de la PAGE DE RECHERCHE, document par document.
 
-La page /search envoie une recherche en mode « text », filtree sur
-status=published, 20 resultats par page. Ce script rejoue exactement cette
-requete, sans cache et sans journaliser d'evenement de recherche (lecture
+La page /search envoie une recherche filtree sur status=published, 20
+resultats par page (en mode hybride depuis octobre 2026 : --modes hybrid ; le
+mode texte, defaut du script, n'appelle pas le fournisseur d'embeddings). Ce
+script rejoue cette requete comme SearchService.search() — re-ranking
+compris —, sans cache et sans journaliser d'evenement de recherche (lecture
 seule), et mesure le rang de la loi attendue :
 
 - les 102 questions relues de tests/fixtures/eval/retrieval_eval_v1.json
@@ -28,8 +30,10 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 RACINE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(RACINE))
 
+from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.schemas.search import SearchFilters, SearchRequest
+from app.services.reranker import rerank_chunks
 from app.services.search_service import SearchService
 
 JEU = RACINE / "tests" / "fixtures" / "eval" / "retrieval_eval_v1.json"
@@ -94,6 +98,12 @@ async def rejouer(service: SearchService, requete: str, mode: str) -> Dict[str, 
         filters=SearchFilters(status="published"),
     )
     chunks = await service._execute_search_by_mode(demande)
+    # Le re-ranking, comme search() : c'est lui qui ordonne ce que la page
+    # affiche. Saute, le script mesurait un classement que la production ne
+    # sert pas, et ne voyait aucun changement qui ne touche que lui — la borne
+    # des lignes niveau loi (LAW_CHUNK_MAX_CHARS) n'agit que la.
+    if settings.RERANK_ENABLED and chunks:
+        chunks = rerank_chunks(requete, chunks)
     reponse = await service._build_search_response(demande, chunks, 0)
     return {
         "results": [{"law_id": r.law_id, "title": r.title, "score": round(r.relevance_score, 3),
