@@ -82,6 +82,17 @@ def _replier(texte: str) -> str:
     return "".join(c for c in decompose if not unicodedata.combining(c))
 
 
+def en_tete_de_l_intitule(titre: Optional[str]) -> str:
+    """
+    L'en-tete d'un intitule, avant le verbe de son objet : « Décret N°82/241 du
+    24 juin 1982 » pour « … modifiant […] du décret n°77/245 ». Ce qui suit
+    nomme d'AUTRES textes, jamais celui-ci.
+    """
+    titre = titre or ""
+    objet = _DEBUT_OBJET.search(titre)
+    return titre[: objet.start()] if objet else titre
+
+
 def numero_de_l_acte(titre: Optional[str]) -> Optional[str]:
     """
     Le numero de l'acte, tel qu'ecrit dans son intitule, espaces retires.
@@ -95,8 +106,7 @@ def numero_de_l_acte(titre: Optional[str]) -> Optional[str]:
     """
     if not titre:
         return None
-    objet = _DEBUT_OBJET.search(titre)
-    tete = titre[: objet.start()] if objet else titre
+    tete = en_tete_de_l_intitule(titre)
     trouve = _NUMERO.search(tete) or _NUMERO_SANS_SIGNE.search(_ARTICLE_DEFINI.sub("", tete))
     if not trouve:
         return None

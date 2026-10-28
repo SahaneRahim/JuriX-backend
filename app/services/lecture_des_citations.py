@@ -44,7 +44,9 @@ from typing import (
 
 from app.schemas.search import ChunkResult
 from app.services.liens_entre_textes import LIENS
+from app.services.reperes_textes import dates_de_l_acte, en_tete_de_l_intitule, numero_de_l_acte
 from app.utils.chunk_refiner import est_pseudo_numero
+from app.utils.titre_officiel import numero_du_titre
 
 # ==================== NUMEROS D'ARTICLES ====================
 
@@ -163,6 +165,33 @@ def _fin_de_la_designation(texte: str, citation: "re.Match") -> int:
     """
     avant = texte[citation.start():citation.start(3)]
     return citation.start() + _LIAISON_FINALE.search(avant).start()
+
+
+# Un « _ » qui ouvre un italique : precede d'un blanc ou d'une ponctuation,
+# suivi d'une lettre ou d'un chiffre (« la loi _n° 92/007_ »).
+_SOULIGNE_OUVRANT = re.compile(r"(?<!\w)_(?=\w)")
+_EMPHASE = re.compile(r"[*_]")
+
+
+def _avant_l_emphase(texte: str, citation: "re.Match", fin: int) -> int:
+    """
+    `fin`, ramenee avant la premiere marque d'emphase du passage cite, sans le
+    mot de liaison qui la precede, et jamais en deca de la designation.
+
+    « l'article 35 de la loi _n° 92/007_ » soulignait « article 35 de la loi
+    _n° 92/007 » : un « _ » ouvrant sans son fermant, que le front ne peut pas
+    couper (revue du 2026-10-28). Le passage devient « article 35 de la loi »,
+    comme un nom en gras s'arrete a « article 35 » : un passage cite ne
+    contient jamais « * » ni « _ ».
+    """
+    marque = _EMPHASE.search(texte, citation.start(), fin)
+    if marque is None:
+        return fin
+    avant = texte[citation.start():marque.start()]
+    return max(
+        citation.start() + _LIAISON_FINALE.search(avant).start(),
+        _fin_de_la_designation(texte, citation),
+    )
 
 
 # ==================== NOMS DE TEXTES ====================
@@ -361,28 +390,54 @@ def _entete_d_article(voulu: str) -> "re.Pattern":
     Strict a dessein : un separateur apres le numero, et pas d'apostrophe
     avant, pour que « prévus à l'article 4 ci-dessus » ne passe pas pour
     l'article 4.
+
+    Deux formes reelles s'y ajoutent (revue du 2026-10-28) : le point double
+    de l'OCR (« Art..5- (1) », fin du morceau « 2 » de la loi 90/053) et
+    l'alinea reecrit d'une loi modificative (« ARTICLE 6. (2) (nouveau) : »,
+    loi 2008/001). Sans elles, une citation que le numero propre rattache
+    desormais au bon texte y etait dite non consultee.
     """
     numero = r"(?:1|premi[eè]re?)" if voulu == "1" else re.escape(voulu)
     return re.compile(
-        r"(?<![\w’'])art(?:icle)?\.?\s*" + numero
-        + r"(?:\s*(?:er|ère|re|e))?(?![\w.]?\d)\s*(?:\((?:nouveau|nouvelle|new)\)\s*)?"
+        r"(?<![\w’'])art(?:icle)?\.{0,2}\s*" + numero
+        + r"(?:\s*(?:er|ère|re|e))?(?![\w.]?\d)(?:\.?\s*\(\d+\))?"
+        r"\s*(?:\((?:nouveau|nouvelle|new)\)\s*)?"
         r"(?:\.\s*[-–—]|[-–—:])",
         re.IGNORECASE,
     )
+
+
+def porte_l_entete(contenu: Optional[str], numero: Optional[str]) -> bool:
+    """
+    Le morceau porte-t-il l'en-tete de l'article `numero` ?
+
+    Public : l'apercu d'un article (GET /laws/{id}/articles/{numero}) ne rend un
+    morceau « englobant » qu'a cette preuve, celle-la meme qui rattache la
+    citation du chat a ce morceau (_resoudre_article). Un couple incoherent
+    (article 999, morceau de l'article 35.1) etait rendu comme si le morceau
+    contenait l'article.
+    """
+    voulu = _normalize_article_number(numero or "")
+    return bool(voulu) and _entete_d_article(voulu).search(contenu or "") is not None
 
 
 # ==================== TEXTES DESIGNES PAR LEUR NUMERO ====================
 
 # « le décret N°2018/9387/CAB/PM », « l'arrêté n° 016/MTPS/SG/CJ du 26 mai
 # 1993 », « Law No. 2016/007 of 12 July 2016 ». Le numero commence par un
-# chiffre et finit sur un caractere de mot : « 92/007. » rend « 92/007 ».
+# chiffre et finit sur une lettre ou un chiffre : « 92/007. » rend « 92/007 »,
+# et « _le décret n° 94/199_ » (italique) rend « 94/199 ». Un « _ » y etait
+# avale (« 94/199_ ») : le numero n'etait plus celui du decret lu, la
+# citation etait signalee a tort, et le passage cite portait un « _ » que le
+# front ne peut pas couper (revue du 2026-10-28). Le mois de la date, en
+# lettres seulement, pour la meme raison.
 TEXTE_NUMEROTE_REGEX = re.compile(
     r"\b(?P<nature>lois?|d[ée]crets?|arr[êe]t[ée]s?|ordonnances?|d[ée]cisions?|circulaires?"
     r"|laws?|decrees?|orders?|ordinances?|circulars?)"
     r"(?:\s+(?:organique|présidentiel(?:le)?|conjoint|ministériel(?:le)?|organic|presidential))?"
     r"\s+(?:n\s*[°º]|no\.?|num[ée]ro|number)\s*"
-    r"(?P<numero>\d[\w/\-]*\w|\d)"
-    r"(?P<date>\s+(?:du|of)\s+\d{1,2}(?:er|st|nd|rd|th)?\s+\w+,?\s+\d{4})?",
+    r"(?P<numero>\d(?:[^\W_]|[/\-])*[^\W_]|\d)"
+    r"(?P<date>\s+(?:du|of)\s+\d{1,2}(?:er|st|nd|rd|th)?\s+[^\W\d_]+\.?,?\s+\d{4})?",
     re.IGNORECASE,
 )
 
@@ -415,21 +470,125 @@ def _forme_des_numeros(texte: str) -> str:
     return texte.replace("-", "/")
 
 
+# Les mots de nature, sous la forme de normaliser_le_nom.
+_MOTS_DE_NATURE = frozenset(mot for mots in _NATURES_EQUIVALENTES.values() for mot in mots)
+
+
+class NumeroPropre(NamedTuple):
+    """Le numero d'un texte et sa nature, lus en tete de SON intitule."""
+
+    numero: str
+    """Forme de comparaison : minuscules, sans accents, « - » ecrit « / »."""
+    nature: str
+    """Premier mot de nature de l'en-tete (« loi », « decret », « law »…)."""
+
+
+@lru_cache(maxsize=4096)
+def numero_propre(titre: Optional[str]) -> Optional[NumeroPropre]:
+    """
+    Le numero de CE texte et sa nature ; None si son intitule n'en porte pas
+    (codes, traites, noms de fichier).
+
+    Le numero est celui des lignes de liste (titre_officiel.numero_du_titre),
+    qui repare l'OCR (« N°202l/345 » se lit 2021/345), ou a defaut le premier
+    « N° » de l'en-tete (« la Loi N°2008/001 », « Loi organique N°… »,
+    « Constitution (Loi N°96/06 … », « LAW No. 2016/007 … »). Jamais un numero
+    de l'OBJET : « Décret N°2015/407 … portant application de la loi n°97/021 »
+    est le decret 2015/407, pas la loi 97/021. La nature est le premier mot de
+    nature de l'en-tete, pour la meme raison.
+    """
+    if not titre:
+        return None
+    numero = numero_du_titre(titre) or numero_de_l_acte(titre)
+    if not numero:
+        return None
+    mots = re.findall(r"[a-z]+", normaliser_le_nom(en_tete_de_l_intitule(titre)))
+    nature = next((mot for mot in mots if mot in _MOTS_DE_NATURE), None)
+    if nature is None:
+        return None
+    return NumeroPropre(_forme_des_numeros(normaliser_le_nom(numero)), nature)
+
+
 def porte_le_numero(nom: Optional[str], nature: str, numero: str) -> bool:
     """
     Le titre est-il celui du texte de cette nature et de ce numero ?
 
+    Compare au numero PROPRE du texte (numero_propre). La recherche se faisait
+    dans tout l'intitule : sur 323 vraies reponses, 18 citations etaient liees
+    a un texte qui ne faisait que CITER le numero (« la loi n°90/053 » a la loi
+    2021/022 « modifiant … la loi n° 90/053 », « la loi n°97/021 », absente du
+    corpus, au decret 2015/407 qui l'applique), et un intitule abime par l'OCR
+    (« N°202l/345 ») faisait signaler a tort une citation exacte (revue du
+    2026-10-28).
+
     La nature compte : une loi et un decret peuvent porter le meme numero.
-    Quelques mots peuvent les separer (« Loi organique N°… »), jamais un autre
-    numero.
     """
-    titre = _forme_des_numeros(normaliser_le_nom(nom))
-    voulu = _forme_des_numeros(normaliser_le_nom(numero))
-    motif = (
-        r"(?<!\w)(?:" + "|".join(_natures(nature)) + r")s?(?!\w)[^0-9]{0,40}?n°\s*"
-        + re.escape(voulu) + r"(?![\w/])"
+    propre = numero_propre(nom)
+    return (
+        propre is not None
+        and propre.numero == _forme_des_numeros(normaliser_le_nom(numero))
+        and propre.nature in _natures(nature)
     )
-    return re.search(motif, titre) is not None
+
+
+# Mois d'une date ecrite par le modele (« du 19 décembre 1990 », « of 12 July
+# 2016 »), sous la forme de normaliser_le_nom ; abreviations comprises.
+_MOIS_ECRITS = {
+    **dict.fromkeys(("janvier", "janv", "january", "jan"), 1),
+    **dict.fromkeys(("fevrier", "fevr", "fev", "february", "feb"), 2),
+    **dict.fromkeys(("mars", "march", "mar"), 3),
+    **dict.fromkeys(("avril", "avr", "april", "apr"), 4),
+    **dict.fromkeys(("mai", "may"), 5),
+    **dict.fromkeys(("juin", "june", "jun"), 6),
+    **dict.fromkeys(("juillet", "juil", "july", "jul"), 7),
+    **dict.fromkeys(("aout", "august", "aug"), 8),
+    **dict.fromkeys(("septembre", "sept", "sep", "september"), 9),
+    **dict.fromkeys(("octobre", "oct", "october"), 10),
+    **dict.fromkeys(("novembre", "nov", "november"), 11),
+    **dict.fromkeys(("decembre", "dec", "december"), 12),
+}
+
+
+def date_ecrite(texte: Optional[str]) -> Optional[date]:
+    """La date du groupe `date` de TEXTE_NUMEROTE_REGEX ; None si elle ne se lit pas."""
+    trouve = re.search(
+        r"(\d{1,2})(?:er|st|nd|rd|th)?\s+([a-z]+)\.?,?\s+(\d{4})", normaliser_le_nom(texte)
+    )
+    mois = _MOIS_ECRITS.get(trouve.group(2)) if trouve else None
+    if mois is None:
+        return None
+    try:
+        return date(int(trouve.group(3)), mois, int(trouve.group(1)))
+    except ValueError:
+        return None
+
+
+def de_cette_date(ecrite: Optional[date], jour: Optional[date], titre: Optional[str]) -> bool:
+    """
+    La date ecrite dans la citation est-elle celle du texte ? Comparee a sa date
+    d'acte (reperes_textes.dates_de_l_acte), ou a sa seule annee quand le jour
+    n'est pas sur. Rien d'ecrit, ou rien de connu : rien a contredire.
+
+    « le décret n° 94/199 du 14 août 1992 » n'est pas le decret du 7 octobre
+    1994 : le lier ouvrait un texte que la phrase ne nomme pas.
+    """
+    if ecrite is None:
+        return True
+    dates = dates_de_l_acte(jour, titre)
+    if dates.date_signature is not None:
+        return dates.date_signature == ecrite
+    return dates.annee is None or dates.annee == ecrite.year
+
+
+def designe_ce_texte(citation: "re.Match", titre: Optional[str], jour: Optional[date]) -> bool:
+    """
+    La citation (TEXTE_NUMEROTE_REGEX) designe-t-elle le texte de cet intitule
+    et de cette date : sa nature, son numero propre et, si elle est ecrite, sa
+    date ?
+    """
+    return porte_le_numero(titre, citation.group("nature"), citation.group("numero")) and (
+        de_cette_date(date_ecrite(citation.group("date")), jour, titre)
+    )
 
 
 # ==================== OCCURRENCES ====================
@@ -503,7 +662,9 @@ def _resoudre_article(
 
     Ordre des regles, du plus sur au moins sur :
     1. le texte nomme est consulte — pour « la même loi », celui de la citation
-       precedente : son article de ce numero, sinon un morceau de cet article
+       precedente ; pour « la loi n° 90/053 », celui dont c'est le numero
+       PROPRE (designe_ce_texte), jamais un texte dont l'intitule ne fait que
+       le citer : son article de ce numero, sinon un morceau de cet article
        (« 55.1 »), sinon le morceau qui en porte l'en-tete (« SECTION_1 »
        d'une loi modificative), sinon sa ligne niveau loi ; sinon RIEN —
        jamais l'article de meme numero d'une AUTRE loi presente ;
@@ -512,7 +673,9 @@ def _resoudre_article(
        rien ;
     3. le texte n'est reconnu nulle part (le modele l'a nomme autrement, ou ne
        l'a pas nomme : « L'article 37 précise… ») : le premier extrait qui
-       porte ce numero, comme avant.
+       porte ce numero, comme avant, avec les replis de la regle 1 (morceau,
+       puis en-tete). Rien : « article_non_consulte » si la citation ne nomme
+       aucun texte, « texte_non_consulte » si elle en nomme un.
     """
     anaphore = _ANAPHORE.match(mention) is not None
     if ne_nomme_rien(mention):
@@ -523,27 +686,26 @@ def _resoudre_article(
             return _Resolution(None, False, etendue, "texte_non_consulte", frozenset())
         lois = antecedent or frozenset()
         designe = lois or None
+    elif (numerote := TEXTE_NUMEROTE_REGEX.match(mention)) is not None:
+        # « l'article 6 de la Loi N°2008/001 » : la loi 2008/001, et non la
+        # loi 2026/002, dont l'intitule « modifiant … la loi N°2008/001 »
+        # contient le meme nom (revue du 2026-10-28). Le nom souligne peut
+        # aller au-dela du numero, mais dans l'intitule de CE texte seulement.
+        lois = frozenset(
+            e.law_id for e in extraits
+            if designe_ce_texte(numerote, e.law_title, e.publication_date)
+        )
+        fin = _reconnaitre(mention, {i: noms[i] for i in lois if i in noms})[0] if lois else 0
+        etendue, designe = max(numerote.end(), fin), lois
     else:
         etendue, lois = _reconnaitre(mention, noms)
         lois = frozenset(lois)
         designe = lois
     if lois:
         candidats = [e for e in extraits if e.law_id in lois]
-        identique = next(
-            (e for e in candidats if e.number and _normalize_article_number(e.number) == voulu),
-            None,
-        )
-        if identique is not None:
-            return _Resolution(identique, True, etendue, None, designe)
-        partie = next((e for e in candidats if _numero_de_base(e.number) == voulu), None)
-        if partie is not None:
-            return _Resolution(partie, False, etendue, None, designe)
-        entete = _entete_d_article(voulu)
-        porteur = next(
-            (e for e in candidats if e.number and entete.search(e.content or "")), None
-        )
-        if porteur is not None:
-            return _Resolution(porteur, False, etendue, None, designe)
+        trouve = _l_article_parmi(voulu, candidats)
+        if trouve is not None:
+            return _Resolution(trouve[0], trouve[1], etendue, None, designe)
         entier = next((e for e in candidats if not e.number), None)
         if entier is not None:
             return _Resolution(entier, False, etendue, None, designe)
@@ -556,18 +718,47 @@ def _resoudre_article(
             # modalités… » qui suit n'est pas a souligner.
             return _Resolution(None, False, numerote.end(), "texte_non_consulte", frozenset())
         etendue = etendue_du_nom(mention)
+    trouve = _l_article_parmi(voulu, extraits)
+    if trouve is not None:
+        return _Resolution(
+            trouve[0], trouve[1], etendue, None,
+            None if designe is None else frozenset({trouve[0].law_id}),
+        )
+    # Sans nom (« L'article 35 précise… »), aucun texte n'est en cause : c'est
+    # l'article qui manque aux extraits lus. « texte_non_consulte » disait le
+    # contraire de la citation (revue du 2026-10-28).
+    if designe is None:
+        return _Resolution(None, False, etendue, "article_non_consulte", None)
+    return _Resolution(None, False, etendue, "texte_non_consulte", frozenset())
+
+
+def _l_article_parmi(
+    voulu: str, extraits: Sequence[ChunkResult]
+) -> Optional[Tuple[ChunkResult, bool]]:
+    """
+    (extrait, numero identique) de l'article `voulu` parmi `extraits` : son
+    morceau de ce numero, sinon un morceau de cet article (« 55.1 »), sinon le
+    morceau qui en porte l'en-tete (« SECTION_1 » d'une loi modificative). Le
+    premier dans l'ordre du contexte, a chaque etape.
+
+    Une seule suite de replis pour un texte nomme (regle 1) et pour une
+    citation sans nom (regle 3) : « L'article 35 précise… », avec les
+    morceaux 35.1 et 35.2 du Code du travail lus, etait signale introuvable
+    alors que sa forme nommee se rattachait.
+    """
     identique = next(
-        (e for e in extraits if e.number and _normalize_article_number(e.number) == voulu),
-        None,
+        (e for e in extraits if e.number and _normalize_article_number(e.number) == voulu), None
     )
     if identique is not None:
-        return _Resolution(
-            identique, True, etendue, None,
-            None if designe is None else frozenset({identique.law_id}),
-        )
-    return _Resolution(
-        None, False, etendue, "texte_non_consulte", None if designe is None else frozenset()
-    )
+        return identique, True
+    partie = next((e for e in extraits if _numero_de_base(e.number) == voulu), None)
+    if partie is not None:
+        return partie, False
+    entete = _entete_d_article(voulu)
+    porteur = next((e for e in extraits if e.number and entete.search(e.content or "")), None)
+    if porteur is not None:
+        return porteur, False
+    return None
 
 
 def _textes_nommes_par_les_statuts(extraits: Iterable[ChunkResult]) -> List[TexteNomme]:
@@ -605,10 +796,10 @@ def lire_les_citations(texte: str, extraits: Sequence[ChunkResult]) -> List[Occu
 
     # Les textes designes par leur numero, rattaches d'avance : ce sont des
     # citations, et aussi l'antecedent possible d'un « article 5 de la même loi ».
+    # Au texte dont c'est le numero propre, et a lui seul (designe_ce_texte).
     numerotes = [
         (match, next(
-            (e for e in extraits
-             if porte_le_numero(e.law_title, match.group("nature"), match.group("numero"))),
+            (e for e in extraits if designe_ce_texte(match, e.law_title, e.publication_date)),
             None,
         ))
         for match in TEXTE_NUMEROTE_REGEX.finditer(texte)
@@ -630,7 +821,10 @@ def lire_les_citations(texte: str, extraits: Sequence[ChunkResult]) -> List[Occu
         prefixe = (match.group(1) or "").strip()
         numero_cite = f"{prefixe} {match.group(2)}".strip()
         voulu = _normalize_article_number(match.group(2))
-        mention = _mention_utile(match.group(3))
+        # Un italique ouvert dans le nom (« la loi _n° 92/007_ ») ne le coupe
+        # pas : lu comme un blanc, de meme longueur, pour que les positions
+        # tiennent. Le « _ » fermant, lui, arrete le nom (_mention_utile).
+        mention = _SOULIGNE_OUVRANT.sub(" ", _mention_utile(match.group(3)))
         resolution = _resoudre_article(voulu, mention, extraits, noms, antecedent)
         # Le nom tel que la resolution l'a lu, et non toute la mention, qui
         # court jusqu'a la ponctuation : « la Constitution a été modifiée par
@@ -642,7 +836,7 @@ def lire_les_citations(texte: str, extraits: Sequence[ChunkResult]) -> List[Occu
         if resolution.etendue <= 0 or texte[match.start(3) - 1] in "*_":
             fin = _fin_de_la_designation(texte, match)
         else:
-            fin = match.start(3) + resolution.etendue
+            fin = _avant_l_emphase(texte, match, match.start(3) + resolution.etendue)
         if extrait is None:
             occurrences.append(Occurrence(match.start(), fin, "article", raison=resolution.raison))
             continue
@@ -663,7 +857,6 @@ def lire_les_citations(texte: str, extraits: Sequence[ChunkResult]) -> List[Occu
     for match, extrait in numerotes:
         if any(debut < match.end() and match.start() < fin for debut, fin in lues):
             continue  # le nom du texte d'une citation d'article
-        nature, numero = match.group("nature"), match.group("numero")
         if extrait is not None:
             occurrences.append(Occurrence(
                 match.start(), match.end(), "texte", extrait=extrait,
@@ -672,7 +865,7 @@ def lire_les_citations(texte: str, extraits: Sequence[ChunkResult]) -> List[Occu
             continue
         if nommes is None:
             nommes = _textes_nommes_par_les_statuts(extraits)
-        connu = next((n for n in nommes if porte_le_numero(n.titre, nature, numero)), None)
+        connu = next((n for n in nommes if designe_ce_texte(match, n.titre, n.date)), None)
         if connu is not None:
             occurrences.append(Occurrence(
                 match.start(), match.end(), "texte", texte_nomme=connu,
