@@ -89,6 +89,38 @@ async def test_toutes_les_pages_sans_doublon_ni_oubli(client, domaine):
 
 
 @pytest.mark.asyncio
+async def test_a_date_egale_l_ordre_des_actes(client, db_session, category_ids):
+    """
+    Cinq decrets du meme jour, ingeres dans le desordre (ids croissants,
+    numeros PRC decroissants), et une loi de reference d'une autre forme : a
+    date egale, le numero PRC (ordre de mise en ligne, celui des actes) range
+    les decrets, et la reference sans numero PRC passe apres eux.
+    """
+    domaine = category_ids[FONCTION_PUBLIQUE]
+    for i, prc in enumerate((10758, 10755, 10757, 10756, 10754)):
+        db_session.add(Law(
+            id=800 + i, reference=f"PRC-{prc}", title=f"Décret N°2026/{prc - 10474} du 31 août 2026 portant nomination",
+            type="décret", content="Contenu.", language="fr", status="published",
+            category_id=domaine, publication_date=date(2026, 8, 31),
+        ))
+    db_session.add(Law(
+        id=900, reference="LOI-2026-009", title="Loi N°2026/009 du 31 août 2026 portant statut",
+        type="loi", content="Contenu.", language="fr", status="published",
+        category_id=domaine, publication_date=date(2026, 8, 31),
+    ))
+    await db_session.commit()
+
+    page = (await client.get(f"/api/v1/laws/?category_id={domaine}&page=1")).json()
+    assert [ligne["reference"] for ligne in page["items"]] == [
+        "PRC-10758", "PRC-10757", "PRC-10756", "PRC-10755", "PRC-10754", "LOI-2026-009",
+    ]
+    croissant = (await client.get(f"/api/v1/laws/?category_id={domaine}&page=1&sort=date_asc")).json()
+    assert [ligne["reference"] for ligne in croissant["items"]] == [
+        "PRC-10754", "PRC-10755", "PRC-10756", "PRC-10757", "PRC-10758", "LOI-2026-009",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_tri_croissant(client, domaine):
     page = (await client.get(f"/api/v1/laws/?category_id={domaine}&page=1&page_size=5&sort=date_asc")).json()
     dates = [ligne["publication_date"] for ligne in page["items"]]
