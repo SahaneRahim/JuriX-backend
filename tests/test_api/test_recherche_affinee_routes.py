@@ -120,12 +120,17 @@ async def test_la_premiere_page_par_pertinence_est_celle_du_parcours_classique(
 async def test_parcourir_les_pages_filtrees_donne_le_total(client, corpus):
     """
     Filtre puis tri puis page : toutes les pages reunies donnent exactement
-    `total` decrets, chacun une fois, par date decroissante.
+    `total` decrets, chacun une fois, par date decroissante. Et chaque page est
+    PLEINE jusqu'a la derniere : une page decoupee avant le filtre, puis
+    filtree, garderait le meme total et la meme reunion, mais des pages
+    creuses (mutation de la revue du 2026-10-28, que ce test laissait passer).
     """
     vus, offset = [], 0
     while True:
         corps = await _chercher(client, limit=4, offset=offset, sort="date_desc",
                                 refine={"types": ["decret"]}, facets=True)
+        attendu = max(0, min(4, corps["total"] - offset))
+        assert len(corps["results"]) == attendu, (offset, corps["total"])
         if not corps["results"]:
             break
         vus.extend(corps["results"])
@@ -137,6 +142,23 @@ async def test_parcourir_les_pages_filtrees_donne_le_total(client, corpus):
     assert dates == sorted(dates, reverse=True)
     assert corps["sort"] == "date_desc"
     assert corps["candidates"] == 27
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tri", ["date_asc", "date_desc", "pertinence"])
+async def test_les_filtres_s_appliquent_avant_la_page(client, corpus, tri):
+    """
+    La garantie centrale de P7 : sous un filtre selectif, la page 1 est pleine,
+    et c'est le debut de la liste filtree entiere, dans le meme ordre.
+    """
+    refine = {"types": ["arrêté"]}
+    entiere = await _chercher(client, limit=50, sort=tri, refine=refine)
+    page_1 = await _chercher(client, limit=3, sort=tri, refine=refine)
+
+    assert entiere["total"] == page_1["total"] == 8
+    assert len(page_1["results"]) == 3
+    assert all(r["type"] == "arrêté" for r in page_1["results"])
+    assert [r["law_id"] for r in page_1["results"]] == [r["law_id"] for r in entiere["results"][:3]]
 
 
 @pytest.mark.asyncio
