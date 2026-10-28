@@ -17,7 +17,7 @@ Date: 2026-01-10
 from datetime import date
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.reperes import ReperesDuTexte
 
@@ -108,7 +108,13 @@ class SearchRefine(BaseModel):
     de chaque branche et delimitent l'ensemble lui-meme. Ceux-ci le
     restreignent sans le recalculer : leurs resultats sont exactement ceux que
     comptent les effectifs (`facets`) de la meme requete.
+
+    Une cle inconnue est REFUSEE (422) : `{"nature": ["loi"]}` pour
+    `{"types": ["loi"]}` rendait sans erreur la liste non filtree, affichee
+    comme filtree. Le type est nouveau, aucun client deploye ne l'envoie.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     types: Optional[List[str]] = Field(
         None,

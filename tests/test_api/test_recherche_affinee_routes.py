@@ -252,3 +252,18 @@ async def test_parametres_invalides(client, corpus):
         "/api/v1/search/", json={"query": "x", "refine": {"year_from": 2020, "year_to": 2010}}
     )
     assert reponse.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_une_cle_de_filtre_inconnue_est_refusee(client, corpus):
+    """
+    `nature` au lieu de `types` : la reponse etait la liste NON filtree (200),
+    affichee comme filtree. C'est desormais un 422 au format habituel.
+    """
+    corps = {"query": "indemnité", "mode": "text", "refine": {"nature": ["loi"]}}
+    reponse = await client.post("/api/v1/search/", json=corps)
+
+    assert reponse.status_code == 422
+    [erreur] = reponse.json()["detail"]
+    assert erreur["loc"] == ["body", "refine", "nature"]
+    assert erreur["type"] == "extra_forbidden"
