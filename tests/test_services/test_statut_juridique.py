@@ -27,6 +27,7 @@ from app.services.statut_juridique import (
     cle_article,
     construire_statut,
     construire_statut_d_un_article,
+    lien_qui_depasse,
 )
 from app.services.textes_successifs import (
     NATURES,
@@ -290,6 +291,32 @@ def test_une_abrogation_d_autres_articles_ne_depasse_rien():
     ancien, _ = _statut([modifie, abroge]).modifie_par
 
     assert ancien.depasse is False
+
+
+@pytest.mark.parametrize("portee_de_l_abrogation", [("53",), ()])
+def test_une_abrogation_limitee_a_une_section_ne_depasse_pas_les_autres(portee_de_l_abrogation):
+    """
+    Garde de section de lien_qui_depasse. Le Code civil reprend les memes
+    numeros dans plusieurs titres : une abrogation limitee au titre 5 (un
+    article, ou tout le titre) ne fait pas de l'article 53 du titre 2, modifie
+    avant, de l'historique. Aucun lien du releve ne l'exercait encore : tous
+    les abrogations et remplacements y ont `section` None.
+    """
+    titre_2, titre_5 = "TITRE 2 Des actes de l'état civil.", "TITRE 5 Du mariage."
+    modifie = _lien(articles=("53",), section=titre_2)
+
+    def abrogation(section):
+        return _lien(nature="abroge", par_date=date(2024, 1, 2), par_reference="T-2024",
+                     par_titre="la Loi N°2024/001 du 2 janvier 2024",
+                     articles=portee_de_l_abrogation, section=section)
+
+    ailleurs = abrogation(titre_5)
+    assert lien_qui_depasse(modifie, [modifie, ailleurs]) is None
+    assert _statut([modifie, ailleurs]).modifie_par[0].depasse is False
+
+    au_meme_endroit = abrogation(titre_2)
+    assert lien_qui_depasse(modifie, [modifie, au_meme_endroit]) is au_meme_endroit
+    assert _statut([modifie, au_meme_endroit]).modifie_par[0].depasse is True
 
 
 def test_un_lien_historique_est_depasse_et_nomme_ce_qui_l_a_depasse():
