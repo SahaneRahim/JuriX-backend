@@ -117,3 +117,16 @@ async def test_les_chiffres_du_corpus_sont_gardes_en_memoire(client, db_session,
     assert _instructions(chaud) == 0 and chaud.json() == froid.json()
     assert froid.json()["textes"] == 1 and recalcule.json()["textes"] == 2
     assert (await client.get("/api/v1/corpus/")).status_code == 200
+
+
+async def test_un_texte_archive_par_un_administrateur_sort_aussitot_des_chiffres(admin_client, db_session):
+    """Le cache memoire ne doit pas compter dix minutes de plus un texte retire."""
+    loi = await _loi(db_session, "PRC-1", "Décret N°2026/282 du 31 août 2026 portant", [("1", "Texte.")],
+                     type="décret")
+    avant = (await admin_client.get("/api/v1/corpus")).json()
+
+    reponse = await admin_client.put(f"/api/v1/laws/admin/{loi.id}", json={"status": "archived"})
+
+    assert reponse.status_code == 200
+    apres = (await admin_client.get("/api/v1/corpus")).json()
+    assert (avant["textes"], apres["textes"]) == (1, 0)

@@ -41,6 +41,7 @@ from app.schemas.law import (
 )
 from app.schemas.statut import ArticleApercuResponse, ArticleHomonyme, StatutJuridique
 from app.services.article_reference import normalize_number
+from app.services.chiffres_du_corpus import invalider_cache_corpus
 from app.services.document_storage import (
     DocumentInaccessible,
     DocumentIntrouvable,
@@ -59,6 +60,7 @@ from app.services.statut_juridique import (
     InfoTexte,
     MorceauDuTexte,
     contient_le_repere,
+    invalider_cache_statut,
     morceaux_etablis,
     statut_d_un_article,
     statut_du_texte,
@@ -85,6 +87,18 @@ router = APIRouter(tags=["Laws"])
 
 
 # ==================== DEPENDENCIES ====================
+
+
+def _oublier_les_chiffres_du_corpus() -> None:
+    """
+    Vide les caches memoire tires du corpus : les chiffres de GET /corpus et les
+    textes nommes par le statut juridique. Sans cela, un texte qu'un
+    administrateur publie, archive ou supprime resterait compte, ou lien
+    consultable, jusqu'a dix minutes. Une ingestion par script, dans un autre
+    processus, n'y passe pas : la duree du cache la couvre.
+    """
+    invalider_cache_corpus()
+    invalider_cache_statut()
 
 
 # L'authentification reelle vit dans app/core/auth.py (JWT + bcrypt + roles).
@@ -1072,6 +1086,7 @@ async def ingest_law(
                 # Invalider le cache après traitement
                 async with AsyncSessionLocal() as cache_db:
                     await invalidate_search_cache(cache_db)
+                _oublier_les_chiffres_du_corpus()
             except Exception as bg_err:
                 logger.error(f"❌ Background processing failed: {bg_err}", exc_info=True)
 
@@ -1164,6 +1179,7 @@ async def create_law(
         await db.refresh(new_law)
         # Creee a l'instant : aucun article ne la reference encore.
         new_law.article_count = 0
+        _oublier_les_chiffres_du_corpus()
 
         logger.info(f"✅ Law created: ID={new_law.id}, reference={new_law.reference}")
         return new_law
@@ -1227,6 +1243,7 @@ async def update_law(
 
         await db.commit()
         await db.refresh(existing_law)
+        _oublier_les_chiffres_du_corpus()
 
         logger.info(f"✅ Law {law_id} updated")
         return await _avec_nombre_d_articles(db, existing_law)
@@ -1287,6 +1304,7 @@ async def delete_law(
 
         # Invalider le cache de recherche
         await invalidate_search_cache(db)
+        _oublier_les_chiffres_du_corpus()
         
         logger.info(f"✅ Law {law_id} deleted")
         return None
