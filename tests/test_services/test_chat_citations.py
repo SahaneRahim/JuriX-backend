@@ -342,6 +342,34 @@ class TestCitationsDuFlux:
         assert [t["law_id"] for t in fin["textes_consultes_non_cites"]] == [3]
 
     @pytest.mark.asyncio
+    async def test_un_article_colle_au_dela_de_la_coupe_n_a_pas_ete_lu(self, base, monkeypatch):
+        """
+        L'article 125 du Code de procédure pénale est colle a la fin du morceau
+        « 124.1 ». Si la coupe du contexte passe avant lui, le modele ne l'a
+        pas lu : sa citation n'est portee par rien, meme si le morceau l'est.
+        """
+        from app.services import prompts
+
+        monkeypatch.setattr(prompts, "CONTEXT_MAX_CHARS_PER_CHUNK", 1_000)
+        cpp = "Loi N°2005/007 du 27 juillet 2005 portant Code de procédure pénale"
+        contenu = (
+            "(1) La garde à vue est une mesure de police. " * 25
+            + "\n\nArticle 125 — (1) Lorsque l'officier de police judiciaire…"
+        )
+        extraits = [_extrait(1241, 2005, "124.1", cpp, "LOI-2005-007", contenu)]
+        service = _service(base, extraits, [
+            "Voir l'article 124 de la Loi N°2005/007 et l'article 125 de la Loi N°2005/007.",
+        ])
+
+        evenements = await _evenements(service, _requete())
+
+        fin = evenements[-1]
+        assert [c["article"] for c in fin["citations"]] == ["124"]
+        assert [(c["texte_cite"], c["raison"]) for c in fin["citations_introuvables"]] == [
+            ("article 125 de la Loi N°2005/007", "article_non_consulte"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_le_statut_prouve_accompagne_la_citation(self, base):
         """
         Constitution, article 14 : reecrit par la loi 2008/001 (PRC-6284). Le
