@@ -79,6 +79,27 @@ async def search(
     - limit: Nombre résultats (1-50, défaut: 15)
     - offset: Offset pagination (défaut: 0)
 
+    **Recherche affinée** (paramètres facultatifs ; sans eux, rien ne change) :
+    - sort: pertinence (défaut) | date_desc | date_asc
+    - refine: types, category_ids, year_from/year_to, date_from/date_to —
+      filtres appliqués à TOUT l'ensemble candidat de la requête, avant la
+      pagination (à la différence de `filters`, qui restreint la recherche
+      elle-même, en SQL)
+    - facets: true pour les effectifs par nature, domaine et année
+
+    Avec l'un d'eux, la réponse porte `sort`, `candidates` (taille de
+    l'ensemble avant `refine`) et `facets` ; `total` compte les résultats
+    filtrés, exactement ceux que la pagination parcourt. L'ensemble candidat
+    est celui que le parcours classique classe pour une première page de 50
+    (200 morceaux), calculé une fois puis relu en cache : changer de page,
+    de tri ou de filtre ne relance pas la recherche. Les effectifs sont
+    disjonctifs : celui d'une valeur tient compte des autres filtres, pas du
+    sien.
+
+    Chaque résultat porte aussi, sur les deux parcours, les repères d'une
+    ligne dense : `objet` (tiré de l'intitulé, null si incertain), `numero`,
+    `date_signature`, `annee` et `statut` (liens prouvés, null si aucun).
+
     **Performance**:
     - Text: <50ms
     - Semantic: <200ms
