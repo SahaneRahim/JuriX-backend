@@ -54,16 +54,25 @@ _MENTIONS = {
         "conseil_longueur": "Posez une question plus précise pour obtenir la suite.",
         "interruption": "Réponse interrompue : la connexion avec le modèle a été coupée.",
         "conseil_interruption": "Reposez la question pour obtenir une réponse complète.",
+        "arret": "Réponse arrêtée avant la fin.",
+        "conseil_arret": "Reposez la question pour obtenir une réponse complète.",
     },
     "en": {
         "longueur": "Answer cut short: maximum length reached.",
         "conseil_longueur": "Ask a more specific question to get the rest.",
         "interruption": "Answer interrupted: the connection with the model was lost.",
         "conseil_interruption": "Ask again to get a complete answer.",
+        "arret": "Answer stopped before the end.",
+        "conseil_arret": "Ask again to get a complete answer.",
     },
 }
 # Fins dues a une interruption, et non a la longueur.
 _FINS_INTERROMPUES = frozenset({FIN_INTERROMPUE, "ERROR"})
+
+# Le lecteur a arrete la reponse (bouton « Arrêter », ou il est parti) : ce
+# qu'il a lu reste dans la conversation, et la conversation le dit. Propre au
+# chat : aucun fournisseur ne rend cette fin.
+FIN_ARRETEE = "ARRETEE"
 
 
 def mention_de_fin(fin: Optional[str], langue: str = "fr", conseil: bool = True) -> str:
@@ -72,10 +81,13 @@ def mention_de_fin(fin: Optional[str], langue: str = "fr", conseil: bool = True)
     complete. `fin` suit le vocabulaire commun (« STOP », « MAX_TOKENS »...) ;
     Gemini et Mistral le partagent.
     """
-    if fin not in FINS_INCOMPLETES:
+    if fin != FIN_ARRETEE and fin not in FINS_INCOMPLETES:
         return ""
     textes = _MENTIONS.get(langue, _MENTIONS["fr"])
-    cause = "interruption" if fin in _FINS_INTERROMPUES else "longueur"
+    if fin == FIN_ARRETEE:
+        cause = "arret"
+    else:
+        cause = "interruption" if fin in _FINS_INTERROMPUES else "longueur"
     phrase = textes[cause] + (" " + textes[f"conseil_{cause}"] if conseil else "")
     return f"\n\n*({phrase})*"
 

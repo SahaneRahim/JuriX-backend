@@ -10,12 +10,16 @@ Orchestrates the complete RAG pipeline:
 6. Persistence (Database)
 """
 
+import asyncio
 import logging
 import re
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+
+import anyio
 
 # `text` est indispensable a _fallback_search. Il etait importe localement
 # dans la fonction avant sa reecriture ; sans lui, chaque appel levait un
@@ -61,6 +65,7 @@ from app.services.llm import (  # noqa: F401 - mentions reexportees pour les tes
     ERREURS_LLM,
     ERREURS_QUOTA,
     ERREURS_SATURATION,
+    FIN_ARRETEE,
     MENTION_REPONSE_INTERROMPUE,
     MENTION_REPONSE_TRONQUEE,
     get_llm_service,
@@ -106,6 +111,11 @@ MESSAGE_LLM_ABSENT = (
     "Service de génération non configuré : renseignez la clé du fournisseur "
     "choisi par LLM_PROVIDER dans .env."
 )
+
+# Temps laisse a l'enregistrement d'une reponse arretee par le lecteur. Il se
+# fait apres la deconnexion, a l'abri de l'annulation : borne, pour qu'une base
+# qui ne repond plus ne retienne pas la requete indefiniment.
+DELAI_ENREGISTREMENT_ARRETEE_S = 5.0
 
 # Une reponse conversationnelle est certaine ET sans source : les deux vont
 # ensemble. C'est deja le choix de la sortie anticipee « article absent »
@@ -190,6 +200,25 @@ def _sans_citation() -> Dict[str, list]:
         "citations": [], "citations_introuvables": [],
         "articles_cites": [], "textes_consultes_non_cites": [],
     }
+
+
+@asynccontextmanager
+async def _ferme_a_la_sortie(flux):
+    """
+    `contextlib.aclosing`, tolerant a un flux qui n'a pas d'`aclose`.
+
+    Le flux du modele est un generateur asynchrone : le fermer coupe sa
+    connexion HTTP au fournisseur. Sans fermeture explicite, un flux
+    abandonne (lecteur parti pendant que le serveur envoyait un morceau) ne
+    l'etait qu'au passage du ramasse-miettes. Les doublures de tests rendent
+    parfois un objet sans `aclose` : rien a fermer, rien a casser.
+    """
+    try:
+        yield flux
+    finally:
+        fermer = getattr(flux, "aclose", None)
+        if fermer is not None:
+            await fermer()
 
 
 def _requete_des_identifiants(references: List[str]):
@@ -768,16 +797,33 @@ class RAGService:
             raison = {}
             # Meme budget que ask() : a 1000 jetons, la reflexion du modele
             # epuisait le budget avant ou pendant la reponse.
-            async for chunk in self.llm.generate_stream(
-                prompt=prompt,
-                system=system_prompt,
-                temperature=0.7,
-                max_tokens=ANSWER_MAX_TOKENS,
-                reflexion=settings.GEMINI_REFLEXION_REPONSE,
-                fin=lambda r: raison.update(fin=r),
-            ):
-                answer_parts.append(chunk)
-                yield RAGStreamChunk(chunk=chunk, done=False).en_json()
+            #
+            # Le flux du modele est FERME des que ce generateur l'est : quand le
+            # lecteur arrete la reponse (deconnexion), le serveur annule ou
+            # ferme ce generateur, et la connexion au fournisseur se coupe sur
+            # le champ, au lieu d'attendre le ramasse-miettes pendant que le
+            # modele continue d'ecrire — et de facturer.
+            try:
+                async with _ferme_a_la_sortie(self.llm.generate_stream(
+                    prompt=prompt,
+                    system=system_prompt,
+                    temperature=0.7,
+                    max_tokens=ANSWER_MAX_TOKENS,
+                    reflexion=settings.GEMINI_REFLEXION_REPONSE,
+                    fin=lambda r: raison.update(fin=r),
+                )) as flux_du_modele:
+                    async for chunk in flux_du_modele:
+                        answer_parts.append(chunk)
+                        yield RAGStreamChunk(chunk=chunk, done=False).en_json()
+            except (asyncio.CancelledError, GeneratorExit):
+                # Arretee par le lecteur : le flux du modele est deja ferme
+                # (ci-dessus). Ce qu'il a lu est enregistre, puis l'arret suit
+                # son cours.
+                await self._garder_la_reponse_arretee(
+                    request, conversation, answer_parts, search_results,
+                    retrieval_time_ms, generation_start,
+                )
+                raise
 
             # Une reponse restee incomplete le dit, comme dans `ask` : coupee
             # par le budget malgre la suite demandee, ou flux rompu.
@@ -827,6 +873,49 @@ class RAGService:
             yield RAGStreamChunk(
                 chunk="", done=True, error=str(e), error_code=code
             ).en_json()
+
+    async def _garder_la_reponse_arretee(
+        self,
+        request: RAGRequest,
+        conversation: Conversation,
+        answer_parts: List[str],
+        search_results: List[ChunkResult],
+        retrieval_time_ms: int,
+        generation_start: float,
+    ) -> None:
+        """
+        Enregistre la reponse que le lecteur a arretee, telle qu'il l'a lue.
+
+        POURQUOI. Sans cela, l'echange disparaissait : la question suivante
+        (« et pour un CDD ? ») arrivait sans contexte, et une conversation
+        neuve arretee des sa premiere question restait vide et sans titre dans
+        la liste du compte. La mention de fin dit que la reponse est incomplete,
+        au lecteur qui rouvre la conversation comme au modele qui relit
+        l'historique.
+
+        A L'ABRI DE L'ANNULATION. La deconnexion annule la tache, et Starlette
+        renouvelle l'annulation a chaque attente : sans protection,
+        l'enregistrement serait annule a son premier aller-retour. Borne a
+        quelques secondes : une base qui ne repond plus ne retient pas la
+        requete. Rien n'est appele cote modele : son flux est deja ferme.
+        """
+        texte = "".join(answer_parts)
+        if not texte.strip():
+            return
+        texte += mention_de_fin(FIN_ARRETEE, request.language)
+        with anyio.CancelScope(shield=True):
+            try:
+                with anyio.fail_after(DELAI_ENREGISTREMENT_ARRETEE_S):
+                    extraits = self._extraits_lus(search_results)
+                    citations = self._extract_citations(texte, extraits)
+                    confidence = self._calculate_confidence(texte, citations, search_results)
+                    await self._save_interaction(
+                        conversation, request.question, texte, citations, confidence,
+                        retrieval_time_ms, int((time.time() - generation_start) * 1000),
+                    )
+                logger.info("⏹️ Reponse arretee par le lecteur : %d caracteres gardes", len(texte))
+            except Exception as e:
+                logger.warning(f"⚠️ Reponse arretee non enregistree : {e!r}")
 
     def _evenement_de_progression(
         self,

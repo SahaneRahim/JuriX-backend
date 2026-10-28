@@ -35,11 +35,34 @@ from app.services.rag_service import (
     RAGQuotaError,
     RAGService,
     RAGServiceError,
+    _ferme_a_la_sortie,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class _FluxQuiSeFerme(StreamingResponse):
+    """
+    Une reponse en flux qui FERME son generateur, quoi qu'il arrive.
+
+    Starlette ne ferme pas le corps d'un flux abandonne. Selon que la
+    deconnexion du lecteur le surprend pendant une attente du generateur ou
+    pendant l'envoi d'un morceau — et selon le serveur : en ASGI 2.4, l'envoi
+    echoue au lieu d'annuler —, le generateur etait annule, ou laisse en plan
+    jusqu'au ramasse-miettes, et le flux du modele restait ouvert avec lui. La
+    fermeture explicite coupe le modele dans tous les cas, avant la fin de la
+    requete.
+    """
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            fermer = getattr(self.body_iterator, "aclose", None)
+            if fermer is not None:
+                await fermer()
 
 
 def get_rag_service(
@@ -228,14 +251,33 @@ async def ask_stream(request: RAGRequest, rag_service: RAGService = Depends(get_
 
     Each event is JSON:
     ```json
+    {"chunk": "", "done": false, "session_id": "...", "persona": "avocat",
+     "progression": {"etape": "recherche", "libelle": "Recherche dans les textes…"}}
+    {"chunk": "", "done": false, "session_id": "...", "persona": "avocat",
+     "progression": {"etape": "textes_trouves", "libelle": "8 articles trouvés dans 3 textes",
+                     "nb_articles": 8, "nb_textes": 3, "textes": [...]}}
+    {"chunk": "", "done": false, "session_id": "...", "persona": "avocat",
+     "progression": {"etape": "redaction", "libelle": "Rédaction de la réponse…"}}
     {"chunk": "text fragment", "done": false}
     {"chunk": "", "done": true, "sources": [...], "confidence": 0.85,
-     "session_id": "...", "persona": "avocat"}
+     "session_id": "...", "persona": "avocat",
+     "citations": [...], "citations_introuvables": [...],
+     "articles_cites": [...], "textes_consultes_non_cites": [...]}
     ```
+
+    Les evenements de progression precedent le premier morceau de texte ; une
+    reponse conversationnelle (salutation, question sur JuriX) n'en a aucun.
+    Les indices `debut`/`fin` des citations sont ceux du texte final (la
+    concatenation des `chunk`), en unites UTF-16, comme `String.slice`.
 
     `persona` (dernier evenement) est le profil effectif de la conversation.
     Un profil different de celui d'une conversation existante en ouvre une
     nouvelle : `session_id` change alors.
+
+    Arreter la reponse : couper la requete. La deconnexion arrete la
+    generation, sans autre appel au modele. Ce que le lecteur a lu reste dans
+    la conversation, suivi de la mention « Réponse arrêtée avant la fin » ;
+    l'identifiant de la conversation est venu avec la progression.
 
     **Example Usage (JavaScript):**
     ```javascript
@@ -262,15 +304,21 @@ async def ask_stream(request: RAGRequest, rag_service: RAGService = Depends(get_
         )
 
         async def event_generator():
+            # BOUTON « ARRÊTER ». Le front coupe la requete (AbortController) ;
+            # Starlette voit la deconnexion et annule ce generateur. Le flux du
+            # service, et avec lui celui du modele, est ferme a la sortie de ce
+            # bloc, quelle qu'en soit la cause : la generation s'arrete sur le
+            # champ, sans un appel de plus au fournisseur.
             try:
-                async for chunk_json in rag_service.ask_stream(request):
-                    yield f"data: {chunk_json}\n\n"
+                async with _ferme_a_la_sortie(rag_service.ask_stream(request)) as flux:
+                    async for chunk_json in flux:
+                        yield f"data: {chunk_json}\n\n"
             except Exception as e:
                 logger.error(f"❌ Stream error: {e}")
                 error_json = json.dumps({"error": str(e), "done": True})
                 yield f"data: {error_json}\n\n"
 
-        return StreamingResponse(
+        return _FluxQuiSeFerme(
             event_generator(),
             media_type="text/event-stream",
             headers={
