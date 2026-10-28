@@ -10,12 +10,16 @@ elles se contredisaient ; ces tests fixent :
 - la DATE : deux Actes uniformes OHADA dont l'intitule ne date que la
   publication au Journal officiel etaient « signés le 15 novembre 2023 » en
   liste et sans date de signature sur leur page ; le chat montrait la date
-  brute en base, 1er janvier de remplissage compris.
+  brute en base, 1er janvier de remplissage compris ;
+- le NUMERO d'acte : deux lectures de l'intitule, dont une seule repare l'OCR
+  (« N°202l/345 »).
 
 Fonctions pures et doublures : ni base, ni reseau.
 """
 
+import json
 from datetime import date, datetime
+from pathlib import Path
 
 import pytest
 
@@ -24,8 +28,12 @@ from app.schemas.law_list import LawListLightItem
 from app.services.prompts import _date_du_texte
 from app.services.rag_service import _date_affichee
 from app.services.reperes_textes import dates_de_l_acte
+from app.services.statut_juridique import InfoTexte, texte_lie
+from app.utils.titre_officiel import numero_du_titre
 
 pytestmark = pytest.mark.unit
+
+_FIXTURE_TITRES = Path(__file__).resolve().parents[1] / "fixtures" / "titres_objets.json"
 
 AUPSRVE = (
     "Acte uniforme portant organisation des procédures simplifiées de recouvrement et des voies "
@@ -100,3 +108,34 @@ def test_le_modele_lit_l_annee_seule_quand_la_page_n_a_qu_elle(jour, titre):
     annee_seule = "jour non indiqué" in _date_du_texte(extrait)
 
     assert annee_seule == (dates.date_signature is None)
+
+
+# ==================== NUMERO D'ACTE ====================
+
+
+def _titres_du_corpus():
+    return [cas["titre"] for cas in json.loads(_FIXTURE_TITRES.read_text())["cas"]]
+
+
+def test_un_texte_lie_porte_le_numero_de_sa_ligne_de_liste():
+    """233 intitules reels relus a la main, plus les fautes d'OCR reparees en liste."""
+    titres = _titres_du_corpus() + [
+        "Décret N°202l/345 du 17 juin 2021 portant révocation d'un Magistrat",
+        "Arrêté N°0095/CAB/PR/du 16 février 2026 portant nomination de trente-huit (38) Inspecteurs",
+        "Arrêté N1078/CAB/PR du 31 décembre 2022 portant avancement de grade au choix",
+    ]
+    assert len(titres) > 200
+    for titre in titres:
+        infos = {"PRC-1": InfoTexte(1, "PRC-1", "décret", titre, date(2021, 6, 17), "published")}
+        lie = texte_lie("PRC-1", "le texte", None, infos)
+        assert lie.numero == numero_du_titre(titre) == _ligne(None, titre).numero, titre
+
+
+def test_un_texte_absent_du_corpus_garde_son_numero():
+    """Intitules du releve, ecrits pour une phrase : l'article retire, le numero lu."""
+    assert texte_lie(None, "la Loi n° 2012/015 du 21 décembre 2012", date(2012, 12, 21), {}).numero == (
+        "2012/015"
+    )
+    # La nature n'ouvre pas l'intitule : seule la seconde lecture trouve le numero.
+    constitution = "la Constitution (Loi N°96/06 du 18 janvier 1996 portant révision)"
+    assert texte_lie(None, constitution, date(1996, 1, 18), {}).numero == "96/06"

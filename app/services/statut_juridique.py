@@ -69,6 +69,7 @@ from app.services.textes_successifs import (
     reperes_a_lire,
 )
 from app.utils.chunk_refiner import est_pseudo_numero
+from app.utils.titre_officiel import numero_du_titre
 
 logger = logging.getLogger(__name__)
 
@@ -289,17 +290,21 @@ def texte_lie(
             id=info.id if publie else None,
             reference=info.reference,
             nature=info.type,
-            numero=numero_de_l_acte(info.titre),
+            # La lecture des lignes de liste (app/schemas/reperes.py) : un texte
+            # du corpus porte le meme numero dans une liste et sous le statut
+            # d'un autre. Elle repare aussi l'OCR (« N°202l/345 », « N1078 »).
+            numero=numero_du_titre(info.titre),
             titre=info.titre,
             **dates_de_l_acte(info.date, info.titre)._asdict(),
             consultable=publie,
         )
     # Absent de la base : l'intitule du releve, ecrit pour une phrase, et la
-    # date que le releve a lue dans le texte qui le cite.
+    # date que le releve a lue dans le texte qui le cite. Jamais dans une liste,
+    # il peut garder la lecture plus large de numero_de_l_acte en second.
     titre = intitule_sans_article(intitule)
     return TexteLie(
         nature=nature_depuis_intitule(titre),
-        numero=numero_de_l_acte(titre),
+        numero=numero_du_titre(titre) or numero_de_l_acte(titre),
         titre=titre,
         **dates_de_l_acte(jour, titre)._asdict(),
     )
