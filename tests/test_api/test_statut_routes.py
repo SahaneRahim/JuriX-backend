@@ -271,6 +271,19 @@ async def test_l_apercu_rend_l_article_entier_et_son_statut(client, constitution
     assert "content" not in corps, "jamais le texte entier de la loi"
 
 
+async def test_l_apercu_reste_leger(client, constitution, compteur):
+    """Une feuille d'apercu s'ouvre sur un telephone : quelques instructions, jamais la loi entiere."""
+    loi = constitution["loi"]
+
+    froid = await client.get(f"/api/v1/laws/{loi.id}/articles/6")
+    chaud = await client.get(f"/api/v1/laws/{loi.id}/articles/6")
+
+    # La loi (sans son texte), les morceaux du numero, la suite etablie
+    # (SECTION_2), puis les textes lies, une fois pour dix minutes.
+    assert (_instructions(froid), _instructions(chaud)) == (4, 3)
+    assert "Texte intégral du document." not in froid.text
+
+
 async def test_un_article_non_touche_n_a_pas_de_changement(client, constitution):
     corps = (await client.get(f"/api/v1/laws/{constitution['loi'].id}/articles/8")).json()
 
