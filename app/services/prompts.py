@@ -380,7 +380,7 @@ def format_chunk_block(chunk, index: int, deja_vues: Optional[Dict[str, int]] = 
     return "\n".join(lines)
 
 
-def build_context_string(chunks: List) -> str:
+def build_context_string(chunks: List, retenus: Optional[List] = None) -> str:
     """
     Assemble le contexte a partir des CHUNKS remontes par la recherche.
 
@@ -392,6 +392,14 @@ def build_context_string(chunks: List) -> str:
     Le budget global est respecte en tronquant sur une frontiere de paragraphe.
     Le premier chunk est toujours inclus, meme s'il excede a lui seul le
     budget : un contexte tronque vaut mieux qu'un contexte vide.
+
+    `retenus`, s'il est fourni, recoit les chunks effectivement places dans le
+    contexte, dans l'ordre, TELS QUE LE MODELE LES A LUS : un chunk tronque y
+    est une copie au contenu tronque. Le chat en a besoin pour dire quels
+    textes le modele a lus : un chunk ecarte par le budget n'a pas ete
+    « consulté », et une citation qui le vise n'est portee par rien de ce que
+    le modele a lu. De meme, un article colle au-dela de la coupe d'un chunk
+    (« Article 125 — » a la fin du morceau 124.1) n'a pas ete lu.
     """
     if not chunks:
         return ""
@@ -403,8 +411,8 @@ def build_context_string(chunks: List) -> str:
     statuts_vus: Dict[str, int] = {}
 
     for index, chunk in enumerate(chunks, 1):
-        content = chunk.content or chunk.excerpt or ""
-        content = _truncate_on_boundary(content, CONTEXT_MAX_CHARS_PER_CHUNK)
+        entier = chunk.content or chunk.excerpt or ""
+        content = _truncate_on_boundary(entier, CONTEXT_MAX_CHARS_PER_CHUNK)
 
         remaining = CONTEXT_MAX_CHARS - used
         if index > 1 and len(content) > remaining:
@@ -415,6 +423,12 @@ def build_context_string(chunks: List) -> str:
 
         blocks.append(f"{format_chunk_block(chunk, index, statuts_vus)}\n\n{content}")
         used += len(content)
+        if retenus is not None:
+            copier = getattr(chunk, "model_copy", None)
+            retenus.append(
+                chunk if content == entier or copier is None
+                else copier(update={"content": content})
+            )
         if chunk.language:
             languages.add(chunk.language)
 

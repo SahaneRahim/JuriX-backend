@@ -1160,9 +1160,14 @@ class TestFluxAligneSurAsk:
 
         evenements = await self._evenements(rag_service, requete)
 
-        assert len(evenements) == 1
-        assert evenements[0]["chunk"] == "Ce document ne contient pas d'article 99."
-        assert evenements[0]["done"] is True
+        # La recherche a ete lancee (progression), puis la reponse directe,
+        # seul evenement qui porte du texte.
+        assert [e["progression"]["etape"] for e in evenements if "progression" in e] == ["recherche"]
+        textes = [e for e in evenements if e["chunk"]]
+        assert len(textes) == 1 and textes[0] is evenements[-1]
+        assert evenements[-1]["chunk"] == "Ce document ne contient pas d'article 99."
+        assert evenements[-1]["done"] is True
+        assert evenements[-1]["citations"] == [] and evenements[-1]["articles_cites"] == []
 
     @pytest.mark.asyncio
     async def test_quota_epuise_a_son_code(
@@ -1257,8 +1262,11 @@ class TestUnProfilParConversation:
         systeme = rag_service.llm.generate_stream.call_args.kwargs["system"]
         assert systeme == get_system_prompt("avocat", "fr")
         assert evenements[-1]["persona"] == "avocat"
-        # Le profil n'est porte que par l'evenement final.
-        assert all("persona" not in e for e in evenements[:-1])
+        # Le profil n'est jamais porte par un morceau de texte : seulement par
+        # l'evenement final et par les evenements de progression, qui donnent
+        # l'identifiant de la conversation a une reponse que le lecteur arrete.
+        assert all("persona" not in e for e in evenements[:-1] if "progression" not in e)
+        assert all(e["persona"] == "avocat" for e in evenements if "progression" in e)
 
     @pytest.mark.asyncio
     async def test_sans_profil_le_profil_general(
