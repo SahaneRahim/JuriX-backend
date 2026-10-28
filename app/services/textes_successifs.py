@@ -145,6 +145,59 @@ def _excepte(lien: Lien, numero: Optional[str], contenu: Optional[str]) -> bool:
     )
 
 
+def morceau_touche(
+    lien: Lien,
+    numero: Optional[str],
+    contenu: Optional[str] = None,
+    section: Optional[str] = None,
+) -> Tuple[bool, Optional[str]]:
+    """
+    Le lien touche-t-il ce morceau du texte qu'il vise ?
+
+    (False, None) : non. (True, None) : le morceau porte un article vise, ou le
+    lien porte sur tout le texte. (True, « 6 ») : le morceau contient tout ou
+    partie de l'article 6, range sous un autre numero (`morceaux`).
+
+    Public parce que la page d'un texte (app/services/statut_juridique.py)
+    marque ses articles avec la MEME regle que les lignes de statut du chat :
+    deux copies divergeraient au premier cas particulier saisi.
+    """
+    if not _dans_la_section(lien, section):
+        return False, None
+    if _designe(lien.articles, numero) and not _excepte(lien, numero, contenu):
+        return True, None
+    article = _article_range_ailleurs(lien, numero, contenu)
+    return (article is not None), article
+
+
+def porte_le_changement(lien: Lien, numero: Optional[str]) -> bool:
+    """
+    Ce morceau du texte RECENT porte-t-il le changement ? Ni les visas ni la
+    signature ne disent ce qu'il change. `numero` None : la ligne « niveau loi ».
+    """
+    return numero is None or (
+        str(numero).strip().upper() not in _HORS_DISPOSITIF
+        and _designe(lien.par_articles, numero)
+    )
+
+
+def reperes_a_lire(lien: Lien, numero: Optional[str]) -> bool:
+    """
+    Faut-il le CONTENU de ce morceau pour decider de `morceau_touche` ?
+
+    Oui quand son numero est celui d'un `morceaux` ou d'une exception `sauf` :
+    la decision depend alors d'un repere dans le texte. Sans contenu, une
+    exception ne s'appliquerait jamais, et le morceau serait marque a tort. La
+    page d'un texte ne charge que ces morceaux-la, et non tout le texte.
+    """
+    if numero is None:
+        return False
+    numero = str(numero).strip()
+    return any(m == numero for m, _, _ in lien.morceaux) or any(
+        _numero_de_base(m) == _numero_de_base(numero) for m, _ in lien.sauf
+    )
+
+
 def _ou_le_trouver(lien: Lien) -> str:
     return (
         f" ({lien.par_reference})" if lien.par_reference
@@ -256,17 +309,12 @@ def lignes_en_deux(
                     articles_touches.append(lien)
                 else:
                     statuts.append((lien, _statut(lien)))
-            elif not _dans_la_section(lien, section):
                 continue
-            elif _designe(lien.articles, numero) and not _excepte(lien, numero, contenu):
-                statuts.append((lien, _statut(lien)))
-            elif (article := _article_range_ailleurs(lien, numero, contenu)) is not None:
+            touche, article = morceau_touche(lien, numero, contenu, section)
+            if touche:
                 statuts.append((lien, _statut(lien, article)))
         elif lien.par_reference == reference:
-            if numero is None or (
-                str(numero).strip().upper() not in _HORS_DISPOSITIF
-                and _designe(lien.par_articles, numero)
-            ):
+            if porte_le_changement(lien, numero):
                 inverses.append(_ce_que_ce_texte_change(lien))
     fin = _derniere_fin(lien for lien, _ in statuts)
     if fin is not None:
