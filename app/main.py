@@ -29,6 +29,7 @@ from app.api.routes import (
     search,
     upload,
 )
+from app.core import mesure_sql
 from app.core.config import settings
 from app.core.database import AsyncSession, close_db, get_db
 from app.services.search_service import precharger_les_embeddings
@@ -263,7 +264,8 @@ app.add_middleware(
 
 class DureeServeur:
     """
-    En-tete `Server-Timing: app;dur=<ms>` sur chaque reponse HTTP.
+    En-tete `Server-Timing: app;dur=<ms>, db;desc="n=<instructions> tx=<transactions>";dur=<ms>`
+    sur chaque reponse HTTP.
 
     POURQUOI. Le `search_time_ms` du tableau de bord s'arrete avant les
     ecritures qui suivent la recherche et avant la construction de la reponse :
@@ -273,6 +275,11 @@ class DureeServeur:
     tout le travail du serveur. Pour un flux, c'est le delai avant le premier
     octet. Les outils de developpement du navigateur l'affichent dans l'onglet
     Timing, et curl le montre sans rien installer.
+
+    La metrique `db` dit ce que la requete a demande a la base jusque-la :
+    instructions, transactions, et le temps passe a les attendre. Les
+    allers-retours, premiere cause de lenteur mesuree, se lisent ainsi en
+    production, sans proxy ni journal SQL (voir app/core/mesure_sql.py).
 
     Intergiciel ASGI pur, et non BaseHTTPMiddleware : celui-ci fait passer
     chaque corps de reponse par une file supplementaire, et casse le flux des
@@ -289,14 +296,22 @@ class DureeServeur:
             return
 
         debut = time.perf_counter()
+        # Ouverte ici, la mesure suit la requete dans les taches qu'elle lance
+        # (variable de contexte), et n'en voit aucune autre.
+        mesure, jeton = mesure_sql.commencer()
 
         async def envoyer(message):
             if message["type"] == "http.response.start":
                 duree_ms = (time.perf_counter() - debut) * 1000
-                MutableHeaders(scope=message).append("Server-Timing", f"app;dur={duree_ms:.1f}")
+                MutableHeaders(scope=message).append(
+                    "Server-Timing", f"app;dur={duree_ms:.1f}, {mesure.en_tete()}"
+                )
             await send(message)
 
-        await self.app(scope, receive, envoyer)
+        try:
+            await self.app(scope, receive, envoyer)
+        finally:
+            mesure_sql.terminer(jeton)
 
 
 # Ajoute APRES CORS, donc place AUTOUR de lui : la duree compte aussi les

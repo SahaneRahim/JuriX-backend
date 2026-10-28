@@ -943,6 +943,54 @@ class TestEcrituresDifferees:
         assert tache not in module._ECRITURES_EN_COURS
 
 
+class TestAllersRetours:
+    """
+    Une recherche hybride coutait 34 allers-retours en serie : SAVEPOINT et
+    SET LOCAL des reglages HNSW et trigramme, cache lu en sept, sondage du pool
+    a chaque emprunt. Ce test fige ce qu'elle demande desormais a la base, pour
+    qu'un SAVEPOINT ou une instruction de reglage ne revienne pas sans se voir.
+    Compte par le meme compteur que l'en-tete Server-Timing de production.
+    """
+
+    @pytest.mark.asyncio
+    async def test_une_recherche_hybride_tient_en_cinq_instructions_sans_savepoint(
+        self, db_session, sample_data, pg_engine
+    ):
+        from sqlalchemy import event
+
+        from app.core import mesure_sql
+
+        savepoints = []
+
+        def _savepoint(conn, name):
+            savepoints.append(name)
+
+        event.listen(pg_engine.sync_engine, "savepoint", _savepoint)
+        mesure_sql.brancher(pg_engine.sync_engine)
+        try:
+            service = SearchService(db_session, use_cache=True)
+            mesure, jeton = mesure_sql.commencer()
+            try:
+                reponse = await service.search(
+                    SearchRequest(query="responsabilité", mode="hybrid")
+                )
+            finally:
+                mesure_sql.terminer(jeton)
+            await ecritures_en_attente()
+        finally:
+            mesure_sql.debrancher(pg_engine.sync_engine)
+            event.remove(pg_engine.sync_engine, "savepoint", _savepoint)
+
+        # Les deux volets ont bien tourne.
+        sources = {c.source for c in reponse.chunks}
+        assert "semantic" in sources and sources & {"fts", "title_fts"}
+        # Session de la requete : cache, lois, titres flous, articles. Connexion
+        # du volet semantique : la requete vectorielle, reglages HNSW compris.
+        assert mesure.instructions <= 5
+        assert mesure.transactions <= 2
+        assert savepoints == []
+
+
 # ============================================================================
 # Test Edge Cases
 # ============================================================================

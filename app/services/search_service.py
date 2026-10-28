@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from app.core import mesure_sql
 from app.core.config import settings
 from app.models.law import Article, Category, Law
 from app.schemas.search import (
@@ -147,6 +148,9 @@ async def _ecrire_journal_et_cache(
     Journal de recherche puis cache, sur UNE connexion qui n'est pas celle de
     la requete, en deux transactions : l'echec de l'une n'emporte pas l'autre.
     """
+    # Lancee par la requete, la tache herite de sa mesure SQL ; ses
+    # instructions viennent pourtant apres l'en-tete Server-Timing.
+    mesure_sql.ne_plus_compter()
     async with moteur.connect() as connexion:
         async with AsyncSession(bind=connexion, expire_on_commit=False) as session:
             await record_search_event(session, **evenement)

@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.util import await_only
 
+from app.core import mesure_sql
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,9 @@ def _verifier_a_la_sortie(dbapi_connection, connection_record, connection_proxy)
     rendue_a = connection_record.info.get(_RENDUE_A)
     if rendue_a is None or time.monotonic() - rendue_a < PING_APRES_INACTIVITE_S:
         return
+    # Compte dans Server-Timing (ping=) : un aller-retour de plus pour la
+    # requete qui emprunte cette connexion.
+    mesure_sql.noter_un_sondage()
     try:
         # execute() sans argument : protocole simple, un seul aller-retour.
         await_only(connexion.execute("SELECT 1", timeout=DELAI_PING_S))
@@ -150,6 +154,9 @@ engine = create_async_engine(
     pool_recycle=-1,
 )
 brancher_verification_des_connexions(engine.sync_engine)
+# Instructions, transactions et connexions de chaque requete, pour l'en-tete
+# Server-Timing (voir app/core/mesure_sql.py).
+mesure_sql.brancher(engine.sync_engine)
 
 # Create async session factory
 AsyncSessionLocal = async_sessionmaker(
