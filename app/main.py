@@ -18,6 +18,7 @@ from app.api.routes import (
     articles,
     auth,
     batch_upload,
+    blog,
     categories,
     classifier,
     comparison,
@@ -383,5 +384,5 @@ app.include_router(corpus.router, prefix="/api/v1/corpus", tags=["corpus"])
 app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["analytics"])
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
 app.include_router(batch_upload.router, prefix="/api/v1/batch-upload", tags=["batch"])
-# Trigger reload
+app.include_router(blog.router, prefix="/api/v1/blog", tags=["blog"])
 
