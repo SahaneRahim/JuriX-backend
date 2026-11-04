@@ -157,6 +157,34 @@ class TestDeuxRecherches:
         # donnerait debut A, debut B, ...
         assert [e for e, _ in journal] == ["debut", "fin", "debut", "fin"]
 
+    async def test_la_meme_recherche_que_le_chat(self, db_session, code_minier, llm, monkeypatch):
+        """
+        Revue du 29/10/2026 : la comparaison fait rediger le modele, comme le
+        chat, mais lisait l'index HNSW, qui peut perdre son rappel sans bruit.
+        Volet semantique EXACT, et tableaux de programmes des lois de finances
+        retires sauf pour un sujet budgetaire, au vocabulaire du budget : le
+        « budget des mines » d'une entreprise n'en est pas un (revue du tour 3,
+        detecteur strict).
+        """
+        service = ComparisonService(db_session, llm=llm)
+        assert service.search_service.semantique_exacte is True
+        drapeaux = []
+        vraie = service.search_service.search
+
+        async def espion(requete):
+            drapeaux.append((requete.query, service.search_service.tableaux_de_programmes_exclus))
+            return await vraie(requete)
+
+        monkeypatch.setattr(service.search_service, "search", espion)
+
+        await service.compare("permis de recherche", "budget du ministère des mines")
+        await service.compare("budget des mines", "montant prévu de la redevance minière")
+
+        assert drapeaux == [
+            ("permis de recherche", True), ("budget du ministère des mines", False),
+            ("budget des mines", True), ("montant prévu de la redevance minière", True),
+        ]
+
     async def test_les_deux_contextes_atteignent_le_modele(
         self, db_session, code_minier, llm
     ):

@@ -838,73 +838,90 @@ class TestRoutageIntention:
         rag_service.search_service.search.assert_called_once()
 
 
-# ==================== SOURCES FABRIQUEES : LE GARDE-FOU ====================
+# ==================== AUCUNE SOURCE FABRIQUEE ====================
 
-class TestGardeFouDesSources:
+class TestAucuneSourceFabriquee:
     """
-    `_create_sources_from_results` fabrique une source quand le modele n'a rien
-    cite. Utile, mais applique sans condition il accroche la loi la mieux
-    classee a une reponse qui dit elle-meme n'avoir rien trouve.
+    `sources` ne porte que les articles que la reponse CITE et que la lecture
+    des citations RATTACHE a un extrait lu. Le repli qui fabriquait une source
+    (le premier extrait, ou un intitule qui partageait un mot avec la
+    question) est retire : revue du 29/10/2026 (tour 3), il accrochait un
+    tableau de loi de finances a une reponse sur le Code du travail, jusque
+    dans l'historique.
     """
 
-    @pytest.mark.parametrize(
-        "aveu",
-        [
-            # Cas fondateur, mesure en conditions reelles sur « que dit
-            # l'article 33 du Code Minier ? » : la reponse avouait l'absence et
-            # portait quand meme une source vers l'article 1.
-            "Les documents fournis ne contiennent pas l'article 33 de la Loi N°2023/014.",
-            "Cette information ne figure pas dans les documents fournis.",
-            "Les documents ne contiennent aucune information sur ce point.",
-            "The documents provided do not contain this information.",
-        ],
-    )
-    def test_pas_de_source_quand_la_reponse_avoue_ne_pas_savoir(
-        self, rag_service, mock_search_results, aveu
-    ):
-        assert not rag_service._peut_fabriquer_une_source(aveu, mock_search_results)
+    @staticmethod
+    async def _repondre(rag_service, mock_db_session, mock_search_results, texte):
+        mock_db_session.execute.return_value = MagicMock(
+            scalar_one_or_none=MagicMock(return_value=None)
+        )
+        rag_service.search_service.search.return_value = MagicMock(
+            results=[], chunks=mock_search_results, search_time_ms=1
+        )
+        rag_service.llm.generate.return_value = {"response": texte}
+        rag_service._save_interaction = AsyncMock()
+        reponse = await rag_service.ask(RAGRequest(question="Responsabilité des dirigeants ?"))
+        return reponse, rag_service._save_interaction.await_args.kwargs["citations"]
 
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "reponse",
+        "texte",
         [
-            # L'aveu porte sur LES DOCUMENTS ; ici la negation porte sur la LOI,
-            # ce qui est une vraie reponse juridique et garde sa source.
-            "La loi ne contient pas de disposition sur ce point, mais l'article 5 encadre le cas voisin.",
-            "Le Code ne comporte pas d'exception pour ce cas.",
+            # Une reponse juste, sans citation reconnue : le cas que le repli
+            # « servait ». Le lecteur voit les textes consultes, pas une source.
             "Les dirigeants sont responsables de leurs actes de gestion.",
+            "La loi ne contient pas de disposition sur ce point.",
+            # Un aveu (cas fondateur, « que dit l'article 33 du Code Minier ? »).
+            "Les documents fournis ne contiennent pas l'article 33 de la Loi N°2023/014.",
+            "The documents provided do not contain this information.",
+            # Un texte nomme sans article : aucun article cite.
+            "Selon le Code du travail, la procédure est gratuite.",
         ],
     )
-    def test_une_negation_portant_sur_la_loi_n_est_pas_un_aveu(
-        self, rag_service, mock_search_results, reponse
+    async def test_sans_citation_rattachee_aucune_source(
+        self, rag_service, mock_db_session, mock_search_results, texte
     ):
-        assert rag_service._peut_fabriquer_une_source(reponse, mock_search_results)
-
-    def test_pas_de_source_quand_la_reponse_avoue_en_anglais(
-        self, rag_service, mock_search_results
-    ):
-        assert not rag_service._peut_fabriquer_une_source(
-            "The supplied documents do not contain this information.",
-            mock_search_results,
+        reponse, enregistrees = await self._repondre(
+            rag_service, mock_db_session, mock_search_results, texte
         )
 
-    def test_pas_de_source_sous_le_seuil_de_pertinence(
-        self, rag_service, mock_search_results
+        assert reponse.sources == [] and enregistrees == []
+        # Ce que le modele a lu reste visible, comme « Textes consultés ».
+        assert {t.law_reference for t in reponse.textes_consultes_non_cites} == {
+            "LOI-2024-001", "LOI-2023-015",
+        }
+
+    @pytest.mark.asyncio
+    async def test_un_article_cite_et_rattache_est_la_seule_source(
+        self, rag_service, mock_db_session, mock_search_results
     ):
-        """Le moins mauvais resultat d'une recherche ratee n'est pas une source."""
-        mock_search_results[0].relevance_score = 0.1
-
-        assert not rag_service._peut_fabriquer_une_source(
-            "Les dirigeants sont responsables.", mock_search_results
+        reponse, enregistrees = await self._repondre(
+            rag_service, mock_db_session, mock_search_results,
+            "Selon l'article 161 du Code OHADA, les dirigeants sont responsables.",
         )
 
-    def test_source_fabriquee_au_dessus_du_seuil(self, rag_service, mock_search_results):
-        """Non-regression du cas utile : le repli sert encore."""
-        assert rag_service._peut_fabriquer_une_source(
-            "Les dirigeants sont responsables.", mock_search_results
+        assert [(s.law_reference, s.article_number) for s in reponse.sources] == [
+            ("LOI-2024-001", "161")
+        ]
+        assert [c.article_number for c in enregistrees] == ["161"]
+
+    @pytest.mark.asyncio
+    async def test_un_article_cite_que_rien_ne_porte_n_est_pas_une_source(
+        self, rag_service, mock_db_session, mock_search_results
+    ):
+        """Revue du 29/10/2026 : l'« article 76 du Code du travail » de l'incident."""
+        reponse, enregistrees = await self._repondre(
+            rag_service, mock_db_session, mock_search_results,
+            "En cas de licenciement abusif, l'article 76 du Code du travail prévoit des "
+            "dommages-intérêts.",
         )
 
-    def test_pas_de_source_sans_resultat(self, rag_service):
-        assert not rag_service._peut_fabriquer_une_source("Peu importe.", [])
+        assert reponse.sources == [] and enregistrees == []
+        assert reponse.citations_introuvables
+
+    def test_plus_de_repli_pour_fabriquer(self):
+        assert not hasattr(RAGService, "_create_sources_from_results")
+        assert not hasattr(RAGService, "_peut_fabriquer_une_source")
 
 
 # ==================== EXTRACTION DES CITATIONS ====================
@@ -1017,10 +1034,77 @@ class TestCitationsMultilingues:
 
         assert citations == []
 
-    def test_loi_nommee_autrement_le_numero_suffit(self, rag_service, mock_search_results):
-        """Repli conserve : la loi citee n'est reconnue nulle part dans le contexte."""
+    def test_un_texte_nomme_que_rien_ne_porte_n_est_pas_une_source(
+        self, rag_service, mock_search_results
+    ):
+        """
+        Ce test epinglait le repli inverse : un texte nomme que rien de
+        consulte ne porte (« l'Acte uniforme », ni le Code OHADA ni le Code des
+        sociétés) prenait l'article 5 du Code des sociétés. C'est la forme de
+        l'incident du 2026-10-29 : « l'article 76 du Code du travail » lie a
+        l'article 76 d'une loi de finances. Plus de source.
+        """
         citations = rag_service._extract_citations(
             "Selon l'article 5 de l'Acte uniforme, ils sont loyaux.", mock_search_results
+        )
+
+        assert citations == []
+
+    @staticmethod
+    def _avec_en_tete(extraits):
+        """Les memes extraits, leur contenu ouvert par l'en-tete « Article N.- »."""
+        return [c.model_copy(update={"content": f"Article {c.number}.- {c.content}"}) for c in extraits]
+
+    def test_sans_nom_de_texte_le_numero_suffit(self, rag_service, mock_search_results):
+        """
+        La citation ne nomme aucun texte, et rien avant elle : son numero la
+        lie si un extrait lu en PORTE l'en-tete (« Article 5.- »). Sans en-tete,
+        deux textes lus et rien pour departager : signalee, pas de source. La
+        regle de lecture_des_citations (tour 5 des citations) : ce test
+        epinglait le lien par le numero seul.
+        """
+        reponse = "L'article 5 précise qu'ils sont loyaux."
+
+        citations = rag_service._extract_citations(reponse, self._avec_en_tete(mock_search_results))
+
+        assert [c.article_id for c in citations] == [5]
+        assert rag_service._extract_citations(reponse, mock_search_results) == []
+
+    def test_sans_nom_apres_un_texte_non_consulte_pas_de_source(
+        self, rag_service, mock_search_results
+    ):
+        """
+        Revue du 2026-10-29 : « L'article 5 précise… » parle de l'Acte uniforme
+        que la phrase precedente cite, et qu'aucun extrait ne porte. Le numero
+        seul en faisait l'article 5 du Code des sociétés : la forme de
+        l'incident du 2026-10-29, sans le nom.
+        """
+        citations = rag_service._extract_citations(
+            "Selon l'article 5 de l'Acte uniforme, ils sont loyaux. L'article 5 précise "
+            "qu'ils le restent.",
+            mock_search_results,
+        )
+
+        assert citations == []
+
+    def test_un_verbe_apres_le_numero_ne_nomme_aucun_texte(self, rag_service, mock_search_results):
+        """
+        « traite » n'est pas un Traité : la citation garde son article, que
+        l'en-tete de l'extrait lu prouve (voir le test precedent).
+        """
+        citations = rag_service._extract_citations(
+            "L'article 161 traite de la responsabilité des dirigeants.",
+            self._avec_en_tete(mock_search_results),
+        )
+
+        assert [c.article_id for c in citations] == [161]
+
+    def test_la_loi_nommee_par_son_numero_en_anglais(self, rag_service, mock_search_results):
+        """« Law No. 2023/015 » etait coupe au point : « Law No » ne nommait rien."""
+        mock_search_results[1].law_title = "Loi N°2023/015 du 3 mars 2023 portant Code des sociétés"
+
+        citations = rag_service._extract_citations(
+            "Directors owe loyalty under Article 5 of Law No. 2023/015.", mock_search_results
         )
 
         assert [c.article_id for c in citations] == [5]
@@ -1126,17 +1210,22 @@ class TestFluxAligneSurAsk:
         assert kwargs["reflexion"] is None
 
     @pytest.mark.asyncio
-    async def test_source_de_repli_comme_ask(
-        self, rag_service, sample_rag_request, mock_search_results, mock_db_session, monkeypatch
+    async def test_sans_citation_aucune_source_comme_ask(
+        self, rag_service, sample_rag_request, mock_search_results, mock_db_session
     ):
-        """Une reponse juste sans citation reconnue garde ses sources."""
+        """
+        Une reponse juste sans citation reconnue n'a pas de source, dans le
+        flux comme dans `ask` ; ses textes lus restent dans
+        `textes_consultes_non_cites` (« Textes consultés » du front).
+        """
         self._preparer(rag_service, mock_db_session, mock_search_results,
                        ["Les dirigeants répondent de leurs fautes de gestion."])
-        monkeypatch.setattr(rag_service, "_peut_fabriquer_une_source", lambda *a: True)
 
         evenements = await self._evenements(rag_service, sample_rag_request)
 
-        assert evenements[-1]["sources"], "la source de repli manquait au flux"
+        fin = evenements[-1]
+        assert fin["sources"] == [] and fin["articles_cites"] == []
+        assert fin["textes_consultes_non_cites"], "les textes lus doivent rester visibles"
 
     @pytest.mark.asyncio
     async def test_document_ouvert_et_article_absent(
@@ -1149,7 +1238,7 @@ class TestFluxAligneSurAsk:
             persona="citoyen",
         )
 
-        async def _recuperation(requete, conversation):
+        async def _recuperation(requete, conversation, history=None):
             return [], absent
 
         monkeypatch.setattr(rag_service, "_retrieve_and_merge_context", _recuperation)

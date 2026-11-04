@@ -565,6 +565,85 @@ def message_sans_resultat(language: str, persona: Optional[str] = None) -> str:
 NO_RESULTS_MESSAGE = {lang: message_sans_resultat(lang) for lang in _SANS_RESULTAT_ENTETE}
 
 
+# La reponse de la BARRIERE du chat (RAGService._retenir_le_pertinent) : la
+# recherche a rendu des textes, mais aucun assez proche de la question, et le
+# modele n'est pas appele. Elle le dit sans detour, et renvoie vers la
+# recherche, qui montre ce que le corpus contient. Aucun numero d'article ni
+# nom de texte : rien n'a ete lu. Courte, et la meme pour tous les profils : il
+# n'y a rien a conseiller de plus que reformuler. Incident du 29/10/2026 :
+# faute de cette barriere, le modele a repondu sur des tableaux de lois de
+# finances et cite de memoire un « article 76 du Code du travail ».
+_SANS_TEXTE_PERTINENT = {
+    "fr": (
+        "Je n'ai trouvé dans les textes juridiques camerounais aucun passage assez "
+        "proche de votre question pour y répondre sans risque d'erreur. "
+        "Reformulez-la avec d'autres mots, ou cherchez directement dans les textes "
+        "avec la recherche."
+    ),
+    "en": (
+        "I found no passage in the Cameroonian legal texts close enough to your "
+        "question to answer it without risk of error. Try rephrasing it, or search "
+        "the texts directly with the search page."
+    ),
+}
+# Meme refus, quand la recherche par le sens n'a pas repondu (fournisseur
+# d'embeddings injoignable ou trop lent), ou n'a repondu que par l'index
+# (recherche exacte au-dela de son budget, sous une surcharge) : la barriere
+# n'a pu juger que sur les mots de la question, l'index n'etant pas cru seul
+# (RAGService._retenir_le_pertinent). Reformuler n'y changerait rien ;
+# reessayer, si. Mesure du 29/10/2026 : 4 appels a Voyage sur 330 ont expire
+# en une heure.
+_SANS_TEXTE_PERTINENT_VOLET_EN_PANNE = {
+    "fr": (
+        "La recherche par le sens est momentanément indisponible, et je n'ai trouvé "
+        "dans les textes juridiques camerounais aucun passage qui réponde sûrement à "
+        "votre question. Réessayez dans un instant, ou cherchez directement dans les "
+        "textes avec la recherche."
+    ),
+    "en": (
+        "Meaning-based search is temporarily unavailable, and I found no passage in "
+        "the Cameroonian legal texts that surely answers your question. Try again in a "
+        "moment, or search the texts directly with the search page."
+    ),
+}
+
+
+# Meme refus, pour une relance (« Peux-tu détailler ? ») que la recherche n'a
+# rattachee a rien, ni seule ni jointe a la question precedente
+# (RAGService._chercher_la_relance) : la reposer en entier, avec ses mots.
+_SANS_TEXTE_PERTINENT_RELANCE = {
+    "fr": (
+        "Je n'ai pas retrouvé dans les textes juridiques camerounais de passage qui réponde "
+        "à cette suite de la conversation. Posez votre question en entier, avec ses mots-clés, "
+        "ou cherchez directement dans les textes avec la recherche."
+    ),
+    "en": (
+        "I found no passage in the Cameroonian legal texts that answers this follow-up. Ask "
+        "your full question with its key words, or search the texts directly with the search "
+        "page."
+    ),
+}
+
+
+def message_sans_texte_pertinent(
+    language: str, volet_en_panne: bool = False, relance: bool = False
+) -> str:
+    """
+    La reponse de la barriere du chat, dans la langue de l'interface.
+    `volet_en_panne` : la recherche par le sens n'a pas repondu, ou seulement
+    par l'index (reessayer) ;
+    `relance` : une suite de conversation, cherchee aussi avec la question
+    precedente (la reposer en entier).
+    """
+    if volet_en_panne:
+        messages = _SANS_TEXTE_PERTINENT_VOLET_EN_PANNE
+    elif relance:
+        messages = _SANS_TEXTE_PERTINENT_RELANCE
+    else:
+        messages = _SANS_TEXTE_PERTINENT
+    return messages.get(language, messages["fr"])
+
+
 # ============================================================================
 # Explication d'un article isole
 # ============================================================================

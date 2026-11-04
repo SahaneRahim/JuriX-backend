@@ -8,7 +8,8 @@ Ce service implémente 3 modes de recherche:
 
 Architecture (PostgreSQL native):
 - FTS: tsvector / websearch_to_tsquery + pg_trgm (trigrammes)
-- pgvector: Vector similarity avec HNSW index
+- pgvector: Vector similarity avec HNSW index ; recherche EXACTE, sans
+  l'index, pour le chat (semantique_exacte, voir _lire_vecteurs_exacts)
 - RRF Fusion: Weighted Reciprocal Rank Fusion (40% text + 60% semantic)
 - Cache: Table query_cache PostgreSQL avec TTL (cache en base)
 
@@ -18,11 +19,14 @@ Version: 3.0.0 (PostgreSQL natif)
 
 import asyncio
 import logging
+import re
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -333,6 +337,241 @@ class IndexingError(SearchServiceError):
     pass
 
 
+# ==================== LE VOLET SEMANTIQUE : EXACT OU PAR L'INDEX ====================
+
+# hnsw.ef_search : bornes du parcours de l'index HNSW (_ef_search).
+#
+# 400 au moins, et non plus 40. Incident du 29/10/2026 : sur la question
+# d'accueil « Quelles indemnités en cas de licenciement abusif ? », l'index de
+# production rendait 0 des 10 vrais plus proches voisins a ef_search 160 (la
+# valeur de l'hybride, 8 x 20 candidats), 10 sur 10 a partir de 300 ; le chat
+# a repondu sur des tableaux de lois de finances. L'index a ete reconstruit
+# (m = 24, ef_construction = 200 : 10 sur 10 des 160), mais un rappel qui
+# s'effondre sans bruit sous un seuil ne doit plus dependre d'une marge aussi
+# mince. Valeur retenue par le proprietaire. Mesure sur jurix_dev (29/10/2026,
+# index m = 16, ef_construction = 64, moins bon que celui de production ;
+# enonce de _build_semantic_statement, 32 voisins publies), rappel moyen des
+# vrais plus proches voisins (pire question) de 160 a 400 : 0,995 (0,88) ->
+# 0,997 (0,91) sur les 102 questions francaises du jeu, 0,993 (0,66) -> 0,994
+# (0,66) sur leurs traductions ; a 1000, le repli du chat, 1,000 (0,97).
+# Cout : ~10 ms de mediane a 160 comme a 400, 17 a 24 ms a 1000.
+EF_SEARCH_MIN = 400
+EF_SEARCH_MAX = 1000
+
+# Chemins du volet semantique (VoletsDeLaRecherche.chemin), dans le journal et
+# dans la mesure (scripts/eval/evaluer_contexte_chat.py).
+CHEMIN_EXACT = "exact"            # recherche exacte, sans index (chat)
+CHEMIN_HNSW = "hnsw"              # parcours de l'index (/search)
+CHEMIN_REPLI_HNSW = "repli_hnsw"  # recherche exacte trop lente, index a ef_search 1000
+CHEMIN_ECHEC = "echec"            # fournisseur ou requete vectorielle en panne
+CHEMIN_ABSENT = "absent"          # rien a vectoriser, ou service d'embeddings absent
+
+# Reglages de la recherche EXACTE, poses par un enonce a part, AVANT elle :
+# enable_indexscan est lu par le planificateur, donc avant l'execution, et
+# statement_timeout au debut de l'enonce suivant. set_config(..., true) vaut
+# SET LOCAL : la transaction seule, rien ne fuit vers la requete suivante d'un
+# pooler en mode transaction.
+_REGLAGES_EXACTS_SQL = (
+    "SELECT set_config('enable_indexscan', 'off', true), "
+    "set_config('statement_timeout', :budget_ms, true)"
+)
+
+
+def _delai_depasse(erreur: BaseException) -> bool:
+    """
+    Vrai pour une requete annulee par statement_timeout (SQLSTATE 57014,
+    asyncpg QueryCanceledError), quelle que soit l'enveloppe de SQLAlchemy.
+    """
+    vues = 0
+    while erreur is not None and vues < 4:
+        if getattr(erreur, "sqlstate", None) == "57014" or getattr(erreur, "pgcode", None) == "57014":
+            return True
+        erreur = getattr(erreur, "orig", None) or erreur.__cause__
+        vues += 1
+    return False
+
+
+class VoletsDeLaRecherche(BaseModel):
+    """
+    Ce que le chat relit des deux volets de la derniere recherche hybride
+    (RAGService._retrieve_chunks) : la fusion RRF ecrase relevance_score en
+    place, et la reponse ne dit plus ni la similarite de ses extraits, ni ce
+    que le plein texte avait trouve.
+
+    - `chemin` : qui a servi le volet semantique (CHEMIN_*).
+    - `similarites` : similarite cosinus EXACTE de chaque article du volet
+      semantique avec la question, avant la fusion. La barriere du chat juge
+      ainsi ce que le modele lirait.
+    - `plein_texte` : les premiers ARTICLES du volet plein texte, dans leur
+      ordre et avec leurs scores d'avant la fusion. Le chat les remonte quand
+      le volet semantique est faible (RAGService._retenir_le_pertinent).
+
+    Mis en cache AVEC la reponse de la recherche du chat : une question
+    d'accueil reposee est servie par le cache, et le chat doit y retrouver ce
+    qu'il aurait vu en direct, sans requete de plus.
+    """
+
+    chemin: str = CHEMIN_ABSENT
+    similarites: Dict[int, float] = Field(default_factory=dict)
+    plein_texte: List[ChunkResult] = Field(default_factory=list)
+    # Tableaux de programmes des lois de finances retires des deux volets
+    # (voir est_un_tableau_de_programmes), pour le journal et la mesure.
+    tableaux_exclus: int = 0
+
+    @property
+    def similarite_max(self) -> Optional[float]:
+        return max(self.similarites.values()) if self.similarites else None
+
+
+# ==================== TABLEAUX DE PROGRAMMES DES LOIS DE FINANCES ====================
+#
+# POURQUOI. Incident du 29/10/2026 : pour « Quelles indemnités en cas de
+# licenciement abusif ? », le modele a lu des tableaux de lois de finances,
+# a repondu que les documents ne disaient rien, puis a cite de memoire un
+# « article 76 du Code du travail ». Ces tableaux ne sont pas du droit : ils
+# repartissent les credits de l'Etat par programme (autorisations
+# d'engagement, AE, et credits de paiement, CP), et les libelles de leurs
+# programmes (« AMELIORATION DE LA PROTECTION DU TRAVAIL », « PREVENTION DE LA
+# MALADIE ») ressemblent aux questions de tous les jours. Ils sortent encore
+# en tete pour « Le SMIG au Cameroun c'est combien ? » (6 extraits sur 8,
+# similarite 0,45 a 0,50, recherche exacte comprise) : aucun seuil de
+# similarite ne les ecarte. Ils ne servent qu'a une question sur le budget.
+#
+# QUELS MORCEAUX. Releve sur jurix_dev le 29/10/2026 (scripts/eval/
+# evaluer_contexte_chat.py --releve) : un morceau d'un texte dont l'intitule
+# est celui d'une loi de finances (« loi de finances », « loi des finances »,
+# « loi de reglement », ordonnances qui les modifient comprises) ET qui porte
+# l'une des marques d'un tableau de credits AE/CP :
+# - une ligne de tableau avec les colonnes AE et CP (« | AE | CP | »,
+#   « | VOTE AE | ... | VOTE CP | », « | AE LFI | ... | CP LFI | ») ;
+# - la phrase d'en-tete « autorisations d'engagement » et « credits de
+#   paiement », repetee en tete de chaque morceau du tableau ;
+# - « programmes concourant a la realisation des objectifs », la meme phrase
+#   quand l'OCR l'a abimee (« Les ds its es ns s s ddt budget general ouverts
+#   sur les programmes concourant... »).
+# Soit 1 177 morceaux de 29 textes (933 avec une ligne AE/CP, 922 avec la
+# phrase d'en-tete, 775 avec « programmes concourant »), sur 4 055 morceaux
+# de lois de finances ; aucun hors d'une loi de finances. Echantillons relus :
+# tous des tableaux de credits par programme.
+# RESTENT, parce que ce sont des regles ou d'autres tableaux : les taux et
+# baremes d'impots, droits d'accises, amendes (« | N° | LIBELLE | AMENDES | »),
+# tarifs, les articles du Code general des impots que les lois de finances
+# reprennent, les tableaux de performance des lois de reglement (sans AE ni
+# CP), et les ressources et charges par chapitre : 1 059 tableaux de lois de
+# finances restent. Les circulaires de
+# preparation du budget, qui parlent d'AE et de CP, ne sont pas des lois de
+# finances : elles restent aussi.
+_TITRE_DE_LOI_DE_FINANCES = re.compile(
+    r"lois?\s+(?:de|des)\s+finances|loi\s+de\s+r[eè]glement"
+    r"|portant\s+r[eè]glement\s+de\s+la\s+r[ée]publique",
+    re.IGNORECASE,
+)
+_LIGNE_AE_CP = re.compile(r"^\s*\|[^\n]*\bAE\b[^\n]*\bCP\b[^\n]*$", re.MULTILINE)
+_AUTORISATIONS_D_ENGAGEMENT = re.compile(r"autorisations?\s+d\W?\s*engagement", re.IGNORECASE)
+_CREDITS_DE_PAIEMENT = re.compile(r"cr[ée]dits?\s+de\s+paiement", re.IGNORECASE)
+_PROGRAMMES_ET_OBJECTIFS = re.compile(
+    r"programmes?\s+concourant\s+[àa]\s+la\s+r[ée]alisation\s+des\s+objectifs", re.IGNORECASE
+)
+
+
+def est_un_tableau_de_programmes(extrait: ChunkResult) -> bool:
+    """
+    Le morceau est-il un tableau de credits AE/CP par programme d'une loi de
+    finances ? Voir le releve ci-dessus : ni un taux d'impot, ni une amende,
+    ni un article.
+    """
+    if not _TITRE_DE_LOI_DE_FINANCES.search(extrait.law_title or ""):
+        return False
+    contenu = extrait.content or ""
+    return bool(
+        _LIGNE_AE_CP.search(contenu)
+        or (_AUTORISATIONS_D_ENGAGEMENT.search(contenu) and _CREDITS_DE_PAIEMENT.search(contenu))
+        or _PROGRAMMES_ET_OBJECTIFS.search(contenu)
+    )
+
+
+# Une question sur le BUDGET de l'Etat : les tableaux de programmes y
+# repondent, ils restent. Partout ailleurs ils sont retires.
+#
+# LE VOCABULAIRE DU BUDGET, ET LUI SEUL. Revue du 29/10/2026 (tour 3) : le
+# detecteur prenait pour budgetaires des questions de droit sur un montant
+# « prévu » ou « alloué » (« Quel est le montant de l'amende prévue pour le
+# vol ? », « Le montant prévu de la pension de veuve », « How much
+# compensation is allocated for unfair dismissal? »), « budget » ou « crédits »
+# au sens prive (« Mon budget est serré », « Les crédits ouverts par ma
+# banque ») et la « dotation aux amortissements » d'un comptable. Les tableaux
+# AE/CP restaient alors dans le contexte : 8 sur 8 pour « Quel est le montant
+# prévu du SMIG au Cameroun ? », 4 pour la question de l'incident en anglais.
+# Une question de droit qui garde ces tableaux, c'est la forme de l'incident ;
+# une question budgetaire qui les perd n'a plus sa reponse, et le modele le
+# dit. DANS LE DOUTE, PAS DE TABLEAUX : seuls comptent les termes qui ne
+# designent que le budget public :
+# - loi de finances, loi de reglement, finances publiques, depenses publiques
+#   ou de l'Etat, autorisations d'engagement, credits de paiement ;
+# - tout ce qui est « budgétaire » (dotation, credits, programme, enveloppe,
+#   collectif budgetaires) et « budgétiser » ;
+# - le budget DE L'ETAT, d'un ministere, national, general, public ;
+# - l'Etat ou le gouvernement qui DEPENSE (le verbe : « condamné aux dépens »
+#   est une question de procedure) ;
+# - leurs equivalents anglais (finance act, public spending, state budget,
+#   appropriation act, commitment authorisations, payment appropriations...).
+# Ne suffisent plus : « montant » ou « somme » « prévu(e) », « l'État a
+# prévu / alloué / consacré », « dotation », « crédits ouverts », « how much
+# ... allocated / set aside », « extra funding », « appropriation » seul (en
+# droit, la prise de possession). Le jeu d'evaluation y perd des questions
+# dont la reponse est un tableau AE/CP sans un mot du budget (« Quelle somme a
+# été prévue en 2019 pour venir en aide aux sinistrés ? ») : mesure dans
+# scripts/eval/evaluer_contexte_chat.py, jeux budgetaires et montants_prevus.
+# Sans accents ni majuscules.
+#
+# PAS DE « BUDGET » + UNE ANNEE. Le tour 4 y lisait le budget de l'Etat
+# (« budget 2025 », « budget sinistrés 2019 »), sauf apres un possessif. Revue
+# du 30/10/2026 : 10 questions sur 10 sur un budget PRIVE avec une annee
+# etaient prises pour budgetaires, et quatre lisaient un tableau AE/CP
+# (« Quel budget pour construire une maison en 2025 ? » : PRC-10557 art.
+# 95.73 au rang 3 ; « Quel budget pour un avocat en 2025 ? », « What budget do
+# I need to start a business in 2025? », « Quel budget pour un mariage en 2024
+# ? ») ; « J'ai un budget de 2000 euros » y passait pour une annee. Aucune
+# liste de marques du prive (« un », « quel », « familial », « pour un... »)
+# n'est sure. Regle retiree : le vocabulaire strict seul. Le prix, mesure au
+# tour 5 (scripts/eval/evaluer_contexte_chat.py) : quatre questions du banc
+# par langue, qui n'ont que « budget » et une annee, ne sont plus
+# budgetaires (« budget 2025 Cameroun PME », « budget sinistrés catastrophes
+# naturelles 2019 », « objectifs budget 2014 lutte corruption », « … pour
+# l'élaboration du budget 2014 ? », et leurs traductions). Trois y perdent
+# l'article attendu, un tableau AE/CP : hit@8 0,892 -> 0,873 en francais
+# (« budget 2025 Cameroun PME », « budget sinistrés… 2019 »), 0,873 -> 0,863
+# en anglais (« 2025 budget Cameroon SMEs »). Les budgets prives, eux, ne
+# lisent plus aucun tableau AE/CP (4 questions sur 11 en lisaient).
+_QUESTION_BUDGETAIRE = re.compile(
+    r"\b(?:lois?\s+(?:de|des)\s+finances?|lois?\s+de\s+reglements?"
+    r"|finances?\s+publiques?|depenses?\s+publiques?|depenses?\s+de\s+l\W?\s*etat"
+    r"|budgetaires?|budgetis\w*"
+    r"|autorisations?\s+d\W?\s*engagement|credits?\s+de\s+paiement"
+    r"|budgets?\s+(?:de\s+l\W?\s*etat|du\s+ministere|des\s+ministeres|d\W?\s*un\s+ministere"
+    r"|ministeriels?|nationa(?:l|ux)|genera(?:l|ux)|publics?|de\s+la\s+(?:nation|republique))"
+    r"|(?:l\W?\s*etat|le\s+gouvernement)\b.{0,40}\bdepens(?:e|es|ent|er|era\w*|ai\w*|ees?)\b"
+    r"|finance\s+(?:act|law|bill)s?|appropriations?\s+(?:act|bill|law)s?"
+    r"|(?:budget|budgetary|payment)\s+appropriations?|budgetary|budgeted"
+    r"|public\s+(?:finances?|spending|expenditures?)"
+    r"|(?:state|government|national|ministry(?:'s)?)\s+(?:budgets?|spending|expenditures?)"
+    r"|budgets?\s+of\s+the\s+(?:state|ministry|government|nation)"
+    r"|commitment\s+(?:authori[sz]ations?|appropriations?)|payment\s+credits?"
+    r"|supplementary\s+(?:budgets?|appropriations?|finance\s+(?:act|law|bill)s?)"
+    r"|(?:state|government)\b.{0,40}\bspen(?:d|ds|ding|t)\b)\b"
+)
+
+
+def question_budgetaire(question: str) -> bool:
+    """
+    La question porte-t-elle sur le budget de l'Etat ? Vocabulaire explicite
+    seulement (_QUESTION_BUDGETAIRE) : ni « budget » seul, ni « budget » et
+    une annee.
+    """
+    replie = "".join(
+        c for c in unicodedata.normalize("NFD", question or "") if unicodedata.category(c) != "Mn"
+    ).lower()
+    return bool(_QUESTION_BUDGETAIRE.search(replie))
 
 
 # ==================== SEARCH SERVICE ====================
@@ -371,18 +610,45 @@ class SearchService:
     SEMANTIC_WEIGHT = settings.SEMANTIC_WEIGHT
     MAX_RESULTS_PER_MODE = 20 # Limite avant fusion
 
-    def __init__(self, db: AsyncSession, use_cache: bool = True):
+    # Recherche semantique EXACTE (semantique_exacte, le chat) : temps laisse a
+    # la requete, apres quoi elle est annulee par le serveur et le volet passe
+    # par l'index HNSW a ef_search 1000.
+    #
+    # 3 s, et non plus 1,5 s : le repli lit des voisins APPROCHES, le chemin
+    # meme de l'incident du 29/10/2026, et la barriere du chat ne peut pas
+    # voir un index faux dont les voisins restent moyennement proches de la
+    # question (mesure du 29/10/2026, etats « leurre » de scripts/eval/
+    # evaluer_contexte_chat.py). Il ne doit servir qu'en surcharge. Mesures
+    # (scripts/eval/mesurer_latence_recherche.py, jurix_dev, deux suites de
+    # tests d'autres agents a cote) : requete exacte seule 161 ms de mediane
+    # (287 au pire) ; sous 8 questions simultanees, 359 ms de mediane, 1 607 ms
+    # au pire, soit 1 repli sur 40 a 1,5 s. Sur Neon (~250 ms a chaud, ~700 ms
+    # a froid selon le tour 2), 3 s laissent environ le double du pire mesure
+    # a 8 questions simultanees.
+    BUDGET_RECHERCHE_EXACTE_MS = 3000
+    EF_SEARCH_DU_REPLI = EF_SEARCH_MAX
+    # Articles du plein texte gardes dans VoletsDeLaRecherche, donc dans le
+    # cache : de quoi remplir les places du chat (RAGService.PLACES_PLEIN_TEXTE).
+    ARTICLES_DU_PLEIN_TEXTE_GARDES = 4
+
+    def __init__(
+        self, db: AsyncSession, use_cache: bool = True, semantique_exacte: bool = False
+    ):
         """
         Initialise le service de recherche.
 
         Args:
             db: Session database async SQLAlchemy
             use_cache: Active le cache PostgreSQL (défaut: True)
+            semantique_exacte: volet semantique par recherche EXACTE des plus
+                proches voisins, sans l'index HNSW (le chat ; voir
+                _lire_vecteurs_exacts). Faux pour /search, qui garde l'index.
         """
         _init_global_singletons()
 
         self.db = db
         self.use_cache = use_cache
+        self.semantique_exacte = semantique_exacte
         self.embedding_service = _embedding_service_instance
         # Vrai quand le volet semantique de la DERNIERE recherche hybride a
         # echoue (fournisseur lent ou en panne) et qu'elle a repondu par le
@@ -390,6 +656,20 @@ class SearchService:
         # SearchService sert une requete, et ses recherches se suivent : un
         # attribut d'instance suffit.
         self.semantique_degradee = False
+        # Qui a servi le volet semantique de la derniere recherche (CHEMIN_*),
+        # et la duree de ses requetes SQL seules.
+        self.chemin_semantique: Optional[str] = None
+        self.duree_sql_semantique_ms: Optional[int] = None
+        # Les deux volets de la DERNIERE recherche hybride, tels que le chat
+        # les relit (VoletsDeLaRecherche). Repris du cache avec la reponse
+        # pour une recherche exacte ; None sinon sur une reponse du cache.
+        self.volets: Optional[VoletsDeLaRecherche] = None
+        # Retirer des deux volets de la recherche hybride les tableaux de
+        # programmes des lois de finances (est_un_tableau_de_programmes),
+        # AVANT la fusion : le chat et la comparaison le demandent pour toute
+        # question qui ne porte pas sur le budget (question_budgetaire). Faux
+        # pour /search, qui montre tout le corpus.
+        self.tableaux_de_programmes_exclus = False
 
         logger.debug(f"SearchService ready (cache={use_cache}, pg_fts=True)")
 
@@ -436,6 +716,10 @@ class SearchService:
         """
         assert request and request.query, "SearchRequest with query is required"
         start_time = time.time()
+        # Avant le cache : une reponse servie par lui ne porte ses volets que
+        # s'ils y ont ete mis (recherche exacte du chat).
+        self.volets = None
+        self.chemin_semantique = None
 
         logger.info(
             f"🔍 Search request: mode={request.mode}, "
@@ -452,7 +736,7 @@ class SearchService:
         if self.use_cache:
             cache_key = _make_cache_key(
                 request.query, request.filters, request.limit, request.offset,
-                request.mode, request.semantic_query,
+                self._mode_en_cache(request.mode), request.semantic_query,
             )
             # Le cache est une optimisation, pas une dependance : si query_cache
             # est absente ou injoignable, on doit degrader, pas renvoyer 500.
@@ -462,6 +746,14 @@ class SearchService:
             except Exception as e:
                 logger.warning(f"⚠️ Lecture du cache impossible, ignoree: {e}")
                 cached_data = None
+            if cached_data and self.semantique_exacte:
+                # Sans ses volets, le chat ne saurait pas juger la pertinence
+                # de ce qu'il lit (RAGService._retenir_le_pertinent) : recalculer.
+                try:
+                    self.volets = VoletsDeLaRecherche.model_validate(cached_data.pop("volets"))
+                except Exception as e:
+                    logger.info(f"🎯 Cache ignore, volets absents ou illisibles : {e!r}")
+                    cached_data = None
             if cached_data:
                 elapsed_ms = int((time.time() - start_time) * 1000)
                 logger.info(f"🎯 Cache HIT ({elapsed_ms}ms)")
@@ -494,9 +786,18 @@ class SearchService:
         # resservie cinq minutes, au chat comme a la recherche. La charge est
         # calculee ICI, avant de rendre la reponse a un appelant qui pourrait
         # la modifier.
+        #
+        # Le repli sur l'index d'une recherche exacte trop lente n'est pas mis
+        # en cache non plus : le chat ne doit relire que des voisins exacts.
+        repli = self.volets is not None and self.volets.chemin == CHEMIN_REPLI_HNSW
         a_mettre_en_cache = None
-        if self.use_cache and not self.semantique_degradee:
-            a_mettre_en_cache = (cache_key, _charge_utile_du_cache(response))
+        if self.use_cache and not self.semantique_degradee and not repli:
+            charge = _charge_utile_du_cache(response)
+            if self.semantique_exacte:
+                charge["volets"] = (
+                    self.volets or VoletsDeLaRecherche()
+                ).model_dump(mode="json")
+            a_mettre_en_cache = (cache_key, charge)
         await self._ecrire_apres_la_reponse(
             request, response.total, elapsed_ms, cached=False, cache=a_mettre_en_cache,
         )
@@ -506,6 +807,18 @@ class SearchService:
             f"(mode={request.mode})"
         )
         return response
+
+    def _mode_en_cache(self, mode: str) -> str:
+        """
+        Le mode tel que la cle du cache le porte. Une cle a part pour la
+        recherche exacte : une reponse de l'index ne doit jamais servir le
+        chat, ni l'inverse. De meme avec ou sans les tableaux de programmes :
+        une reponse qui les a retires ne sert pas une question budgetaire.
+        """
+        mode_en_cache = f"{mode}+exacte" if self.semantique_exacte else mode
+        if self.tableaux_de_programmes_exclus:
+            mode_en_cache += "+sans_tableaux"
+        return mode_en_cache
 
     async def _ecrire_apres_la_reponse(
         self,
@@ -899,9 +1212,16 @@ class SearchService:
         filters: Optional[SearchFilters],
         limit: int,
         offset: int,
+        exacte: bool = False,
+        ef_search: Optional[int] = None,
     ):
         """
         Enonce de la recherche semantique, en DEUX etages.
+
+        `exacte` : l'enonce de la recherche EXACTE du chat, sans l'index (voir
+        _lire_vecteurs_exacts). `ef_search` : impose hnsw.ef_search au parcours
+        de l'index (le repli de la recherche exacte), au lieu de le deduire du
+        nombre de candidats.
 
         Etage 1, dans la sous-requete : parcours de l'index HNSW pose sur la
         colonne (`embedding halfvec_cosine_ops`), qui fournit `candidates`
@@ -949,6 +1269,8 @@ class SearchService:
         candidates = self._ann_candidates(limit)
 
         distance = Article.embedding.cosine_distance(literal(query_vector, HALFVEC(dim)))
+        if exacte:
+            return self._enonce_exact(distance, filters, limit, offset)
 
         inner = (
             select(
@@ -977,7 +1299,7 @@ class SearchService:
         inner = self._apply_filters_pgvector(inner, filters)
         inner = inner.where(
             text(f"({self._reglages_hnsw_sql(filters is not None)}) IS NOT NULL")
-            .bindparams(hnsw_ef_search=self._ef_search(candidates))
+            .bindparams(hnsw_ef_search=self._ef_search(ef_search or candidates))
         )
         inner = inner.order_by(distance).limit(candidates).subquery("ann")
 
@@ -989,10 +1311,76 @@ class SearchService:
             .offset(offset)
         )
 
+    def _enonce_exact(self, distance: Any, filters: Optional[SearchFilters], limit: int, offset: int):
+        """
+        Enonce de la recherche EXACTE (voir _lire_vecteurs_exacts), en deux
+        etages.
+
+        Etage 1, la sous-requete `proches` : la distance de CHAQUE article
+        vectorise a la question, sur des lignes etroites (identifiant et
+        distance), et les `limit + offset` plus proches. Le tri porte sur
+        `distance + 0` : l'index HNSW ne sert que `colonne <=> constante` nue,
+        le planificateur ne peut donc pas en refaire un parcours de l'index,
+        quel que soit son cout. L'identifiant departage deux articles a
+        distance egale (textes en double), d'un appel a l'autre.
+
+        Etage 2 : le texte et la loi de ces seuls articles. Mesure sur
+        jurix_dev (29/10/2026, 32 303 articles vectorises, 12 questions
+        suggerees, deux passes) : 82 ms de mediane (77 a 135), balayage
+        parallele, contre 322 ms (308 a 346) pour un seul etage qui trainait le
+        texte de chaque article jusqu'au tri. Une sous-requete limitee n'est
+        jamais aplatie dans la requete externe : les deux etages restent.
+        """
+        from sqlalchemy import literal_column
+
+        proches = (
+            select(Article.id.label("article_id"), distance.label("distance"))
+            .select_from(Article)
+            .join(Law, Law.id == Article.law_id)
+            .where(Article.embedding.isnot(None))
+        )
+        proches = self._apply_filters_pgvector(proches, filters)
+        proches = (
+            proches.order_by(distance + literal_column("0"), Article.id)
+            .limit(limit + offset)
+            .subquery("proches")
+        )
+        return (
+            select(
+                Article.id.label("article_id"),
+                Article.number,
+                Article.title.label("article_title"),
+                Article.section,
+                Article.page_number,
+                Article.content,
+                Article.law_id,
+                Law.reference,
+                Law.title.label("law_title"),
+                Law.type,
+                Law.language,
+                Law.status,
+                Law.category_id,
+                Law.publication_date,
+                Category.name.label("category_name"),
+                proches.c.distance,
+            )
+            .select_from(proches)
+            .join(Article, Article.id == proches.c.article_id)
+            .join(Law, Law.id == Article.law_id)
+            .outerjoin(Category, Category.id == Law.category_id)
+            .order_by(proches.c.distance + literal_column("0"), Article.id)
+            .limit(limit)
+            .offset(offset)
+        )
+
     @staticmethod
     def _ef_search(candidates: int) -> str:
-        """hnsw.ef_search pour `candidates`, borne a [40, 1000], en texte pour set_config."""
-        return str(int(min(max(40, candidates), 1000)))
+        """
+        hnsw.ef_search pour `candidates`, borne a [EF_SEARCH_MIN, EF_SEARCH_MAX]
+        soit [400, 1000], en texte pour set_config. Le plancher etait 40 :
+        voir EF_SEARCH_MIN, et l'incident du 29/10/2026.
+        """
+        return str(int(min(max(EF_SEARCH_MIN, candidates), EF_SEARCH_MAX)))
 
     @staticmethod
     def _reglages_hnsw_sql(filtered: bool) -> str:
@@ -1146,6 +1534,9 @@ class SearchService:
 
         Sinon (session liee a une connexion, doublure), sur self.db, sous un
         SAVEPOINT : l'isolement d'avant, sans le parallelisme.
+
+        Recherche EXACTE (semantique_exacte, le chat) : voir
+        _lire_vecteurs_exacts. Le journal dit quel chemin a servi.
         """
         start_time = time.time()
         candidates = self._ann_candidates(limit)
@@ -1156,15 +1547,14 @@ class SearchService:
                     # Prise de connexion PENDANT l'appel au fournisseur.
                     await session.connection()
                     query_embedding = await tache_vecteur
-                    rows = await self._lire_vecteurs(
-                        session, query_embedding, filters, limit, offset
+                    rows = await self._vecteurs_du_volet(
+                        session, query_embedding, filters, limit, offset, sous_point=False
                     )
             else:
                 query_embedding = await tache_vecteur
-                async with self.db.begin_nested():
-                    rows = await self._lire_vecteurs(
-                        self.db, query_embedding, filters, limit, offset
-                    )
+                rows = await self._vecteurs_du_volet(
+                    self.db, query_embedding, filters, limit, offset, sous_point=True
+                )
         except VectorSearchError:
             # Panne du fournisseur, deja comptee par le service d'embeddings.
             raise
@@ -1206,11 +1596,90 @@ class SearchService:
         ]
 
         elapsed_ms = int((time.time() - start_time) * 1000)
+        if self.chemin_semantique == CHEMIN_EXACT:
+            parcours = "recherche exacte, sans index"
+        elif self.chemin_semantique == CHEMIN_REPLI_HNSW:
+            parcours = f"REPLI sur l'index HNSW, ef_search {self.EF_SEARCH_DU_REPLI}"
+        else:
+            parcours = (
+                f"index HNSW, {candidates} candidats, ef_search {self._ef_search(candidates)}"
+            )
+        similarite = f", similarite max {chunks[0].relevance_score:.3f}" if chunks else ""
         logger.info(
-            f"🧠 Semantic search: {len(chunks)} chunks "
-            f"({candidates} candidats ANN) in {elapsed_ms}ms"
+            f"🧠 Semantic search ({parcours}) : {len(chunks)} chunks in {elapsed_ms}ms "
+            f"(SQL {self.duree_sql_semantique_ms}ms){similarite}"
         )
         return chunks
+
+    async def _vecteurs_du_volet(
+        self,
+        session: AsyncSession,
+        query_embedding: Any,
+        filters: Optional[SearchFilters],
+        limit: int,
+        offset: int,
+        sous_point: bool,
+    ) -> List[Any]:
+        """
+        Les lignes du volet semantique, par le chemin que demande le service :
+        recherche exacte (le chat), repli sur l'index si elle depasse son
+        budget, ou index seul (/search). Pose self.chemin_semantique.
+
+        `sous_point` : session partagee (self.db), chaque lecture sous un
+        SAVEPOINT ; sinon, session dediee, que l'appelant ferme.
+
+        Pose aussi self.duree_sql_semantique_ms : la duree des requetes
+        seules, sans l'appel au fournisseur d'embeddings que le journal du
+        volet compte avec elles.
+        """
+        debut = time.time()
+        try:
+            return await self._vecteurs_par_le_bon_chemin(
+                session, query_embedding, filters, limit, offset, sous_point
+            )
+        finally:
+            self.duree_sql_semantique_ms = int((time.time() - debut) * 1000)
+
+    async def _vecteurs_par_le_bon_chemin(
+        self,
+        session: AsyncSession,
+        query_embedding: Any,
+        filters: Optional[SearchFilters],
+        limit: int,
+        offset: int,
+        sous_point: bool,
+    ) -> List[Any]:
+        if self.semantique_exacte:
+            try:
+                rows = await self._lire_vecteurs_exacts(
+                    session, query_embedding, filters, limit, offset, sous_point
+                )
+                self.chemin_semantique = CHEMIN_EXACT
+                return rows
+            except Exception as e:
+                if not _delai_depasse(e):
+                    raise
+                # Alerte, et non information : le chat lit alors des voisins
+                # APPROCHES, ceux qui ont produit l'incident du 29/10/2026.
+                logger.warning(
+                    f"⏱️ Recherche semantique exacte au-dela de "
+                    f"{self.BUDGET_RECHERCHE_EXACTE_MS} ms, annulee : repli sur l'index "
+                    f"HNSW (ef_search {self.EF_SEARCH_DU_REPLI})"
+                )
+            self.chemin_semantique = CHEMIN_REPLI_HNSW
+            ef_search: Optional[int] = self.EF_SEARCH_DU_REPLI
+        else:
+            self.chemin_semantique = CHEMIN_HNSW
+            ef_search = None
+
+        if sous_point:
+            async with session.begin_nested():
+                return await self._lire_vecteurs(
+                    session, query_embedding, filters, limit, offset, ef_search=ef_search
+                )
+        return await self._lire_vecteurs(
+            session, query_embedding, filters, limit, offset, ef_search=ef_search
+        )
 
     async def _lire_vecteurs(
         self,
@@ -1219,6 +1688,7 @@ class SearchService:
         filters: Optional[SearchFilters],
         limit: int,
         offset: int,
+        ef_search: Optional[int] = None,
     ) -> List[Any]:
         """
         UN enonce, reglages HNSW compris (voir _build_semantic_statement) :
@@ -1227,9 +1697,58 @@ class SearchService:
         """
         # Liste passee en parametre lie, PAS en chaine castee : le
         # convertisseur pgvector attend une liste ou un ndarray.
-        stmt = self._build_semantic_statement(query_embedding.tolist(), filters, limit, offset)
+        stmt = self._build_semantic_statement(
+            query_embedding.tolist(), filters, limit, offset, ef_search=ef_search
+        )
         result = await session.execute(stmt)
         return result.all()
+
+    async def _lire_vecteurs_exacts(
+        self,
+        session: AsyncSession,
+        query_embedding: Any,
+        filters: Optional[SearchFilters],
+        limit: int,
+        offset: int,
+        sous_point: bool,
+    ) -> List[Any]:
+        """
+        Recherche EXACTE des plus proches voisins, sans l'index HNSW : chaque
+        article vectorise est compare a la question.
+
+        POURQUOI. Incident du 29/10/2026 : pour une question d'accueil, le
+        parcours de l'index de production rendait des tableaux de lois de
+        finances (0 des 10 vrais voisins a ef_search 160), et le chat a
+        repondu dessus. Un index approche peut perdre son rappel sans rien
+        signaler ; le chat, qui fait rediger une reponse juridique, ne doit
+        plus en dependre. Cout mesure sur Neon : ~250 ms a chaud, ~700 ms a
+        froid, contre 3 a 13 ms par l'index. /search garde l'index.
+
+        Deux protections, dans SA transaction (ou son SAVEPOINT) : l'enonce
+        trie sur une expression que l'index ne sait pas servir
+        (_build_semantic_statement, `exacte`), et enable_indexscan = off.
+        statement_timeout borne la requete a BUDGET_RECHERCHE_EXACTE_MS : le
+        serveur l'annule (SQLSTATE 57014), et _vecteurs_du_volet passe par
+        l'index. La transaction, ou le SAVEPOINT, est ANNULEE ensuite, meme
+        apres un succes : c'est ce qui retire ces reglages, qui couperaient
+        sinon les requetes suivantes de la session (le chat y enregistre ses
+        messages). Une lecture n'a rien d'autre a perdre.
+        """
+        stmt = self._build_semantic_statement(
+            query_embedding.tolist(), filters, limit, offset, exacte=True
+        )
+        point = await session.begin_nested() if sous_point else None
+        try:
+            await session.execute(
+                text(_REGLAGES_EXACTS_SQL),
+                {"budget_ms": str(int(self.BUDGET_RECHERCHE_EXACTE_MS))},
+            )
+            return (await session.execute(stmt)).all()
+        finally:
+            if point is not None:
+                await point.rollback()
+            else:
+                await session.rollback()
 
     async def hybrid_chunks(
         self,
@@ -1303,8 +1822,55 @@ class SearchService:
                     if tache is not None:
                         await _solder(tache)
 
+            # Les tableaux de programmes des lois de finances, retires des deux
+            # volets AVANT la fusion : les places du contexte vont aux
+            # articles suivants (voir est_un_tableau_de_programmes).
+            exclus = 0
+            # Le volet semantique AVANT le retrait : vide alors, c'est une
+            # panne de l'index, meme si un tableau du plein texte a ete retire
+            # (voir _journaliser_les_volets).
+            semantique_rendue = bool(sem_res_list)
+            if self.tableaux_de_programmes_exclus:
+                avant = len(text_res_list) + len(sem_res_list)
+                text_res_list = [c for c in text_res_list if not est_un_tableau_de_programmes(c)]
+                sem_res_list = [c for c in sem_res_list if not est_un_tableau_de_programmes(c)]
+                exclus = avant - len(text_res_list) - len(sem_res_list)
+                if exclus:
+                    logger.info(
+                        f"🧮 {exclus} tableau(x) de programmes de lois de finances retire(s) "
+                        f"des volets : la question ne porte pas sur le budget"
+                    )
+
+            # AVANT la fusion, qui ecrase relevance_score en place : la
+            # similarite exacte de chaque article semantique, et des COPIES des
+            # premiers articles du plein texte (voir VoletsDeLaRecherche).
+            if self.semantique_degradee:
+                chemin = CHEMIN_ECHEC
+            elif tache_vecteur is None:
+                chemin = CHEMIN_ABSENT
+            else:
+                chemin = self.chemin_semantique or CHEMIN_HNSW
+            self.volets = VoletsDeLaRecherche(
+                chemin=chemin,
+                similarites={
+                    c.article_id: round(float(c.relevance_score), 6)
+                    for c in sem_res_list if c.article_id is not None
+                },
+                plein_texte=[
+                    c.model_copy() for c in text_res_list if c.article_id is not None
+                ][:self.ARTICLES_DU_PLEIN_TEXTE_GARDES],
+                tableaux_exclus=exclus,
+            )
+
             if not text_res_list and not sem_res_list:
                 return []
+
+            # AVANT la fusion, qui ecrase relevance_score en place : le score
+            # du volet semantique y est encore la similarite cosinus.
+            en_commun = self._journaliser_les_volets(
+                text_res_list, sem_res_list, vectorisee=tache_vecteur is not None,
+                semantique_rendue=semantique_rendue,
+            )
 
             fused = self._rrf_fusion(
                 text_res_list, sem_res_list,
@@ -1318,13 +1884,76 @@ class SearchService:
             elapsed_ms = int((time.time() - start_time) * 1000)
             logger.info(
                 f"🔀 Hybrid search: {len(paginated)} chunks in {elapsed_ms}ms "
-                f"(text={len(text_res_list)}, semantic={len(sem_res_list)})"
+                f"(text={len(text_res_list)}, semantic={len(sem_res_list)}, {en_commun})"
             )
             return paginated
 
         except Exception as e:
             logger.error(f"❌ Hybrid search failed: {e}")
             raise SearchServiceError(f"Échec recherche hybride: {e}") from e
+
+    def _journaliser_les_volets(
+        self,
+        texte: List[ChunkResult],
+        semantique: List[ChunkResult],
+        vectorisee: bool,
+        semantique_rendue: Optional[bool] = None,
+    ) -> str:
+        """
+        Ce que les deux volets ont en commun, dans le journal ; rend le resume
+        qu'ajoute la ligne de la recherche hybride.
+
+        POURQUOI. Incident du 29/10/2026, « Quelles indemnités en cas de
+        licenciement abusif ? » : le parcours HNSW de production n'a rendu que
+        des tableaux de lois de finances (similarite ~0,33), sans un texte en
+        commun avec le plein texte, qui trouvait le Code du travail. Le journal
+        ne portait que les effectifs des deux listes : rien ne le montrait.
+
+        Des volets sans texte commun ne sont pas une panne en soi : mesure sur
+        les 102 questions d'evaluation, par le chemin du chat
+        (scripts/eval/evaluer_contexte_chat.py, 29/10/2026), 12 questions
+        francaises et 41 anglaises dans ce cas, l'article attendu restant parmi
+        les huit extraits pour 10 et 34 d'entre elles : le plein texte d'une
+        question qui ne reprend pas les mots de la loi ramene autre chose. Une
+        ligne d'information explicite, donc, et non une alerte, qui se lit avec
+        celle du chat sur son contexte (RAGService._retenir_le_pertinent) : les
+        deux ensemble disent quel volet a fourni le contexte, et la similarite
+        dit s'il etait faible.
+
+        Un volet semantique VIDE alors que la question a ete vectorisee, sans
+        erreur, est en revanche une panne de l'index : alerte.
+
+        `semantique_rendue` : le volet semantique avait-il rendu quelque chose
+        AVANT le retrait des tableaux de programmes ? Vide seulement apres
+        (tous ses voisins etaient des tableaux : une question sur le salaire
+        minimum), ce n'est pas une panne. Vide avant, si : revue du 29/10/2026
+        (tour 3), l'alerte se taisait des qu'un tableau, meme du plein texte,
+        avait ete retire. None : le volet tel quel decide.
+        """
+        if not semantique:
+            panne = not semantique_rendue if semantique_rendue is not None else True
+            if vectorisee and texte and not self.semantique_degradee and panne:
+                logger.warning(
+                    f"⚠️ Volet semantique vide : la question a ete vectorisee, l'index "
+                    f"n'a rendu aucun article (plein texte seul : {len(texte)} extraits)"
+                )
+            return "volet semantique vide"
+
+        meilleur = max(semantique, key=lambda c: c.relevance_score)
+        textes_communs = {c.law_id for c in texte} & {c.law_id for c in semantique}
+        morceaux_communs = {c.fusion_key for c in texte} & {c.fusion_key for c in semantique}
+        resume = (
+            f"en commun : {len(textes_communs)} texte(s), {len(morceaux_communs)} morceau(x) ; "
+            f"similarite max {meilleur.relevance_score:.3f}"
+        )
+        if texte and not textes_communs:
+            logger.info(
+                f"🔀 Volets disjoints : aucun texte en commun entre le plein texte "
+                f"({len(texte)} extraits, en tete {texte[0].reference}) et le volet "
+                f"semantique ({len(semantique)}, en tete {meilleur.reference} art. "
+                f"{meilleur.number}, similarite {meilleur.relevance_score:.3f})"
+            )
+        return resume
 
     # ============ SEARCH MODES — niveau document, derive des chunks ============
     # Ces trois methodes conservent la signature et le type de retour d'origine

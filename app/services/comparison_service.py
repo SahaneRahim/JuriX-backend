@@ -63,7 +63,7 @@ from app.services.prompts import (
     build_context_string,
     get_compare_system_prompt,
 )
-from app.services.search_service import SearchService
+from app.services.search_service import SearchService, question_budgetaire
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +183,12 @@ class ComparisonService:
 
     def __init__(self, db: AsyncSession, *, llm: Optional[Any] = None):
         self.db = db
-        self.search_service = SearchService(db)
+        # La MEME recherche que le chat (RAGService) : volet semantique EXACT,
+        # sans l'index HNSW. La comparaison fait rediger le modele sur ce
+        # qu'elle trouve, comme le chat ; un index approche peut perdre son
+        # rappel sans rien dire (incident du 29/10/2026 : des tableaux de lois
+        # de finances a la place du Code du travail). /search garde l'index.
+        self.search_service = SearchService(db, semantique_exacte=True)
         if llm is not None:
             self.llm = llm
         else:
@@ -283,6 +288,10 @@ class ComparisonService:
         limite = min(top_k * SUR_ECHANTILLON, 50) if law_id is not None else top_k
 
         async def une(terme: str) -> List[ChunkResult]:
+            # Comme le chat : sans les tableaux de programmes des lois de
+            # finances, sauf pour un sujet budgetaire
+            # (search_service.est_un_tableau_de_programmes).
+            self.search_service.tableaux_de_programmes_exclus = not question_budgetaire(terme)
             reponse = await self.search_service.search(
                 SearchRequest(
                     query=terme, mode="hybrid", filters=filtres, limit=limite

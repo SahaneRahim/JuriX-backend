@@ -303,6 +303,185 @@ class TestCitationsDuFlux:
         assert len(fin["citations"]) == 3
 
     @pytest.mark.asyncio
+    async def test_l_incident_du_29_octobre(self, base):
+        """
+        Production, « Quelles indemnités en cas de licenciement abusif ? » : huit
+        tableaux de lois de finances lus, et « l'article 76 du Code du travail »
+        cite de memoire. Le chat le liait au morceau « 76.37 » de la loi de
+        finances 2023, rangee sous « Articles cités (1) ». Les trois citations
+        du Code du travail sont signalees ; les lois de finances restent
+        « consultées, non citées ».
+        """
+        tableau = "Les montants des autorisations d'engagement et des crédits de paiement…"
+        lf_2023 = ("Loi N°2022/020 du 27 décembre 2022 portant loi de finances de la république "
+                   "du Cameroun pour l'exercice 2023")
+        extraits = [
+            _extrait(105698, 2237, "95.95", "Loi N°2025/012 du 17 décembre 2025 portant loi des "
+                     "Finances de la République du Cameroun pour l’exercice 2026", "PRC-10557",
+                     tableau),
+            _extrait(85057, 2232, "76.37", lf_2023, "PRC-9449", tableau),
+            _extrait(74786, 2137, "78.47", "Ordonnance N°2025/001 du 11 juillet 2025 modifiant et "
+                     "complétant certaines dispositions de la loi n°2024/013 du 23 décembre 2024 "
+                     "portant loi de finances", "PRC-10434", tableau),
+        ]
+        service = _service(base, extraits, [
+            "Les documents fournis ne contiennent pas de disposition sur ce point.\n\n"
+            "- l'indemnité de préavis est prévue par l'article 74 du Code du travail ;\n"
+            "- l'indemnité de licenciement, par l'article 75 du Code du travail ;\n"
+            "- les dommages-intérêts, par l'article 76 du Code du travail.",
+        ])
+
+        evenements = await _evenements(service, _requete(
+            question="Quelles indemnités en cas de licenciement abusif ?",
+        ))
+
+        fin = evenements[-1]
+        assert fin["articles_cites"] == [] and fin["citations"] == []
+        assert [(c["texte_cite"], c["raison"]) for c in fin["citations_introuvables"]] == [
+            ("article 74 du Code du travail", "texte_non_consulte"),
+            ("article 75 du Code du travail", "texte_non_consulte"),
+            ("article 76 du Code du travail", "texte_non_consulte"),
+        ]
+        assert [t["law_id"] for t in fin["textes_consultes_non_cites"]] == [2237, 2232, 2137]
+        # `sources`, que lisait l'ancien front : ni la loi de finances, ni une
+        # source de repli sous une reponse qui dit n'avoir rien trouve.
+        assert fin["sources"] == []
+
+    @pytest.mark.asyncio
+    async def test_une_citation_sans_nom_reste_dans_le_texte_cite_avant(self, base):
+        """
+        Revue du 2026-10-29, panne de l'index simulee : la loi de finances 2024
+        venait en tete du contexte, et « L'article 35 dispose… », qui suit une
+        citation du Code du travail, allait a son morceau 35.19. Elle est lue
+        dans le Code du travail ; la loi de finances reste consultee, non citee.
+        """
+        lf_2024 = ("Loi N°2023/019 du 19 décembre 2023 portant loi de finances de la République "
+                   "du Cameroun pour l'exercice 2024")
+        extraits = [
+            _extrait(1, 9875, "35.19", lf_2024, "PRC-9875", "Tableau des crédits…"),
+            _extrait(2, 2274, "35.1", CODE_DU_TRAVAIL, "LOI-1992-007", "(1) Le préavis court…"),
+            _extrait(3, 2274, "37", CODE_DU_TRAVAIL, "LOI-1992-007", "(1) L'indemnité est due…"),
+        ]
+        service = _service(base, extraits, [
+            "Selon l'article 37 du Code du travail, l'indemnité est due. L'article 35 dispose "
+            "que le préavis court dès la notification. L'article 76 prévoit les dommages-intérêts.",
+        ])
+
+        evenements = await _evenements(service, _requete())
+
+        fin = evenements[-1]
+        assert [(c["law_id"], c["article_number"]) for c in fin["articles_cites"]] == [
+            (2274, "37"), (2274, "35"),
+        ]
+        assert [(c["texte_cite"], c["raison"]) for c in fin["citations_introuvables"]] == [
+            ("article 76", "article_non_consulte"),
+        ]
+        assert [t["law_id"] for t in fin["textes_consultes_non_cites"]] == [9875]
+
+    @pytest.mark.asyncio
+    async def test_une_reponse_anglaise_nomme_la_loi_par_son_numero(self, base, extraits):
+        """
+        Le prompt anglais demande « Article X of Law No. … » : le nom etait coupe
+        au point de « No. », et la citation, juste, signalee.
+        """
+        extraits[0] = _extrait(371, 3, "37", CODE_DU_TRAVAIL, "PRC-3",
+                               "(1) En cas de rupture du contrat, le travailleur a droit à une indemnité.")
+        service = _service(base, extraits, [
+            "Article 37 of Law No. 92/007 of 14 August 1992 entitles the worker to compensation.",
+        ])
+
+        evenements = await _evenements(service, _requete(
+            question="What compensation is due on dismissal?", language="en",
+        ))
+
+        fin = evenements[-1]
+        assert [c["texte_cite"] for c in fin["citations"]] == [
+            "Article 37 of Law No. 92/007 of 14 August 1992",
+        ]
+        assert fin["citations"][0]["article_id"] == 371
+        assert fin["citations_introuvables"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reponse, cite, raison", [
+        # Une nature seule, apres le Code du travail : ce Code, non consulte.
+        ("Voir l'article 74 du Code du travail. Les dommages relèvent de l'article 76 de la loi.",
+         "article 76 de la loi", "texte_non_consulte"),
+        # Le texte nomme apres coup, dans la meme phrase. Rien ne designe le
+        # texte de la citation : signalee sans lire ce nom (_sans_antecedent),
+        # la raison seule change, et le front ne l'affiche pas.
+        ("En droit du travail, l'article 76 couvre les dommages (Code du travail).", "article 76",
+         "article_non_consulte"),
+        # Un qualificatif entre le numero et le nom.
+        ("Voir l'article 76 in fine du Code du travail.", "article 76 in fine du Code du travail",
+         "texte_non_consulte"),
+        # Revue du tour 3 : sans formule d'aveu, l'extrait pertinent, la
+        # source de repli sortait le tableau 76.37 sous la citation signalee.
+        ("En cas de licenciement abusif, l'article 76 du Code du travail prévoit des "
+         "dommages-intérêts.", "article 76 du Code du travail", "texte_non_consulte"),
+        # Tour 3 : le nom en minuscules, le meme article nomme plus loin,
+        # un nom coupe par une preposition.
+        ("Dans le code du travail, l'article 76 prévoit des dommages-intérêts.", "article 76",
+         "article_non_consulte"),
+        ("**En bref** : l'article 76 prévoit des dommages-intérêts.\n\n**En détail** : "
+         "l'article 76 du Code du travail les fixe.", "article 76", "article_non_consulte"),
+        ("Voir l'article 76 de la loi pour la protection des travailleurs.",
+         "article 76 de la loi pour la protection des travailleurs", "texte_non_consulte"),
+        # Revue du tour final, rejouee sur les lignes reelles : rien ne designe
+        # le texte (ni nom, ni citation avant), et le seul texte lu qui porte
+        # un article 76 est ce tableau. La production et le tour precedent y
+        # liaient ces citations : l'affichage de l'incident.
+        ("L'article 76 prévoit des dommages-intérêts.", "article 76", "article_non_consulte"),
+        ("La loi camerounaise protège le salarié : l'article 76 de cette loi prévoit des "
+         "dommages-intérêts.", "article 76 de cette loi", "article_non_consulte"),
+        ("En cas de licenciement abusif, l'article 76 de la présente loi prévoit des "
+         "dommages-intérêts.", "article 76 de la présente loi", "article_non_consulte"),
+        ("Under Cameroonian labour law, Article 76 of this Law provides for damages.",
+         "Article 76 of this Law", "article_non_consulte"),
+        ("Le salarié a droit à des dommages-intérêts en vertu de l'article 76 du même texte.",
+         "article 76 du même texte", "article_non_consulte"),
+        # Une citation qui nomme la loi de finances, puis une sans nom : jamais
+        # un tableau de credits pour celle-ci (sondes de la revue du tour final).
+        ("L'article 76 de la loi de finances 2023 ne concerne que le budget. L'article 76 "
+         "prévoit des dommages-intérêts.", "article 76", "article_non_consulte"),
+    ])
+    async def test_l_incident_sous_d_autres_formes(self, base, reponse, cite, raison):
+        """
+        Sondes du 2026-10-29, tours 3 et final : avec les extraits de
+        l'incident, ces formes allaient encore au morceau 76.37 de la loi de
+        finances 2023, dans `citations`, dans `sources` (repli), ou dans le
+        message enregistre, que le front affiche a la reouverture.
+        """
+        tableau = "Les montants des autorisations d'engagement et des crédits de paiement…"
+        extraits = [
+            _extrait(85057, 2232, "76.37", "Loi N°2022/020 du 27 décembre 2022 portant loi de "
+                     "finances de la république du Cameroun pour l'exercice 2023", "PRC-9449",
+                     tableau, pertinence=0.9),
+        ]
+        service = _service(base, extraits, [reponse])
+
+        evenements = await _evenements(service, _requete(
+            question="Quelles indemnités en cas de licenciement abusif ?",
+        ))
+
+        fin = evenements[-1]
+        # La citation qui nomme la loi de finances garde son lien ; aucune autre.
+        nommee = "L'article 76 de la loi de finances 2023" in reponse
+        assert [c["texte_cite"] for c in fin["citations"]] == (
+            ["article 76 de la loi de finances 2023"] if nommee else []
+        )
+        assert (cite, raison) in [
+            (c["texte_cite"], c["raison"]) for c in fin["citations_introuvables"]
+        ]
+        if nommee:
+            return
+        assert fin["articles_cites"] == []
+        assert [t["law_id"] for t in fin["textes_consultes_non_cites"]] == [2232]
+        assert fin["sources"] == []
+        enregistres = [appel.args[0] for appel in base.add.call_args_list if appel.args]
+        reponses = [m for m in enregistres if getattr(m, "role", None) == "assistant"]
+        assert reponses and all(m.sources == [] for m in reponses)
+
+    @pytest.mark.asyncio
     async def test_une_date_de_remplissage_n_est_pas_montree(self, base, extraits):
         """
         `date_du_texte` suit la regle de la page du texte (date_signature) : le
@@ -336,19 +515,26 @@ class TestCitationsDuFlux:
         assert consultes == {9: None}
 
     @pytest.mark.asyncio
-    async def test_la_source_de_repli_n_est_pas_une_citation(self, base, extraits):
+    async def test_sans_citation_aucune_source_n_est_fabriquee(self, base, extraits):
         """
-        `sources` garde la source de repli pour le front deploye ; les champs
-        nouveaux la rangent parmi les textes consultes, non cites.
+        Une reponse qui ne cite rien n'a pas de source : rag_service ne
+        fabrique plus de source de repli avec le premier extrait (tour final,
+        « PAS DE SOURCE FABRIQUEE » : un tableau de loi de finances sortait sous
+        une reponse sur le Code du travail, et restait dans la conversation
+        enregistree). Les textes lus restent parmi les textes consultes, non
+        cites.
         """
         service = _service(base, extraits, ["Le licenciement ouvre droit à une indemnité."])
 
         evenements = await _evenements(service, _requete())
 
         fin = evenements[-1]
-        assert fin["sources"], "la source de repli manquait"
+        assert fin["sources"] == []
         assert fin["articles_cites"] == [] and fin["citations"] == []
         assert {t["law_id"] for t in fin["textes_consultes_non_cites"]} == {3, 8}
+        enregistres = [appel.args[0] for appel in base.add.call_args_list if appel.args]
+        reponses = [m for m in enregistres if getattr(m, "role", None) == "assistant"]
+        assert reponses and all(m.sources == [] for m in reponses)
 
     @pytest.mark.asyncio
     async def test_un_extrait_ecarte_du_contexte_n_a_pas_ete_consulte(self, base, monkeypatch):

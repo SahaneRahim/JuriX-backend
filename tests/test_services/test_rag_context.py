@@ -192,14 +192,15 @@ class TestCitations:
 
         assert rag_service._extract_citations(answer, chunks) == []
 
-    def test_sources_fallback_uses_chunk_content(self, rag_service):
+    def test_no_source_without_a_citation(self, rag_service):
+        """
+        Plus de source de repli : une reponse qui ne cite rien n'a pas de
+        source, meme si le premier extrait est pertinent (revue du
+        29/10/2026, tour 3).
+        """
         chunks = [_chunk(161, "161", "Contenu de repli.")]
 
-        sources = rag_service._create_sources_from_results(chunks, "Une question")
-
-        assert len(sources) == 1
-        assert sources[0].article_id == 161
-        assert "repli" in sources[0].excerpt
+        assert rag_service._extract_citations("Les dirigeants sont responsables.", chunks) == []
 
 
 class TestEventLoop:
@@ -326,14 +327,15 @@ class TestPseudoArticleNumbers:
 
         assert "Article 39" in block
 
-    def test_citation_drops_the_pseudo_number(self, rag_service):
-        chunks = [_chunk(61, "LEGAL_BASIS", "Vu la Constitution et la loi.")]
+    @pytest.mark.asyncio
+    async def test_consulted_text_drops_the_pseudo_number(self, rag_service):
+        """« Textes consultés » : un pseudo-numero (LEGAL_BASIS) n'est pas un article."""
+        chunks = [_chunk(61, "LEGAL_BASIS", "Vu la Constitution et la loi."),
+                  _chunk(62, "39", "Article trente-neuf.")]
 
-        sources = rag_service._create_sources_from_results(chunks, "une question")
+        champs = await rag_service._champs_des_citations("Réponse sans citation.", chunks)
 
-        assert sources[0].article_number is None
-        # L'identifiant, lui, reste : le chunk existe bien en base.
-        assert sources[0].article_id == 61
+        assert [t.articles for t in champs["textes_consultes_non_cites"]] == [["39"]]
 
     def test_search_result_omits_pseudo_articles(self):
         from app.services.search_service import SearchService
