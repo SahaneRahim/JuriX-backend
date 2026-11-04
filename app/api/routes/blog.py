@@ -13,6 +13,7 @@ Endpoints :
 import logging
 import time
 from typing import Any, Dict, List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
@@ -75,6 +76,28 @@ class BlogPostUpdate(BaseModel):
     is_published: Optional[bool] = None
 
 
+def servable_au_public(post: BlogPost) -> bool:
+    """
+    Un article n'est montré au public que si TOUTES ses citations ont été
+    vérifiées contre la base (`verifie: true`, posé par le serveur quand il
+    construit la citation à partir d'un extrait réel), et qu'il en a au moins
+    une.
+
+    Correctif du 04/11/2026, décision du propriétaire du 30/10 (« masquer au
+    public ») : les trois articles du 26/10 et ceux du premier générateur
+    portent des citations écrites par le modèle, jamais vérifiées, et un texte
+    dont la vérification du 29/10 a relevé des erreurs (« indemnité plafonnée
+    entre 1 et 12 mois », alors que l'art. 39 du Code du travail dit au moins
+    3 mois et au plus 1 mois par année d'ancienneté). Ils restent en base et
+    dans l'administration ; le site public affiche alors les articles de la
+    rédaction, vérifiés, que le front sert quand l'API n'en rend aucun.
+    """
+    citations = post.citations or []
+    return bool(citations) and all(
+        isinstance(citation, dict) and citation.get("verifie") is True for citation in citations
+    )
+
+
 # ==================== ENDPOINTS PUBLICS ====================
 
 @router.get("", response_model=List[Dict[str, Any]])
@@ -84,24 +107,28 @@ async def list_blog_posts(
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db)
 ):
-    """Liste tous les articles de blog publiés."""
-    query = select(BlogPost).where(BlogPost.is_published == True)
+    """Liste les articles de blog publiés ET servables au public (voir `servable_au_public`)."""
+    query = select(BlogPost).where(BlogPost.is_published.is_(True))
     if category and category.lower() != "tous":
         query = query.where(BlogPost.category.ilike(f"%{category}%"))
-    
-    query = query.order_by(desc(BlogPost.published_at)).limit(limit).offset(offset)
+
+    query = query.order_by(desc(BlogPost.published_at))
     res = await db.execute(query)
-    posts = res.scalars().all()
-    return [p.to_dict() for p in posts]
+    # Filtre après la requête : la table est petite, et la règle lit le JSON
+    # des citations. La pagination porte sur les articles servables.
+    posts = [p for p in res.scalars().all() if servable_au_public(p)]
+    return [p.to_dict() for p in posts[offset:offset + limit]]
 
 
 @router.get("/{slug}", response_model=Dict[str, Any])
 async def get_blog_post(slug: str, db: AsyncSession = Depends(get_db)):
-    """Récupère un article de blog par son slug."""
+    """Récupère un article publié et servable au public par son slug."""
     query = select(BlogPost).where(BlogPost.slug == slug)
     res = await db.execute(query)
     post = res.scalar_one_or_none()
-    if not post:
+    # Un brouillon, ou un article dont les citations n'ont pas été vérifiées,
+    # répond 404 comme un article inexistant : son adresse ne doit rien révéler.
+    if not post or not post.is_published or not servable_au_public(post):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Article '{slug}' introuvable"

@@ -12,8 +12,9 @@ import os
 import sys
 import time
 from pathlib import Path
-from huggingface_hub import HfApi, CommitOperationAdd
+
 from dotenv import load_dotenv
+from huggingface_hub import CommitOperationAdd, HfApi
 
 REPO_ID = "rahim237cm/jurix-documents"
 REPO_TYPE = "dataset"
@@ -88,7 +89,7 @@ def main():
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
-                commit_info = api.create_commit(
+                api.create_commit(
                     repo_id=REPO_ID,
                     repo_type=REPO_TYPE,
                     operations=operations,

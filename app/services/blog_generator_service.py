@@ -8,7 +8,8 @@ et la génération structurée par LLM pour produire un article complet d'actual
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.search import SearchRequest
