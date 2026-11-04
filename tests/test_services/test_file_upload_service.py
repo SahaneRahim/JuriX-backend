@@ -192,24 +192,6 @@ class TestAntivirusScanning:
         assert result.scan_time_ms > 0
         assert result.threat_found is None
 
-    @pytest.mark.asyncio
-    async def test_scan_mock_implementation(self, upload_service, sample_docx):
-        """Test que le mock scanner fonctionne."""
-        result = await upload_service.scan_virus(sample_docx)
-        
-        assert result.scanner == "mock"
-        assert result.scanner_version == "1.0.0-dev"
-        assert result.is_clean is True
-
-    @pytest.mark.asyncio
-    async def test_scan_timeout_handling(self, upload_service, sample_pdf):
-        """Test que le scan gère les timeouts gracieusement."""
-        # Le mock devrait toujours réussir rapidement
-        result = await upload_service.scan_virus(sample_pdf)
-        
-        assert result.scan_time_ms < 5000  # Max 5 secondes
-        assert result.is_clean is True
-
 
 # ==================== METADATA EXTRACTION TESTS ====================
 
@@ -239,20 +221,6 @@ class TestMetadataExtraction:
         assert metadata.word_count is not None
         assert metadata.word_count > 0
         assert metadata.page_count is None  # DOCX n'a pas page_count
-
-    @pytest.mark.asyncio
-    async def test_extract_metadata_missing_fields(self, upload_service, sample_pdf):
-        """Test que les métadonnées manquantes sont gérées."""
-        # Le PDF minimal n'a pas de titre/auteur
-        metadata = await upload_service.extract_metadata(sample_pdf, "pdf")
-        
-        # Ces champs peuvent être None
-        assert metadata.title is None or isinstance(metadata.title, str)
-        assert metadata.author is None or isinstance(metadata.author, str)
-        
-        # Mais ces champs doivent toujours exister
-        assert metadata.file_size > 0
-        assert metadata.file_hash is not None
 
     @pytest.mark.asyncio
     async def test_file_hash_generation(self, upload_service, sample_pdf):

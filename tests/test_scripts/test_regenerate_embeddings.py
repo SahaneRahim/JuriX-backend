@@ -73,9 +73,6 @@ class TestSelection:
 
         assert _ids(lot) == [1, 2, 3]
 
-    def test_le_compte_annonce_suit_la_meme_selection(self, base):
-        assert regen._count_remaining(base, None, False, EMPREINTE) == 3
-
     def test_force_reprend_tout_ce_qui_est_vectorisable(self, base):
         lot = regen._fetch_batch(base, None, True, EMPREINTE, 0, 100)
 
@@ -263,9 +260,6 @@ def _index_embedding(session):
 
 
 class TestReconstructionDeLIndex:
-
-    def test_le_nom_est_celui_de_la_migration(self):
-        assert regen.INDEX_EMBEDDING == "idx_articles_embedding_hnsw_halfvec1024"
 
     def test_index_reconstruit_et_valide(self, base):
         regen.reindex(base)

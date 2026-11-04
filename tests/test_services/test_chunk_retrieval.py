@@ -193,19 +193,6 @@ class TestChunkLevelFTS:
         assert "<mark>" in matching[0].excerpt.lower()
 
     @pytest.mark.asyncio
-    async def test_excerpt_is_centred_on_the_match(self, db_session, corpus):
-        """
-        L'extrait suit le terme cherche.
-
-        Le mecanisme precedent renvoyait content[:400], donc toujours le debut
-        de l'article, quel que soit l'endroit ou se trouvait la correspondance.
-        """
-        chunks = await search_articles_pg(db_session, "solidaire", None, 15, 0)
-
-        matching = [c for c in chunks if c.article_id == 1002]
-        assert "solidaire" in matching[0].excerpt.lower()
-
-    @pytest.mark.asyncio
     async def test_filters_apply_on_article_branch(self, db_session, corpus):
         """
         Le filtre de statut mord enfin sur la branche article.

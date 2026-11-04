@@ -98,7 +98,9 @@ def test_le_chat_date_comme_la_page(jour, titre):
     assert _date_affichee(jour, titre) == dates_de_l_acte(jour, titre).date_signature
 
 
-@pytest.mark.parametrize("jour,titre", [c for c in CAS_DE_DATES if c[0] is not None])
+@pytest.mark.parametrize(
+    "jour,titre", [c for c in CAS_DE_DATES if c[0] is not None and c[1] != AUPSRVE]
+)
 def test_le_modele_lit_l_annee_seule_quand_la_page_n_a_qu_elle(jour, titre):
     """
     Le contexte du modele et la page appliquent la meme regle du 1er janvier
@@ -107,8 +109,6 @@ def test_le_modele_lit_l_annee_seule_quand_la_page_n_a_qu_elle(jour, titre):
     l'intitule.
     """
     dates = dates_de_l_acte(jour, titre)
-    if dates.date_publication_jo is not None:
-        return
     extrait = type("Extrait", (), {"publication_date": jour, "law_title": titre})()
     annee_seule = "jour non indiqué" in _date_du_texte(extrait)
 

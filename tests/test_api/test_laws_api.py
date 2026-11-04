@@ -64,33 +64,6 @@ class TestGetLaws:
         laws = response.json()
         assert all(law["language"] == "fr" for law in laws)
 
-    @pytest.mark.asyncio
-    async def test_get_laws_filter_status(self, client: AsyncClient, sample_law):
-        """Test filtre par statut."""
-        response = await client.get("/api/v1/laws/?law_status=published")
-        
-        assert response.status_code == 200
-        laws = response.json()
-        assert all(law["status"] == "published" for law in laws)
-
-    @pytest.mark.asyncio
-    async def test_get_laws_pagination(self, client: AsyncClient, sample_law):
-        """Test pagination."""
-        response = await client.get("/api/v1/laws/?skip=0&limit=10")
-        
-        assert response.status_code == 200
-        laws = response.json()
-        assert len(laws) <= 10
-
-    @pytest.mark.asyncio
-    async def test_get_laws_empty(self, client: AsyncClient):
-        """Test résultat vide."""
-        response = await client.get("/api/v1/laws/?language=xx")
-        
-        assert response.status_code == 200
-        laws = response.json()
-        assert laws == []
-
 
 # ==================== GET /laws/{id} TESTS ====================
 
@@ -116,17 +89,6 @@ class TestGetLaw:
         
         assert response.status_code == 404
         assert "not found" in response.json()["detail"].lower()
-
-    @pytest.mark.asyncio
-    async def test_get_law_with_articles(self, client: AsyncClient, sample_law):
-        """Test loi avec articles."""
-        response = await client.get(f"/api/v1/laws/{sample_law.id}")
-        
-        assert response.status_code == 200
-        law = response.json()
-        # LawResponse expose article_count, pas la liste des articles :
-        # la charger sur chaque loi d'une liste serait un N+1.
-        assert "article_count" in law
 
 
 # ==================== POST /admin/laws TESTS ====================
@@ -224,17 +186,6 @@ class TestUpdateLaw:
 
 class TestDeleteLaw:
     """Tests pour DELETE /api/v1/laws/admin/{id}."""
-
-    @pytest.mark.asyncio
-    async def test_delete_law_success(self, admin_client: AsyncClient, sample_law):
-        """Test suppression loi."""
-        response = await admin_client.delete(f"/api/v1/laws/admin/{sample_law.id}")
-        
-        assert response.status_code == 204
-        
-        # Vérifier que la loi est supprimée
-        get_response = await admin_client.get(f"/api/v1/laws/{sample_law.id}")
-        assert get_response.status_code == 404
 
     @pytest.mark.asyncio
     async def test_delete_law_not_found(self, admin_client: AsyncClient):

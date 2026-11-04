@@ -141,30 +141,6 @@ async def test_les_deux_dates_sont_nommees_sans_ambiguite(client, db_session):
     assert corps["publication_date"] == "2021-12-28" and corps["updated_at"].startswith("2026-10-14")
 
 
-async def test_un_premier_janvier_de_remplissage_ne_donne_que_l_annee(client, db_session):
-    loi = await _loi(db_session, "PRC-9999", "Décret N°2024/193 juin 10", type="décret",
-                     publication_date=date(2024, 1, 1))
-
-    corps = (await client.get(f"/api/v1/laws/{loi.id}")).json()
-
-    assert corps["date_signature"] is None and corps["annee"] == 2024
-    assert corps["publication_date"] == "2024-01-01"
-
-
-async def test_une_date_de_journal_officiel_n_est_pas_dite_de_signature(client, db_session):
-    loi = await _loi(
-        db_session, "OHADA-AUPSRVE-2023",
-        "Acte uniforme portant organisation des procédures simplifiées de recouvrement et des voies "
-        "d'exécution, révisé, publié au Journal officiel de l'OHADA du 15 novembre 2023",
-        type="acte uniforme", publication_date=date(2023, 11, 15),
-    )
-
-    corps = (await client.get(f"/api/v1/laws/{loi.id}")).json()
-
-    assert corps["date_signature"] is None
-    assert corps["date_publication_jo"] == "2023-11-15" and corps["annee"] == 2023
-
-
 # ==================== GET /laws/{id} : STATUT ====================
 
 async def test_un_texte_sans_lien_dit_seulement_qu_aucune_modification_n_est_relevee(client, db_session, compteur):

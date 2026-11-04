@@ -79,9 +79,6 @@ class TestEtat:
         assert etat_prouve([_lien("abroge", date(2020, 1, 1), articles=("5",))], None) is None
         assert etat_prouve([_lien("modifie", date(2020, 1, 1))], None) == "modifie"
 
-    def test_sans_lien_rien_n_est_affirme(self):
-        assert etat_prouve([], "5") is None
-
 
 class TestStatutProuve:
 

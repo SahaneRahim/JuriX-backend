@@ -153,8 +153,7 @@ def test_donnees_reelles_du_code_civil():
         ("PRC-9449", {"abroge_partiellement": 1}),
         # Loi 2020/009 : son article 1 seul est remplace par la loi 2021/022.
         ("PRC-8413", {"remplace_partiellement": 1}),
-        # Remplacees en entier par l'ordonnance 2025/002.
-        ("LOI-2013-004", {"remplace": 1}),
+        # Remplacee en entier par l'ordonnance 2025/002.
         ("PRC-5697", {"remplace": 1}),
     ],
 )

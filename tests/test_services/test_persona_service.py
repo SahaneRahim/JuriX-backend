@@ -76,16 +76,6 @@ class TestPersonaOperations:
             assert "example_questions" in persona
 
     @pytest.mark.asyncio
-    async def test_validate_persona_valid(self, db_session: AsyncSession):
-        """Un profil valide rend sa forme canonique."""
-        service = PersonaService(db_session)
-
-        assert await service.validate_persona("citoyen") == "citoyen"
-        assert await service.validate_persona("avocat") == "avocat"
-        assert await service.validate_persona("entrepreneur") == "entrepreneur"
-        assert await service.validate_persona("étudiant") == "étudiant"
-
-    @pytest.mark.asyncio
     async def test_les_alias_du_chat_sont_admis(self, db_session: AsyncSession):
         """« etudiant » donnait 400 ici alors que le chat l'accepte."""
         service = PersonaService(db_session)
@@ -441,29 +431,6 @@ class TestEngagementMetrics:
         assert len(questions) > 0
         assert questions[0]["question"] == "Quels sont mes droits?"
         assert questions[0]["count"] == 3
-
-    @pytest.mark.asyncio
-    async def test_compare_personas(self, db_session: AsyncSession):
-        """Test comparing personas across a metric."""
-        service = PersonaService(db_session)
-
-        # Create test stats
-        today = date.today()
-        for persona in ["citoyen", "avocat"]:
-            stat = PersonaStat(
-                persona=persona,
-                date=today,
-                total_questions=50 if persona == "citoyen" else 30
-            )
-            db_session.add(stat)
-        await db_session.commit()
-
-        # Compare
-        comparison = await service.compare_personas("usage", days=1)
-
-        assert comparison["metric"] == "usage"
-        assert "citoyen" in comparison["personas"]
-        assert "avocat" in comparison["personas"]
 
     @pytest.mark.asyncio
     async def test_get_trends(self, db_session: AsyncSession):

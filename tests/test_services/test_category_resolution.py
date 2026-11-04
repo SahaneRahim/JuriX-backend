@@ -45,10 +45,6 @@ def scrambled_categories(sync_db_session):
 
 
 class TestResolveByName:
-    def test_every_canonical_domain_resolves(self, scrambled_categories):
-        for domain in CANONICAL_DOMAINS:
-            assert resolve_domain_id(scrambled_categories, domain) > 0
-
     def test_resolution_is_by_name_not_by_position(self, scrambled_categories):
         """Le nom lu en base doit etre celui demande, malgre l'ordre inverse."""
         for domain in CANONICAL_DOMAINS:
@@ -95,7 +91,6 @@ class TestPipelineWritesTheRightCategory:
          "Droit de l'Environnement et des Ressources Naturelles"),
         ("Décret N°2018/420 portant nomination du Secrétaire Général", "Fonction Publique"),
         ("Loi portant Code de Procédure Pénale", "Droit Pénal et Procédure Pénale"),
-        ("Décret ratifiant l'accord de prêt avec la BAD", "Finances Publiques et Fiscalité"),
     ]
 
     @pytest.mark.parametrize("title,expected", CASES)

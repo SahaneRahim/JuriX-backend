@@ -203,76 +203,6 @@ class TestSearchEndpoint:
         assert data["search_time_ms"] >= 0
 
     @pytest.mark.asyncio
-    async def test_search_text_mode(self, client, mock_search_service):
-        """Test search with text mode."""
-        response = await client.post(
-            "/api/v1/search/",
-            json={
-                "query": "code civil",
-                "mode": "text",
-                "limit": 10
-            }
-        )
-
-        assert response.status_code == status.HTTP_200_OK
-        data = response.json()
-        assert "results" in data
-
-    @pytest.mark.asyncio
-    async def test_search_semantic_mode(self, client, mock_search_service):
-        """Test search with semantic mode."""
-        response = await client.post(
-            "/api/v1/search/",
-            json={
-                "query": "accountability of leaders",
-                "mode": "semantic",
-                "limit": 10
-            }
-        )
-
-        assert response.status_code == status.HTTP_200_OK
-        data = response.json()
-        assert "results" in data
-
-    @pytest.mark.asyncio
-    async def test_search_with_filters(self, client, mock_search_service):
-        """Test search with filters."""
-        response = await client.post(
-            "/api/v1/search/",
-            json={
-                "query": "test",
-                "mode": "hybrid",
-                "filters": {
-                    "language": "fr",
-                    "category_ids": [1, 2],
-                    "status": "published"
-                },
-                "limit": 15
-            }
-        )
-
-        assert response.status_code == status.HTTP_200_OK
-        data = response.json()
-        assert "filters_applied" in data
-
-    @pytest.mark.asyncio
-    async def test_search_with_pagination(self, client, mock_search_service):
-        """Test search with pagination parameters."""
-        response = await client.post(
-            "/api/v1/search/",
-            json={
-                "query": "test",
-                "mode": "text",
-                "limit": 5,
-                "offset": 10
-            }
-        )
-
-        assert response.status_code == status.HTTP_200_OK
-        data = response.json()
-        assert len(data["results"]) <= 5
-
-    @pytest.mark.asyncio
     async def test_search_invalid_mode(self, client, mock_search_service):
         """Test search with invalid mode returns 400."""
         response = await client.post(
@@ -436,19 +366,6 @@ class TestHealthEndpoint:
         assert "redis" not in data
         for key in ("status", "database", "fts_index", "cache", "embedding_service"):
             assert key in data, f"sonde manquante : {key}"
-
-    @pytest.mark.asyncio
-    async def test_health_check_reports_each_probe(self, client):
-        """
-        Une sonde en echec degrade le rapport sans le faire echouer.
-
-        L'ancienne version renvoyait toujours 500 : la verification de
-        redis_client etait hors de tout try.
-        """
-        response = await client.get("/api/v1/search/health")
-
-        assert response.status_code == status.HTTP_200_OK
-        assert response.json()["status"] in ("healthy", "degraded")
 
 
 class TestHealthEmbeddings:

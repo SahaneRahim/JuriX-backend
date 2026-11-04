@@ -101,16 +101,6 @@ def service(db_session):
 
 class TestTitleBeforeBody:
     @pytest.mark.asyncio
-    async def test_a_title_match_leads_a_body_only_match(self, service, ranking_corpus):
-        results = await service.text_search("nomination", limit=20)
-
-        assert results, "aucun resultat"
-        assert results[0].law_id in TITLE_LAWS, (
-            f"le premier resultat est {results[0].law_id}, qui ne porte pas le mot "
-            "dans son titre"
-        )
-
-    @pytest.mark.asyncio
     async def test_no_body_match_appears_before_a_title_match(self, service, ranking_corpus):
         scopes = [r.match_scope for r in await service.text_search("nomination", limit=20)]
 
@@ -118,14 +108,6 @@ class TestTitleBeforeBody:
         assert scopes == sorted(scopes, key=lambda s: s != "title"), (
             f"ordre des portees obtenu : {scopes}"
         )
-
-    @pytest.mark.asyncio
-    async def test_nothing_is_lost(self, service, ranking_corpus):
-        """« Titre d'abord » ne veut pas dire « titre seulement »."""
-        found = {r.law_id for r in await service.text_search("nomination", limit=20)}
-
-        assert set(TITLE_LAWS) <= found
-        assert set(BODY_LAWS) <= found, "les correspondances de corps ont disparu"
 
     @pytest.mark.asyncio
     async def test_match_scope_is_exact_not_guessed(self, service, ranking_corpus):

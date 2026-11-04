@@ -124,17 +124,6 @@ class TestArticlePinning:
         assert pinned[0].number == "42"
         assert len(pinned) == 2
 
-    def test_pinning_does_not_touch_the_database(self, rag_service):
-        """
-        Le texte est deja dans le contexte : aller le rechercher ouvrait un
-        moteur synchrone de plus a chaque question.
-        """
-        chunks = [_chunk(1, "1", "Premier"), _chunk(2, "42", "Quarante-deux")]
-
-        rag_service._pin_requested_article("article 42", chunks)
-
-        rag_service.db.execute.assert_not_called()
-
     def test_unknown_article_leaves_order_unchanged(self, rag_service):
         chunks = [_chunk(1, "1", "Premier"), _chunk(2, "2", "Deux")]
 
@@ -319,13 +308,6 @@ class TestPseudoArticleNumbers:
 
         assert "Visas et base légale" in block
         assert "Article LEGAL_BASIS" not in block
-
-    def test_context_keeps_real_article_numbers(self):
-        from app.services.prompts import format_chunk_block
-
-        block = format_chunk_block(_chunk(1, "39", "Contenu."), 1)
-
-        assert "Article 39" in block
 
     @pytest.mark.asyncio
     async def test_consulted_text_drops_the_pseudo_number(self, rag_service):

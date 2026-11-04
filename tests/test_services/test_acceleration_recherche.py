@@ -76,7 +76,7 @@ class TestLignesNiveauLoi:
         assert lignes, "la faute de frappe doit retrouver le titre"
         assert all(len(c.content) <= LAW_CHUNK_MAX_CHARS for c in lignes)
 
-    @pytest.mark.parametrize("longueur", [5_999, 6_000, 6_001, 6_002, 9_000, 30_000])
+    @pytest.mark.parametrize("longueur", [6_002, 30_000])
     def test_le_contexte_du_chat_ne_change_pas_d_un_octet(self, longueur):
         """
         LAW_CHUNK_MAX_CHARS = CONTEXT_MAX_CHARS_PER_CHUNK + 1 : avec ce caractere

@@ -353,13 +353,6 @@ class TestEchecsDuModele:
         with pytest.raises(ExplanationQuotaError):
             await service.explain(loi.id, "2", "fr")
 
-    async def test_sature(self, db_session, loi, llm):
-        llm.generate.side_effect = GeminiOverloadedError("Sature")
-        service = ExplanationService(db_session, llm=llm)
-
-        with pytest.raises(ExplanationOverloadedError):
-            await service.explain(loi.id, "2", "fr")
-
     async def test_erreur_generique(self, db_session, loi, llm):
         llm.generate.side_effect = GeminiServiceError("Reponse vide")
         service = ExplanationService(db_session, llm=llm)

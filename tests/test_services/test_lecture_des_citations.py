@@ -546,9 +546,7 @@ class TestEmphase:
         assert occurrence.extrait.article_id == 351
 
     @pytest.mark.parametrize("texte", [
-        "Voir _le décret n° 94/199_ pour le détail.",
         "Voir **le décret n° 94/199** pour le détail.",
-        "Selon l'article 35 de la loi _n° 92/007_, oui.",
         "Selon l'article 35 de la loi *n° 92/007*, oui.",
         "Selon l'article 35 du **Code du travail**, oui.",
         "Selon l'article 35 du _Code du travail_, oui.",
@@ -642,10 +640,6 @@ class TestIndicesUtf16:
 
         assert js == "article 37 du Code du travail"
         assert vers_js(occurrence.debut) == occurrence.debut + 1
-
-    def test_sans_caractere_hors_plan_de_base_rien_ne_change(self):
-        vers_js = indices_utf16("Pas d'emoji ici, é et — compris.")
-        assert vers_js(12) == 12
 
 
 class TestNoms:

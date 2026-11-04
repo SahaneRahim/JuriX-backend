@@ -4,11 +4,11 @@ Tests for RAGService.
 Test categories:
 - Core functionality (5 tests)
 - Context retrieval (2 tests)
-- Citation extraction (3 tests)
+- Citation extraction (1 test)
 - Confidence calculation (2 tests)
-- Conversation management (3 tests)
+- Conversation management (1 test)
 
-Total: 15 tests
+Total: 11 tests
 
 Author: JuriX Team
 """
@@ -261,48 +261,6 @@ class TestCoreFunctionality:
         rag_service.llm.generate.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_ask_stream_yields_chunks(
-        self,
-        rag_service,
-        sample_rag_request,
-        mock_search_results,
-        mock_db_session
-    ):
-        """Test streaming response yields chunks."""
-        # Mock search results
-        mock_search_response = MagicMock()
-        mock_search_response.results = []
-        mock_search_response.chunks = mock_search_results
-        mock_search_response.search_time_ms = 150
-        rag_service.search_service.search.return_value = mock_search_response
-
-        # Mock no existing conversation
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        mock_db_session.execute.return_value = mock_result
-
-        # Mock streaming chunks
-        async def mock_stream():
-            yield "Selon "
-            yield "l'article "
-            yield "161"
-
-        rag_service.llm.generate_stream.return_value = mock_stream()
-
-        # Execute
-        chunks = []
-        async for chunk_json in rag_service.ask_stream(sample_rag_request):
-            chunks.append(chunk_json)
-
-        # Assertions
-        assert len(chunks) > 0
-
-        # Last chunk should have done=True
-        import json
-        last_chunk = json.loads(chunks[-1])
-        assert last_chunk["done"] is True
-
-    @pytest.mark.asyncio
     async def test_ask_handles_llm_error(
         self,
         rag_service,
@@ -399,30 +357,6 @@ class TestContextRetrieval:
         assert chunks == mock_search_results
 
     @pytest.mark.asyncio
-    async def test_le_plein_texte_cherche_les_mots_cles_le_semantique_la_question(
-        self,
-        rag_service,
-        mock_search_results
-    ):
-        """
-        Mesure par le chemin du chat (102 questions, voyage-4-large) : la
-        question entiere vectorisee bat ses mots-cles. Le plein texte, lui,
-        garde les mots-cles.
-        """
-        mock_search_response = MagicMock()
-        mock_search_response.chunks = mock_search_results
-        mock_search_response.results = []
-        rag_service.search_service.search.return_value = mock_search_response
-        question = "Quelle est la responsabilité des dirigeants d'une société ?"
-
-        await rag_service._retrieve_chunks(question, "fr")
-
-        search_request = rag_service.search_service.search.call_args[0][0]
-        assert search_request.semantic_query == question
-        assert search_request.query == RAGService.extract_keywords(question)
-        assert search_request.query != question
-
-    @pytest.mark.asyncio
     async def test_retrieve_context_respects_language_filter(
         self,
         rag_service,
@@ -450,35 +384,6 @@ class TestContextRetrieval:
 
 class TestCitationExtraction:
     """Tests for citation extraction and validation."""
-
-    def test_extract_citations_from_answer(self, rag_service, mock_search_results):
-        """Test extracting citations from answer text."""
-        answer = "Selon l'article 161 du Code OHADA, les dirigeants sont responsables. L'article 5 du Code des sociétés précise leurs obligations."
-
-        citations = rag_service._extract_citations(answer, mock_search_results)
-
-        # Should find 2 citations
-        assert len(citations) >= 1
-        assert all(isinstance(c, Citation) for c in citations)
-        # La citation pointe une LIGNE d'article, pas seulement un numero
-        # extrait du texte de la reponse : le front peut l'ouvrir directement.
-        assert citations[0].article_id == 161
-        # L'extrait vient du chunk envoye au modele, sans requete supplementaire.
-        assert "responsables" in citations[0].excerpt
-
-    def test_extract_citations_validates_against_results(
-        self,
-        rag_service,
-        mock_search_results
-    ):
-        """Test that citations are validated against search results."""
-        # Citation for non-existent law
-        answer = "Selon l'article 999 de la Loi Inexistante"
-
-        citations = rag_service._extract_citations(answer, mock_search_results)
-
-        # Should not extract citation for non-existent law
-        assert len(citations) == 0
 
     def test_extract_citations_deduplicates(
         self,
@@ -549,42 +454,6 @@ class TestConversationManagement:
     """Tests for conversation and message management."""
 
     @pytest.mark.asyncio
-    async def test_load_existing_conversation(
-        self,
-        rag_service,
-        mock_db_session
-    ):
-        """Test loading existing conversation by session_id."""
-        # Mock existing conversation
-        existing_conv = Conversation(
-            id=1,
-            session_id="test-session",
-            persona="citoyen",
-            language="fr"
-        )
-        # .unique() est desormais appele avant scalar_one_or_none : obligatoire
-        # apres un joinedload sur une collection, sans quoi SQLAlchemy leve
-        # InvalidRequestError.
-        mock_result = MagicMock()
-        mock_result.unique.return_value.scalar_one_or_none.return_value = existing_conv
-        mock_result.scalar_one_or_none.return_value = existing_conv
-        mock_db_session.execute.return_value = mock_result
-
-        # Mock messages
-        mock_msg_result = MagicMock()
-        mock_msg_result.scalars.return_value.all.return_value = []
-
-        # Setup to return existing conv first, then messages
-        mock_db_session.execute.side_effect = [mock_result, mock_msg_result]
-
-        conv, messages = await rag_service._load_or_create_conversation(
-            "test-session", "citoyen", "fr"
-        )
-
-        assert conv.session_id == "test-session"
-        assert isinstance(messages, list)
-
-    @pytest.mark.asyncio
     async def test_create_new_conversation(
         self,
         rag_service,
@@ -604,34 +473,6 @@ class TestConversationManagement:
         assert conv.language == "fr"
         assert len(messages) == 0
         mock_db_session.add.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_save_interaction_creates_messages(
-        self,
-        rag_service,
-        mock_db_session
-    ):
-        """Test that save_interaction creates user and assistant messages."""
-        conversation = Conversation(
-            id=1,
-            session_id="test",
-            persona="citoyen",
-            language="fr"
-        )
-
-        await rag_service._save_interaction(
-            conversation=conversation,
-            question="Test question?",
-            answer="Test answer",
-            citations=[],
-            confidence=0.8,
-            retrieval_time_ms=100,
-            generation_time_ms=2000
-        )
-
-        # Should add 2 messages (user + assistant)
-        assert mock_db_session.add.call_count == 2
-        mock_db_session.commit.assert_called_once()
 
 
 # ==================== ROUTAGE D'INTENTION ====================

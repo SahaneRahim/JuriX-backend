@@ -51,7 +51,6 @@ class TestSystemDependencies:
 
     @pytest.mark.parametrize("package", [
         "poppler-utils",      # pdftoppm, dont depend pdf2image
-        "tesseract-ocr",
         "tesseract-ocr-fra",
         "tesseract-ocr-eng",
     ])

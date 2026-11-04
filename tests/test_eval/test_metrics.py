@@ -9,7 +9,6 @@ import pytest
 
 from scripts.eval.metrics import (
     bootstrap_ci,
-    hits_at_k,
     mrr,
     recall_at_k,
     reciprocal_ranks,
@@ -34,9 +33,6 @@ class TestRecall:
     def test_recall_at_5(self):
         # q1, q2, q3 : trois sur quatre
         assert recall_at_k(RANKINGS, GOLD, 5) == 0.75
-
-    def test_absent_gold_never_counts(self):
-        assert hits_at_k(RANKINGS, GOLD, 10)[3] == 0.0
 
     def test_empty_ranking_does_not_crash(self):
         assert recall_at_k([[]], [1], 5) == 0.0

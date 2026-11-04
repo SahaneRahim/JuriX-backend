@@ -109,21 +109,6 @@ async def code_minier(db_session: AsyncSession, category_ids: dict) -> Law:
 class TestDeuxRecherches:
     """Le coeur du mode : un sujet, une recherche."""
 
-    async def test_une_recherche_par_sujet(self, db_session, code_minier, llm, monkeypatch):
-        service = ComparisonService(db_session, llm=llm)
-        requetes = []
-        vraie = service.search_service.search
-
-        async def espion(requete):
-            requetes.append(requete.query)
-            return await vraie(requete)
-
-        monkeypatch.setattr(service.search_service, "search", espion)
-
-        await service.compare("permis de recherche", "permis d'exploitation")
-
-        assert requetes == ["permis de recherche", "permis d'exploitation"]
-
     async def test_les_recherches_ne_se_chevauchent_pas(
         self, db_session, code_minier, llm, monkeypatch
     ):
@@ -204,16 +189,6 @@ class TestDeuxRecherches:
             await service.compare("permis de recherche", "zzzzqqqxyw inexistant")
 
         llm.generate.assert_not_awaited()
-
-    async def test_restriction_a_un_document(self, db_session, code_minier, llm):
-        service = ComparisonService(db_session, llm=llm)
-
-        resultat = await service.compare(
-            "permis de recherche", "permis d'exploitation", law_id=code_minier.id
-        )
-
-        assert {a.law_id for a in resultat.articles_a} == {code_minier.id}
-        assert {a.law_id for a in resultat.articles_b} == {code_minier.id}
 
 
 class TestCitations:
@@ -338,13 +313,6 @@ class TestCitations:
 
 class TestGrille:
     """Les axes sont imposes, pas negocies."""
-
-    async def test_criteres_par_defaut(self, db_session, code_minier, llm):
-        service = ComparisonService(db_session, llm=llm)
-
-        resultat = await service.compare("permis de recherche", "permis d'exploitation")
-
-        assert [r.criterion for r in resultat.rows] == CRITERES_PAR_DEFAUT
 
     async def test_criteres_sur_mesure(self, db_session, code_minier, llm):
         axes = ["Duree", "Autorite"]

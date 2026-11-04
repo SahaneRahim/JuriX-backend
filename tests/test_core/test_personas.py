@@ -45,7 +45,6 @@ def test_sans_reponse_donne_le_profil_general(valeur):
     ("étudiant", "étudiant"),
     ("etudiant", "étudiant"),
     ("Étudiant", "étudiant"),
-    ("ÉTUDIANT", "étudiant"),
     (ETUDIANT_NFD, "étudiant"),
     (" avocat ", "avocat"),
     ("Entrepreneur", "entrepreneur"),

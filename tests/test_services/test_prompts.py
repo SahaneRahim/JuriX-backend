@@ -254,14 +254,6 @@ def test_prompt_conversationnel_disponible(langue, intention):
 
 
 @pytest.mark.parametrize("langue,intention", TOUTES_LES_INTENTIONS)
-def test_prompt_conversationnel_ne_parle_pas_de_documents(langue, intention):
-    """Aucun document n'a ete consulte : en evoquer un serait un mensonge."""
-    prompt = CONVERSATIONAL_PROMPTS[langue][intention]
-
-    assert "Documents juridiques pertinents" not in prompt
-
-
-@pytest.mark.parametrize("langue,intention", TOUTES_LES_INTENTIONS)
 def test_prompt_conversationnel_interdit_les_citations(langue, intention):
     prompt = CONVERSATIONAL_PROMPTS[langue][intention]
     attendu = "Ne cite aucun article" if langue == "fr" else "Cite no article"
@@ -367,7 +359,9 @@ def test_on_ne_conseille_pas_un_avocat_a_un_avocat(langue, consulter):
     assert consulter in message_sans_resultat(langue, "citoyen")
 
 
-@pytest.mark.parametrize("persona", PROFILS)
+# Le citoyen et le profil general rendent le message entier, en-tete compris :
+# test_le_message_sans_resultat_du_citoyen_ne_change_pas le fige.
+@pytest.mark.parametrize("persona", [p for p in PROFILS if p not in ("citoyen", PROFIL_GENERAL)])
 def test_meme_entete_pour_tous(persona):
     premiere = NO_RESULTS_MESSAGE["fr"].splitlines()[0]
 

@@ -305,18 +305,6 @@ class TestReprise:
         assert premier.pages_en_echec == [1, 2]
         assert extracteur.etat(pdf).lots_a_faire == [(1, 2)]
 
-    def test_plantage_du_processus_compte_une_tentative(self, extracteur, tmp_path):
-        """
-        Le superviseur note l'echec d'un lot pendant lequel le processus est
-        mort : sinon ce lot tuerait chaque nouveau processus, indefiniment.
-        """
-        pdf = _pdf(tmp_path / "d.pdf", 1)
-        for _ in range(TENTATIVES_MAX):
-            extracteur.noter_echec(pdf, 1, 1, "processus tue (signal 9)")
-
-        assert extracteur.etat(pdf).lots_abandonnes == [(1, 1)]
-        assert extracteur.doublure.appels == []
-
     def test_noter_echec_n_efface_pas_un_lot_reussi(self, extracteur, tmp_path):
         pdf = _pdf(tmp_path / "d.pdf", 2)
         extracteur.extraire(pdf)

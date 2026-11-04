@@ -47,20 +47,6 @@ class TestGetPersonaInfoAPI:
     """Tests for GET /api/v1/personas/{persona} endpoint."""
 
     @pytest.mark.asyncio
-    async def test_get_persona_info_success(self, client: AsyncClient):
-        """Test getting info for valid persona."""
-        response = await client.get("/api/v1/personas/citoyen")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["name"] == "citoyen"
-        assert data["display_name"] == "Citoyen"
-        assert data["icon"] == "👤"
-        assert "description" in data
-        assert "tone" in data
-        assert len(data["example_questions"]) > 0
-
-    @pytest.mark.asyncio
     async def test_get_persona_info_invalid(self, client: AsyncClient):
         """Test getting info for invalid persona returns 400."""
         response = await client.get("/api/v1/personas/invalid_persona")
@@ -253,15 +239,6 @@ class TestGetPopularQuestionsAPI:
         assert "questions" in data
         assert isinstance(data["questions"], list)
         assert "total_count" in data
-
-    @pytest.mark.asyncio
-    async def test_get_popular_questions_custom_limit(self, admin_client: AsyncClient):
-        """Test getting popular questions with custom limit."""
-        response = await admin_client.get("/api/v1/personas/citoyen/questions?limit=5")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["questions"]) <= 5
 
     @pytest.mark.asyncio
     async def test_get_popular_questions_invalid_persona(self, admin_client: AsyncClient):

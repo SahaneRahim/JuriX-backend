@@ -7,7 +7,8 @@ Chaque test correspond a un mecanisme qui n'existait pas :
 - la renormalisation des sorties tronquees (Matryoshka) n'existait pas, alors
   que l'operateur <=> de pgvector suppose des vecteurs unitaires ;
 - le chemin batch n'avait ni garde de dimension ni controle du nombre de
-  vecteurs rendus ;
+  vecteurs rendus (ce controle-la est verifie dans test_embedding_voyage.py et
+  test_embedding_providers.py) ;
 - la cle de cache ignorait la dimension (un vecteur 3072 aurait ete resservi
   sous configuration 1536) et minusculait le texte.
 """
@@ -25,18 +26,17 @@ from app.services.embedding_service import EmbeddingService, EmbeddingServiceErr
 @pytest.fixture
 def recorder(monkeypatch):
     """Doublure HTTP de Voyage qui enregistre le corps de chaque requete."""
-    state = {"payloads": [], "n_returned": None, "dim": None, "scale": 9.0}
+    state = {"payloads": [], "dim": None, "scale": 9.0}
 
     def _repondre(requete: httpx.Request) -> httpx.Response:
         payload = json.loads(requete.content)
         state["payloads"].append(payload)
         dim = state["dim"] or payload["output_dimension"]
-        n = state["n_returned"] if state["n_returned"] is not None else len(payload["input"])
         rng = np.random.default_rng(7)
         # Vecteurs NON unitaires : c'est le service qui doit normaliser.
         return httpx.Response(200, json={"data": [
             {"index": i, "embedding": (rng.random(dim) * state["scale"]).tolist()}
-            for i in range(n)
+            for i in range(len(payload["input"]))
         ]})
 
     monkeypatch.setattr(module, "transport_http", httpx.MockTransport(_repondre))
@@ -68,16 +68,6 @@ class TestDimension:
 
         with pytest.raises(EmbeddingServiceError, match="Dimension"):
             service.generate_batch_embeddings(["a", "b"])
-
-    def test_batch_rejects_truncated_response(self, service, recorder):
-        """
-        Deux vecteurs pour trois textes : zip() perdait silencieusement la
-        queue du lot, puis un KeyError tombait bien plus loin.
-        """
-        recorder["n_returned"] = 2
-
-        with pytest.raises(EmbeddingServiceError, match="incomplète"):
-            service.generate_batch_embeddings(["a", "b", "c"])
 
 
 class TestNormalisation:

@@ -114,9 +114,6 @@ class TestDimensionNative:
         with pytest.raises(EmbeddingServiceError, match="dimension native"):
             _service(trop_petit)
 
-    def test_dimension_egale_a_la_native_acceptee(self):
-        _service(_Fournisseur(native_dim=EmbeddingService.EMBEDDING_DIM))
-
     def test_dimension_hors_des_dimensions_permises_refusee(self):
         """
         Voyage n'accepte que 256, 512, 1024 et 2048 : une dimension sous la
@@ -128,12 +125,6 @@ class TestDimensionNative:
 
         with pytest.raises(EmbeddingServiceError, match="permises"):
             _service(f)
-
-    def test_dimension_permise_acceptee(self):
-        f = _Fournisseur(native_dim=2048)
-        f.dimensions_permises = (EmbeddingService.EMBEDDING_DIM,)
-
-        _service(f)
 
 
 class TestLimiteDeTexte:

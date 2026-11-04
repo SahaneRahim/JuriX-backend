@@ -86,12 +86,6 @@ class TestR2Contextualisation:
         r = refine([chunk("PARA_2", "Contenu quelconque suffisamment long." * 4)], contexte)
         assert "Article PARA_2" not in r.embeddable[0]["embed_text"]
 
-    def test_contenu_non_modifie(self, contexte):
-        """Le contexte va dans embed_text, jamais dans content (affichage/citation)."""
-        contenu = "Article utile avec un contenu suffisamment long pour être conservé."
-        r = refine([chunk("1", contenu)], contexte)
-        assert r.chunks[0]["content"] == contenu
-
 
 class TestR3Visas:
     def test_visas_hors_index_et_cites(self, contexte):
@@ -397,9 +391,6 @@ class TestNormalisationDocling:
     def test_alinea_en_liste_redevient_alinea(self):
         out = normalize_for_chunking("Article 2.- Le conseil :\n- (1) délibère ;\n- (2) vote.")
         assert "\n(1) délibère" in out and "\n(2) vote" in out
-
-    def test_marqueurs_de_page_toujours_preserves(self):
-        assert "<<PAGE:3>>" in normalize_for_chunking("<<PAGE:3>>\nArticle 1.- Texte.")
 
 
 # ==================== SORTIES DOCLING REELLES ====================

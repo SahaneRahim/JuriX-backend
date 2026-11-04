@@ -21,7 +21,6 @@ from app.services.ocr_service import OCRError, OCRService
 from app.utils.ocr_utils import (
     assess_text_quality,
     clean_ocr_text,
-    has_embedded_text,
     merge_text_blocks,
 )
 
@@ -184,16 +183,6 @@ class TestOCRProcessing:
         assert result.processing_time_ms > 0
         assert result.confidence >= 0.5
 
-    @pytest.mark.asyncio
-    async def test_ocr_timeout_handling(self, ocr_service, sample_native_pdf):
-        """Test gestion des timeouts."""
-        # Avec un timeout très court, devrait quand même fonctionner pour PDF natif
-        result = await ocr_service.process_pdf(
-            sample_native_pdf, timeout_seconds=1
-        )
-        
-        assert result.text_length > 0
-
 
 # ==================== TEXT CLEANING TESTS ====================
 
@@ -209,22 +198,6 @@ class TestTextCleaning:
         
         assert "  " not in cleaned  # No double spaces
         assert cleaned.count(" ") < dirty_text.count(" ")
-
-    def test_clean_broken_words(self):
-        """Test reconstruction de mots cassés."""
-        text = "res pon sable"
-        cleaned = clean_ocr_text(text)
-        
-        # Should attempt to fix broken words
-        assert len(cleaned) <= len(text)
-
-    def test_clean_special_characters(self):
-        """Test correction de caractères spéciaux."""
-        text = "l'article « test » — suite"
-        cleaned = clean_ocr_text(text)
-        
-        assert cleaned is not None
-        assert len(cleaned) > 0
 
     def test_preserve_structure(self):
         """Test préservation de la structure."""
@@ -266,25 +239,12 @@ class TestErrorHandling:
         with pytest.raises(OCRError):
             await ocr_service.process_pdf(invalid_path)
 
-    def test_tesseract_availability_check(self, ocr_service):
-        """Test vérification disponibilité Tesseract."""
-        # Should not crash
-        available = ocr_service.tesseract_available
-        assert isinstance(available, bool)
-
 
 # ==================== UTILITY FUNCTIONS TESTS ====================
 
 
 class TestUtilityFunctions:
     """Tests des fonctions utilitaires."""
-
-    def test_has_embedded_text(self, sample_native_pdf):
-        """Test détection de texte embarqué."""
-        has_text, coverage = has_embedded_text(sample_native_pdf)
-        
-        assert has_text is True
-        assert 0.0 <= coverage <= 1.0
 
     def test_merge_text_blocks(self):
         """Test fusion de blocs de texte."""

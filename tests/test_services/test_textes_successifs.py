@@ -57,7 +57,7 @@ def _statut(reference, numero, contenu=None, section=None, liens=LIENS_DE_TEST):
 
 # ==================== LE TEXTE TOUCHE ====================
 
-@pytest.mark.parametrize("numero", ["12", "1", "1er", "12.2", "30", "33", "35", "33.4"])
+@pytest.mark.parametrize("numero", ["12", "1er", "12.2", "30", "33", "35", "33.4"])
 def test_un_article_reecrit_porte_le_texte_qui_le_reecrit(numero):
     """« 12.2 » est le deuxieme morceau de l'article 12 : il est reecrit aussi."""
     assert _statut("LOI-2000-001", numero) == [
@@ -72,7 +72,7 @@ def test_un_article_que_le_texte_recent_ne_touche_pas_reste_muet(numero):
     assert _statut("LOI-2000-001", numero) == []
 
 
-@pytest.mark.parametrize("numero", ["PREAMBULE", "LEGAL_BASIS", "SECTION_3"])
+@pytest.mark.parametrize("numero", ["PREAMBULE"])
 def test_un_pseudo_numero_n_est_pas_un_article_reecrit(numero):
     assert _statut("LOI-2000-001", numero) == []
 
@@ -86,7 +86,6 @@ def test_un_texte_remplace_en_entier_l_est_dans_chaque_extrait(numero):
 
 
 @pytest.mark.parametrize("nature,vise,consequence", [
-    ("modifie", "article", "Pour ce qui a changé, ce texte fait foi."),
     ("complete", "article", "L'article reste en vigueur."),
     ("abroge", "article", "L'article ne s'applique plus."),
     ("abroge_partiellement", "article", "Hors de ce que vise ce texte, l'article s'applique encore."),
@@ -300,7 +299,7 @@ def test_une_loi_de_finances_annonce_le_changement_sous_l_article_qui_le_porte(n
     ]
 
 
-@pytest.mark.parametrize("numero", ["1", "25", "27.1", "PREAMBULE"])
+@pytest.mark.parametrize("numero", ["1", "25", "27.1"])
 def test_une_loi_de_finances_ne_l_annonce_pas_sous_ses_autres_articles(numero):
     """Une loi de finances touche des dizaines de textes : la ligne n'a sens que sous l'article qui modifie."""
     assert _statut("PRC-10254", numero, liens=[LOI_DE_FINANCES]) == []

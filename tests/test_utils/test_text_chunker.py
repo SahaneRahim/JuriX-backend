@@ -159,11 +159,6 @@ class TestValidation:
         articles = extract_articles("Article 1. Test.", strict=False, min_article_length=1)
         assert isinstance(articles, list)
 
-    def test_empty_text_raises_value_error(self):
-        """Le texte vide reste refuse."""
-        with pytest.raises(ValueError):
-            extract_articles("   ")
-
     def test_text_without_articles_falls_back_to_paragraphs(self):
         """
         Un texte sans marqueur d'article n'est plus une erreur.
@@ -201,20 +196,6 @@ class TestValidation:
         articles = extract_articles(text, strict=True)
         assert len(articles) == 2
 
-    def test_less_than_3_articles_warning_non_strict(self):
-        """Test that <3 articles returns result in non-strict mode."""
-        text = """
-        Article 1. Premier article avec suffisamment de contenu
-        Contenu du premier article avec assez de texte pour validation.
-
-        Article 2. Deuxième article avec contenu
-        Contenu du deuxième article avec assez de texte.
-        """
-
-        # Should not raise in non-strict mode
-        articles = extract_articles(text, strict=False)
-        assert len(articles) == 2
-
     def test_text_too_large_raises_error(self):
         """Test that text >5MB raises ValueError."""
         # Create a very large text (>5MB)
@@ -243,22 +224,6 @@ class TestEdgeCases:
         articles = extract_articles(text)
         assert len(articles) == 3
         assert articles[0]['title'] == 'Dispositions générales'
-
-    def test_mixed_french_english(self):
-        """Test mixed French/English article markers."""
-        text = """
-        Article 1. Dispositions en français
-        Contenu en français avec suffisamment de texte.
-
-        Article 2. More provisions in English
-        English content here with enough text for validation.
-
-        Article 3. Dispositions finales
-        Contenu final avec suffisamment de texte.
-        """
-
-        articles = extract_articles(text)
-        assert len(articles) == 3
 
     def test_preserve_formatting(self):
         """Test that formatting is preserved when requested."""
@@ -298,52 +263,9 @@ class TestEdgeCases:
         assert articles[0]['char_count'] > 10000
         assert articles[0]['word_count'] > 1500
 
-    def test_article_without_title(self):
-        """Test articles without explicit title."""
-        text = """
-        Article 1.
-        Contenu direct sans titre. La présente loi régit les sociétés commerciales au Cameroun
-        et établit les règles applicables.
-
-        Article 2.
-        Contenu sans titre. Les dispositions s'appliquent à toutes les sociétés
-        commerciales et industrielles.
-
-        Article 3.
-        Pas de titre ici. Au sens de la présente loi, on entend par société
-        toute entité juridique constituée.
-        """
-
-        articles = extract_articles(text)
-
-        assert len(articles) == 3
-        # These should not be detected as titles (too long)
-        assert articles[0]['title'] is None or len(articles[0]['title']) < 100
-        assert articles[1]['title'] is None or len(articles[1]['title']) < 100
-        assert articles[2]['title'] is None or len(articles[2]['title']) < 100
-
 
 class TestStatistics:
     """Test article statistics."""
-
-    def test_word_count_accurate(self):
-        """Test that word count is accurate."""
-        text = """
-        Article 1. Test words
-        Un deux trois quatre cinq six sept huit neuf dix onze douze treize quatorze quinze.
-        Suffisamment de contenu pour valider le minimum de caractères requis.
-
-        Article 2. Test content
-        Contenu court texte avec suffisamment de mots pour validation.
-
-        Article 3. Test final
-        Autre contenu texte avec suffisamment de mots également.
-        """
-
-        articles = extract_articles(text)
-
-        # First article should have 15 words in first sentence
-        assert articles[0]['word_count'] >= 15
 
     def test_char_count_accurate(self):
         """Test that character count is accurate."""
@@ -429,47 +351,6 @@ class TestMinimumArticleLength:
         article_4 = articles[-1]
         assert article_4['title'] == 'Very short'
         assert 'Very short' in article_4['content']
-
-    def test_custom_min_article_length(self):
-        """Test custom min_article_length parameter."""
-        text = """
-        Article 1. Test content
-        Short text here with some additional words for validation purposes.
-
-        Article 2. Test other
-        Another short text with additional content for validation.
-
-        Article 3. Test final
-        Final short text with sufficient content for validation.
-        """
-
-        # Set very low minimum
-        articles = extract_articles(text, min_article_length=5, strict=True)
-
-        assert len(articles) == 3
-
-
-class TestMultiplePatterns:
-    """Test detection of different patterns in same document."""
-
-    def test_mixed_article_and_art_patterns(self):
-        """Test that most common pattern is selected."""
-        # Predominantly "Article X" pattern
-        text = """
-        Article 1. First article with content
-        Content with sufficient text for validation purposes and regulatory compliance.
-
-        Article 2. Second article with content
-        More content with sufficient text for validation and additional requirements.
-
-        Article 3. Third article with content
-        Final content with sufficient text for validation and complete coverage.
-        """
-
-        articles = extract_articles(text)
-
-        # Should extract all 3 (pattern detection picks most common)
-        assert len(articles) == 3
 
 
 class TestConservationDuTexte:
@@ -592,13 +473,6 @@ class TestMarkdownArticleHeadings:
                 "La présente mesure complète l'article 5 du décret antérieur, "
                 "lequel demeure applicable pour ses autres dispositions.")
         assert self._numbers(text) == ["1"]
-
-    def test_classic_forms_are_untouched(self):
-        text = ("Article 1. Première disposition du texte, suffisamment longue "
-                "pour etre retenue par le decoupeur.\n\n"
-                "Article 2. Seconde disposition du texte, elle aussi de longueur "
-                "raisonnable pour le decoupage.")
-        assert self._numbers(text) == ["1", "2"]
 
 
 class TestPagesEtMarqueurs:

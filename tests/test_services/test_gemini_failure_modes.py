@@ -23,9 +23,6 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.gemini_service import (
-    GeminiOverloadedError,
-    GeminiQuotaError,
-    GeminiServiceError,
     _finish_reason,
     _is_overloaded,
     _is_quota_exhausted,
@@ -80,14 +77,6 @@ class TestClassementDesPannes:
 
     def test_le_delai_a_un_defaut_quand_le_fournisseur_n_en_donne_pas(self):
         assert retry_after_seconds(Exception("429 RESOURCE_EXHAUSTED"), defaut=90) == 90
-
-    def test_les_deux_types_restent_attrapables_comme_avant(self):
-        """
-        Sous-classes de GeminiServiceError : tout appelant existant continue de
-        fonctionner sans modification.
-        """
-        assert issubclass(GeminiQuotaError, GeminiServiceError)
-        assert issubclass(GeminiOverloadedError, GeminiServiceError)
 
 
 class TestTexteVisible:

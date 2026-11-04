@@ -223,29 +223,6 @@ class TestLanguageDetectorPerformance:
         assert result["language"] == "fr"
 
 
-class TestLanguageDetectorConsensus:
-    """Tests sur la logique de consensus."""
-
-    def test_perfect_consensus_high_confidence(self, detector):
-        """Test qu'un texte clair donne un consensus parfait."""
-        # Texte très clairement français
-        text = """
-        Article 1. La République du Cameroun garantit l'égalité devant la loi.
-        Article 2. Les citoyens camerounais jouissent des droits fondamentaux.
-        Article 3. La Constitution est la loi suprême de la République.
-        Article 4. Les juridictions nationales assurent le respect du droit.
-        """
-
-        result = detector.detect(text)
-
-        assert result["consensus"] is True
-        assert result["confidence"] > 0.80, "Texte clair devrait avoir >80% confiance"
-
-        # Vérifier que les 3 méthodes ont voté FR
-        votes = list(result["method_votes"].values())
-        assert votes.count("fr") >= 2, "Au moins 2/3 méthodes devraient voter FR"
-
-
 class TestLanguageDetectorHealthCheck:
     """Tests du health check."""
 

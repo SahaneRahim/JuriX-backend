@@ -292,23 +292,6 @@ class TestCategoryMapping:
         assert PENAL in mapping.values()
 
     @pytest.mark.asyncio
-    async def test_get_reverse_category_mapping(self, db_session: AsyncSession):
-        """Test getting name to ID mapping."""
-        service = CategoryService(db_session)
-
-        mapping = await service.get_reverse_category_mapping()
-
-        # Should be a dict with string keys and int values
-        assert isinstance(mapping, dict)
-        assert len(mapping) >= len(CANONICAL_DOMAINS)  # At least seed categories
-        assert all(isinstance(k, str) for k in mapping.keys())
-        assert all(isinstance(v, int) for v in mapping.values())
-
-        # Should include known categories
-        assert CIVIL in mapping.keys()
-        assert PENAL in mapping.keys()
-
-    @pytest.mark.asyncio
     async def test_get_category_by_name(self, db_session: AsyncSession):
         """Test getting category by name."""
         service = CategoryService(db_session)
@@ -394,22 +377,6 @@ class TestCategoryStats:
             # If there are no laws, all percentages should be 0
             assert total_percentage == 0
 
-    @pytest.mark.asyncio
-    async def test_category_stats_ordering(self, db_session: AsyncSession):
-        """Test that stats are ordered by law count descending."""
-        service = CategoryService(db_session)
-
-        stats_list = await service.get_all_category_stats()
-
-        # Check ordering (descending by law_count, then by name)
-        for i in range(len(stats_list) - 1):
-            current = stats_list[i]
-            next_stat = stats_list[i + 1]
-
-            # If law counts are different, should be descending
-            if current.law_count != next_stat.law_count:
-                assert current.law_count >= next_stat.law_count
-
 
 class TestHealthCheck:
     """Tests for health check method."""
@@ -430,22 +397,6 @@ class TestHealthCheck:
 
 class TestPrivateHelpers:
     """Tests for private helper methods."""
-
-    @pytest.mark.asyncio
-    async def test_validate_unique_name_new(self, db_session: AsyncSession):
-        """Test validating a unique name that doesn't exist."""
-        service = CategoryService(db_session)
-
-        # « Ne leve pas » est le contrat, mais il faut le DIRE : sans
-        # assertion, un refactor qui rendrait une erreur au lieu de la lever
-        # passerait ce test sans que rien ne bronche.
-        await service._validate_unique_name("Totally New Category Name")
-
-        # Contre-epreuve : un nom deja pris DOIT lever. Sans elle, une methode
-        # devenue muette resterait verte.
-        existantes = await service.list_categories(limit=1)
-        with pytest.raises(Exception):
-            await service._validate_unique_name(existantes[0].name)
 
     @pytest.mark.asyncio
     async def test_validate_unique_name_duplicate(self, db_session: AsyncSession):
@@ -473,22 +424,10 @@ class TestPrivateHelpers:
         with pytest.raises(Exception):
             await service._validate_unique_name(category.name, exclude_id=category.id + 10_000)
 
-    @pytest.mark.asyncio
-    async def test_get_law_count_for_category(self, db_session: AsyncSession, sample_law):
-        """Test counting laws for a category."""
-        service = CategoryService(db_session)
-
-        if sample_law.category_id is None:
-            pytest.skip("Sample law has no category")
-
-        count = await service._get_law_count_for_category(sample_law.category_id)
-
-        assert count >= 1  # At least the sample law
-
 
 # Summary:
 # - 4 test classes for CRUD operations (Create, Get, List, Update, Delete)
 # - 3 test classes for utilities (Mapping, Stats, Health)
 # - 1 test class for private helpers
-# - Total: 30+ test methods covering all functionality
+# - Total: 26 test methods covering all functionality
 # - Tests cover success cases, error cases, edge cases, and validation

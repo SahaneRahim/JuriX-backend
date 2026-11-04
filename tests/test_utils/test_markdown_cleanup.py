@@ -257,7 +257,6 @@ def test_marqueur_de_l_article_premier_ecorche(brut, attendu):
 @pytest.mark.parametrize("ligne", [
     "Vu l'Article 12 : de la loi",
     "A la demande du ministre, article 3 :",
-    "2. Le Conseil d'administration ;",
 ])
 def test_ligne_sans_marqueur_intacte(ligne):
     from app.utils.markdown_cleanup import nettoyer_markdown

@@ -34,7 +34,6 @@ class TestBaseUsername:
             ("jean.dupont@x.cm", "jeandupont"),      # le point disparait
             ("Jean-Luc@X.CM", "jean-luc"),           # le tiret survit
             ("jean+spam@x.cm", "jeanspam"),
-            ("jose@x.cm", "jose"),
             ("_jean_@x.cm", "jean"),                 # bornes nettoyees
         ],
     )

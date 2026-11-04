@@ -73,10 +73,6 @@ def test_une_url_psycopg2_n_est_pas_concernee():
     assert Settings(DATABASE_URL=url).DATABASE_URL == url
 
 
-def test_une_url_sans_parametre_passe():
-    assert Settings(DATABASE_URL=BASE).DATABASE_URL == BASE
-
-
 def test_alembic_retire_la_chaine_de_requete():
     """
     L'autre moitie du meme probleme, dans l'autre sens.

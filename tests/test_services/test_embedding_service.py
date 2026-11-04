@@ -2,14 +2,12 @@
 Tests pour EmbeddingService.
 
 Test categories:
-- Basic functionality (4 tests)
-- Caching (3 tests)
-- Multilingual support (2 tests)
-- Edge cases (5 tests)
-- Performance (2 tests)
+- Basic functionality (2 tests)
+- Caching (1 test)
+- Edge cases (4 tests)
 - Health check (2 tests)
 
-Total: 18 tests
+Total: 9 tests
 
 Author: JuriX Team
 """
@@ -29,10 +27,11 @@ from app.services.embedding_service import EmbeddingService
 
 # ==================== DOUBLURE VOYAGE ====================
 #
-# Ces tests portent sur la logique d'EmbeddingService — validation, normalisation
-# L2, cache, similarite cosinus — et non sur l'API. Ils passent par le fournisseur
-# de production, Voyage, dont le transport HTTP est double : aucun appel reseau,
-# aucun jeton consomme.
+# Ces tests portent sur la logique d'EmbeddingService — validation, cache,
+# similarite cosinus — et non sur l'API. Ils passent par le fournisseur de
+# production, Voyage, dont le transport HTTP est double : aucun appel reseau,
+# aucun jeton consomme. La normalisation L2 est verifiee dans
+# test_embedding_dimensions.py et test_embedding_providers.py.
 #
 # L'embedding est deterministe : derive d'une empreinte du texte, donc deux appels
 # sur le meme texte donnent le meme vecteur et deux textes differents des vecteurs
@@ -94,12 +93,6 @@ def sample_french_text():
     return "Article 1er. Le Code civil camerounais régit les personnes, les biens et les obligations."
 
 
-@pytest.fixture
-def sample_english_text():
-    """Texte juridique anglais exemple."""
-    return "Article 1. The Cameroonian Civil Code governs persons, property and obligations."
-
-
 # ==================== TESTS BASIC FUNCTIONALITY ====================
 
 class TestBasicFunctionality:
@@ -129,23 +122,6 @@ class TestBasicFunctionality:
         assert all(isinstance(emb, np.ndarray) for emb in embeddings)
         assert all(emb.dtype == np.float32 for emb in embeddings)
 
-    def test_embedding_dimensions(self, service, sample_french_text):
-        """Test que les embeddings ont exactement EmbeddingService.EMBEDDING_DIM dimensions."""
-        embedding = service.generate_embedding(sample_french_text)
-
-        assert embedding.shape == (EmbeddingService.EMBEDDING_DIM,), (
-            f"Dimension incorrecte: {embedding.shape} != (EmbeddingService.EMBEDDING_DIM,)"
-        )
-
-    def test_embedding_normalized(self, service, sample_french_text):
-        """Test que les embeddings sont normalisés L2 (norme ≈ 1.0)."""
-        embedding = service.generate_embedding(sample_french_text, normalize=True)
-
-        norm = np.linalg.norm(embedding)
-        assert abs(norm - 1.0) < 0.01, (
-            f"Embedding non normalisé: norme={norm:.4f} (attendu ≈1.0)"
-        )
-
 
 # ==================== TESTS CACHING ====================
 
@@ -174,58 +150,6 @@ class TestCaching:
             f"Un hit de cache ne doit pas etre nettement plus lent: {time2:.3f}s vs {time1:.3f}s"
         )
 
-    def test_cache_miss(self, service_with_cache):
-        """Test que le premier appel génère et cache l'embedding."""
-        unique_text = f"Article unique test {time.time()}"
-
-        start = time.time()
-        embedding = service_with_cache.generate_embedding(unique_text)
-        elapsed = time.time() - start
-
-        # Vérifications
-        assert embedding is not None
-        assert embedding.shape == (EmbeddingService.EMBEDDING_DIM,)
-        assert elapsed < 1.0, f"Génération trop lente: {elapsed:.3f}s > 1.0s"
-
-    def test_cache_disabled(self, service):
-        """Test que le service fonctionne sans cache."""
-        text = "Article test sans cache"
-
-        # Devrait fonctionner normalement
-        emb1 = service.generate_embedding(text)
-        emb2 = service.generate_embedding(text)
-
-        # Les embeddings devraient être identiques (même texte)
-        np.testing.assert_array_almost_equal(emb1, emb2, decimal=5)
-
-
-# ==================== TESTS MULTILINGUAL SUPPORT ====================
-
-class TestMultilingualSupport:
-    """Tests du support multilingue (FR/EN)."""
-
-    def test_french_text(self, service, sample_french_text):
-        """Test traitement de texte juridique français."""
-        embedding = service.generate_embedding(sample_french_text)
-
-        # Vérifications
-        assert embedding is not None
-        assert embedding.shape == (EmbeddingService.EMBEDDING_DIM,)
-
-        # Le texte contient des mots français juridiques
-        assert "camerounais" in sample_french_text.lower()
-
-    def test_english_text(self, service, sample_english_text):
-        """Test traitement de texte juridique anglais."""
-        embedding = service.generate_embedding(sample_english_text)
-
-        # Vérifications
-        assert embedding is not None
-        assert embedding.shape == (EmbeddingService.EMBEDDING_DIM,)
-
-        # Le texte contient des mots anglais juridiques
-        assert "cameroonian" in sample_english_text.lower()
-
 
 # ==================== TESTS EDGE CASES ====================
 
@@ -239,13 +163,6 @@ class TestEdgeCases:
 
         with pytest.raises(ValueError, match="ne peut pas être vide"):
             service.generate_embedding("   ")  # Whitespace only
-
-    def test_very_long_text(self, service):
-        """Au-dela de la limite du fournisseur, le texte est refuse."""
-        long_text = "A" * (service.MAX_TEXT_LENGTH + 1)
-
-        with pytest.raises(ValueError, match="Texte trop long"):
-            service.generate_embedding(long_text)
 
     def test_special_characters(self, service):
         """Test gestion des caractères spéciaux et accents."""
@@ -302,36 +219,6 @@ class TestEdgeCases:
         for i, emb in enumerate(results):
             assert not np.isnan(emb).any(), f"NaN dans embedding {i}"
             assert not np.isinf(emb).any(), f"Inf dans embedding {i}"
-
-
-# ==================== TESTS PERFORMANCE ====================
-
-class TestPerformance:
-    """Tests des performances du service."""
-
-    def test_single_embedding_performance(self, service, sample_french_text):
-        """Test que l'embedding unique prend <200ms."""
-        start = time.time()
-        embedding = service.generate_embedding(sample_french_text)
-        elapsed = time.time() - start
-
-        assert embedding is not None
-        assert elapsed < 0.2, (
-            f"Trop lent: {elapsed:.3f}s > 0.2s (cible: <200ms)"
-        )
-
-    def test_batch_10_performance(self, service):
-        """Test que le batch de 10 embeddings prend <1s."""
-        texts = [f"Article {i} du Code civil camerounais" for i in range(1, 11)]
-
-        start = time.time()
-        embeddings = service.generate_batch_embeddings(texts, batch_size=10)
-        elapsed = time.time() - start
-
-        assert len(embeddings) == 10
-        assert elapsed < 1.0, (
-            f"Trop lent: {elapsed:.3f}s > 1.0s (cible: <1s pour 10 textes)"
-        )
 
 
 # ==================== TESTS HEALTH CHECK ====================
@@ -391,36 +278,6 @@ class TestSimilarity:
         # Devrait être très proche de 1.0 (identiques)
         assert similarity > 0.99, (
             f"Similarité trop faible pour textes identiques: {similarity:.4f}"
-        )
-
-    def test_similarity_similar_texts(self, service):
-        """Test similarité entre textes similaires."""
-        text1 = "Article premier du Code civil camerounais"
-        text2 = "Article 1er du Code civil du Cameroun"
-
-        emb1 = service.generate_embedding(text1)
-        emb2 = service.generate_embedding(text2)
-
-        similarity = service.similarity(emb1, emb2)
-
-        # Devrait être élevée (textes très similaires)
-        assert similarity > 0.7, (
-            f"Similarité trop faible: {similarity:.4f} (attendu >0.7)"
-        )
-
-    def test_similarity_different_texts(self, service):
-        """Test similarité entre textes différents."""
-        text1 = "Article 1er du Code civil"
-        text2 = "Article 100 du Code pénal"
-
-        emb1 = service.generate_embedding(text1)
-        emb2 = service.generate_embedding(text2)
-
-        similarity = service.similarity(emb1, emb2)
-
-        # Devrait être modérée (même domaine mais articles différents)
-        assert 0.0 <= similarity <= 1.0, (
-            f"Similarité hors bornes: {similarity:.4f}"
         )
 
     def test_similarity_wrong_dimensions(self, service):

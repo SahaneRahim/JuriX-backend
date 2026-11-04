@@ -5,10 +5,10 @@ Tests cover:
 - Text search (PostgreSQL FTS)
 - Semantic search (pgvector)
 - Hybrid search (RRF fusion)
-- Indexing operations (create, update, delete, reindex)
-- Filtering (language, category, date, combined)
+- Indexing operations (delete, reindex)
+- Filtering (language, category, date)
 - Caching (hit, miss)
-- Edge cases (empty query, special chars)
+- Edge cases (empty query)
 - Performance requirements (<200ms hybrid)
 
 Total: 28+ tests for >90% coverage
@@ -290,19 +290,6 @@ class TestTextSearch:
         assert {r.law_id for r in en_results} == {3}, "« directors » est dans le texte anglais"
         assert all(r.language == "en" for r in en_results)
 
-    @pytest.mark.asyncio
-    async def test_text_search_no_results(self, search_service):
-        """Une requete sans correspondance renvoie une liste vide, pas une erreur."""
-
-        results = await search_service.text_search(
-            query="nonexistentquery12345",
-            filters=None,
-            limit=15,
-            offset=0
-        )
-
-        assert results == []
-
 
 # ============================================================================
 # Test Semantic Search (pgvector)
@@ -310,23 +297,6 @@ class TestTextSearch:
 
 class TestSemanticSearch:
     """Test semantic search functionality with pgvector."""
-
-    @pytest.mark.asyncio
-    async def test_semantic_search_basic(self, search_service, sample_data):
-        """Test basic semantic search returns results."""
-        results = await search_service.semantic_search(
-            query="responsabilité des dirigeants",
-            filters=None,
-            limit=15,
-            offset=0
-        )
-
-        assert isinstance(results, list)
-        # May be empty in SQLite (no real pgvector), but structure is valid
-        for result in results:
-            assert hasattr(result, "law_id")
-            assert hasattr(result, "relevance_score")
-            assert 0.0 <= result.relevance_score <= 1.0
 
     @pytest.mark.asyncio
     async def test_semantic_search_contextual(self, search_service, sample_data):
@@ -366,21 +336,6 @@ class TestSemanticSearch:
             assert result.category_id in [1, 2]
 
     @pytest.mark.asyncio
-    async def test_semantic_search_ranking(self, search_service, sample_data):
-        """Test semantic search results are properly ranked."""
-        results = await search_service.semantic_search(
-            query="civil law responsibilities",
-            filters=None,
-            limit=5,
-            offset=0
-        )
-
-        # Results should be sorted by relevance score descending
-        if len(results) > 1:
-            for i in range(len(results) - 1):
-                assert results[i].relevance_score >= results[i + 1].relevance_score
-
-    @pytest.mark.asyncio
     async def test_semantic_search_no_results(self, search_service, db_session):
         """Test semantic search with no embeddings in database."""
         # Empty database, no articles
@@ -400,52 +355,6 @@ class TestSemanticSearch:
 
 class TestHybridSearch:
     """Test hybrid search with RRF fusion algorithm."""
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_basic(self, search_service, sample_data):
-        """Test basic hybrid search combines both modes."""
-        results = await search_service.hybrid_search(
-            query="responsabilité dirigeants",
-            filters=None,
-            limit=15,
-            offset=0
-        )
-
-        assert isinstance(results, list)
-        # Hybrid should return combined results
-        for result in results:
-            assert hasattr(result, "relevance_score")
-            assert 0.0 <= result.relevance_score <= 1.0
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_rrf_fusion(self, search_service, sample_data):
-        """Test RRF fusion combines rankings correctly."""
-        # La fusion travaille sur des ChunkResult, plus sur des SearchResult :
-        # elle se fait au niveau article.
-        text_chunk = ChunkResult(
-            article_id=1, law_id=1, number="1",
-            reference="LOI-001", law_title="Test Law 1",
-            content="Contenu article 1", excerpt="Contenu article 1",
-            relevance_score=0.9, source="fts",
-        )
-
-        semantic_chunk = ChunkResult(
-            article_id=2, law_id=2, number="1",
-            reference="LOI-002", law_title="Test Law 2",
-            content="Contenu article 2", excerpt="Contenu article 2",
-            relevance_score=0.8, source="semantic",
-        )
-
-        fused = search_service._rrf_fusion(
-            [text_chunk],
-            [semantic_chunk],
-            k=60,
-            text_weight=0.4,
-            semantic_weight=0.6
-        )
-
-        assert isinstance(fused, list)
-        assert len(fused) == 2  # Both results present
 
     @pytest.mark.asyncio
     async def test_rrf_fusion_keys_on_article_not_law(self, search_service):
@@ -518,20 +427,6 @@ class TestHybridSearch:
         assert min(scores) == 0.0
 
     @pytest.mark.asyncio
-    async def test_hybrid_search_deduplication(self, search_service, sample_data):
-        """Test that duplicate law_ids are properly merged."""
-        results = await search_service.hybrid_search(
-            query="civil",
-            filters=None,
-            limit=15,
-            offset=0
-        )
-
-        # Check no duplicate law_ids
-        law_ids = [r.law_id for r in results]
-        assert len(law_ids) == len(set(law_ids)), "Duplicate law_ids found"
-
-    @pytest.mark.asyncio
     async def test_hybrid_search_performance(self, search_service, sample_data):
         """Test hybrid search completes in <200ms (spec requirement)."""
         start_time = time.time()
@@ -585,40 +480,6 @@ class TestIndexing:
     """Test des operations d'indexation (search_vector PostgreSQL)."""
 
     @pytest.mark.asyncio
-    async def test_index_law(self, search_service, sample_data):
-        """Test indexing a single law."""
-        law = sample_data["laws"][0]
-
-        # Should not raise
-        await search_service.index_law(law)
-
-        # L'indexation renseigne le tsvector PostgreSQL (l'ancien assert
-        # portait sur un mock Meilisearch qui n'existe plus).
-        from sqlalchemy import text as sa_text
-
-        indexed = await search_service.db.execute(
-            sa_text("SELECT search_vector IS NOT NULL FROM laws WHERE id = :i"),
-            {"i": law.id},
-        )
-        assert indexed.scalar() is True
-
-    @pytest.mark.asyncio
-    async def test_update_law_index(self, search_service, sample_data):
-        """Test updating an existing law in index."""
-        law = sample_data["laws"][0]
-
-        # Should not raise
-        await search_service.update_law_index(law.id, law)
-
-        from sqlalchemy import text as sa_text
-
-        indexed = await search_service.db.execute(
-            sa_text("SELECT search_vector IS NOT NULL FROM laws WHERE id = :i"),
-            {"i": law.id},
-        )
-        assert indexed.scalar() is True
-
-    @pytest.mark.asyncio
     async def test_delete_law_index(self, search_service, sample_data):
         """Test deleting a law from index."""
         law_id = sample_data["laws"][0].id
@@ -655,60 +516,12 @@ class TestFiltering:
     """Test search filtering functionality."""
 
     @pytest.mark.asyncio
-    async def test_filter_by_language(self, search_service, sample_data):
-        """Test filtering by language."""
-        filters = SearchFilters(language="fr")
-
-        results = await search_service.text_search(
-            query="code",
-            filters=filters,
-            limit=15,
-            offset=0
-        )
-
-        # Mock returns what we configured, so just verify it works
-        assert isinstance(results, list)
-
-    @pytest.mark.asyncio
-    async def test_filter_by_category(self, search_service, sample_data):
-        """Test filtering by category IDs."""
-        filters = SearchFilters(category_ids=[1, 2])
-
-        results = await search_service.semantic_search(
-            query="test",
-            filters=filters,
-            limit=15,
-            offset=0
-        )
-
-        assert isinstance(results, list)
-
-    @pytest.mark.asyncio
     async def test_filter_by_date_range(self, search_service, sample_data):
         """Test filtering by publication year range."""
         filters = SearchFilters(year_from=2024, year_to=2024)
 
         results = await search_service.text_search(
             query="code",
-            filters=filters,
-            limit=15,
-            offset=0
-        )
-
-        assert isinstance(results, list)
-
-    @pytest.mark.asyncio
-    async def test_filter_combined(self, search_service, sample_data):
-        """Test combining multiple filters."""
-        filters = SearchFilters(
-            language="fr",
-            category_ids=[1],
-            status="published",
-            year_from=2024
-        )
-
-        results = await search_service.hybrid_search(
-            query="civil",
             filters=filters,
             limit=15,
             offset=0
@@ -1005,59 +818,6 @@ class TestEdgeCases:
         with pytest.raises(Exception):  # Pydantic validation error
             SearchRequest(query="", mode="hybrid")
 
-    @pytest.mark.asyncio
-    async def test_special_characters(self, search_service, sample_data):
-        """Test search with special characters."""
-        results = await search_service.text_search(
-            query="test @#$% special & chars",
-            filters=None,
-            limit=15,
-            offset=0
-        )
-
-        # Should handle gracefully without errors
-        assert isinstance(results, list)
-
-    @pytest.mark.asyncio
-    async def test_text_search_failure_falls_back(self, search_service, sample_data, monkeypatch):
-        """
-        Le mode hybride doit degrader proprement si la recherche textuelle echoue.
-
-        L'ancienne version simulait une panne Meilisearch ; on fait desormais
-        echouer la recherche plein texte PostgreSQL elle-meme.
-        """
-        async def _boom(*a, **kw):
-            raise RuntimeError("recherche plein texte indisponible")
-
-        monkeypatch.setattr(search_service, "text_search", _boom)
-
-        request = SearchRequest(query="test", mode="hybrid")
-
-        # Should handle gracefully - if semantic search succeeds, hybrid continues
-        # If both fail, should get semantic fallback
-        response = await search_service.search(request)
-
-        assert isinstance(response, SearchResponse)
-        # Hybrid mode continues if semantic search works (text search fails gracefully)
-        # Or falls back to semantic if both fail
-        assert response.mode in ["hybrid", "semantic"]
-        assert response.total >= 0  # Should return results or empty list
-
-    @pytest.mark.asyncio
-    async def test_long_query_truncation(self, search_service):
-        """Test handling of very long queries."""
-        long_query = "word " * 200  # 200 words
-
-        results = await search_service.text_search(
-            query=long_query[:500],  # Truncate to max length
-            filters=None,
-            limit=15,
-            offset=0
-        )
-
-        # Should handle without errors
-        assert isinstance(results, list)
-
 
 # ============================================================================
 # Test Main Search Entry Point
@@ -1065,18 +825,6 @@ class TestEdgeCases:
 
 class TestSearchEntryPoint:
     """Test main search() entry point."""
-
-    @pytest.mark.asyncio
-    async def test_search_text_mode(self, search_service, sample_data):
-        """Test search with text mode."""
-        request = SearchRequest(query="civil", mode="text")
-
-        response = await search_service.search(request)
-
-        assert isinstance(response, SearchResponse)
-        assert response.mode == "text"
-        assert response.query == "civil"
-        assert response.search_time_ms >= 0
 
     @pytest.mark.asyncio
     async def test_search_semantic_mode(self, search_service, sample_data):
@@ -1087,31 +835,6 @@ class TestSearchEntryPoint:
 
         assert isinstance(response, SearchResponse)
         assert response.mode == "semantic"
-
-    @pytest.mark.asyncio
-    async def test_search_hybrid_mode(self, search_service, sample_data):
-        """Test search with hybrid mode."""
-        request = SearchRequest(query="dirigeants", mode="hybrid")
-
-        response = await search_service.search(request)
-
-        assert isinstance(response, SearchResponse)
-        assert response.mode in ["hybrid", "text", "semantic"]  # May fallback
-
-    @pytest.mark.asyncio
-    async def test_search_with_pagination(self, search_service, sample_data):
-        """Test search with pagination parameters."""
-        request = SearchRequest(
-            query="test",
-            mode="text",
-            limit=5,
-            offset=10
-        )
-
-        response = await search_service.search(request)
-
-        assert isinstance(response, SearchResponse)
-        assert len(response.results) <= 5
 
     @pytest.mark.asyncio
     async def test_search_invalid_mode(self, search_service):

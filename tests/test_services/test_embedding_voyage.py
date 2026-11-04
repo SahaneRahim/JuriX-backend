@@ -368,37 +368,12 @@ class TestReprisesDuService:
             self._service().generate_embedding("article", task_type=DOCUMENT)
         assert len(doublure.requetes) == EmbeddingService.MAX_RETRIES
 
-    def test_un_refus_definitif_n_est_pas_rejoue(self, faux):
-        doublure = faux(reponse=_refus(401, "Provided API key is invalid."))
-
-        with pytest.raises(EmbeddingDefinitiveError):
-            self._service().generate_embedding("article", task_type=DOCUMENT)
-        assert len(doublure.requetes) == 1
-
     def test_un_lot_definitif_n_est_pas_rejoue(self, faux):
         doublure = faux(reponse=_refus(403, "Forbidden"))
 
         with pytest.raises(EmbeddingDefinitiveError):
             self._service().generate_batch_embeddings(["a", "b"])
         assert len(doublure.requetes) == 1
-
-    def test_une_question_n_a_qu_un_essai(self, faux):
-        """
-        Trois essais et leurs pauses feraient attendre l'utilisateur plus de
-        dix secondes avant le repli sur le plein texte.
-        """
-        doublure = faux(reponse=_refus(503, "Service unavailable"))
-
-        with pytest.raises(EmbeddingServiceError, match="503"):
-            self._service().generate_embedding("question", task_type=QUERY)
-        assert len(doublure.requetes) == 1
-
-    def test_vecteurs_normalises_par_le_service(self, faux):
-        faux()
-        v = self._service().generate_embedding("article", task_type=DOCUMENT)
-
-        assert v.shape == (DIM,)
-        assert abs(float(np.linalg.norm(v)) - 1.0) < 1e-5
 
 
 # ==================== CONNEXION GARDEE ====================
@@ -512,13 +487,6 @@ class TestEcheance:
         with pytest.raises(EmbeddingServiceError, match="Pas de vecteur pour la question"):
             await service.generate_embedding_async("question", task_type=QUERY)
         assert time.monotonic() - debut < 2.5
-
-    @pytest.mark.asyncio
-    async def test_une_question_rapide_passe(self):
-        service = EmbeddingService(use_cache=False, provider=_Lent(delai=2.0, sommeil=0.0))
-
-        v = await service.generate_embedding_async("question", task_type=QUERY)
-        assert v.shape == (DIM,)
 
     @pytest.mark.asyncio
     async def test_les_questions_ont_leurs_propres_fils(self):

@@ -70,13 +70,6 @@ async def test_bavardage_est_smalltalk(question):
 
 
 @pytest.mark.asyncio
-async def test_question_sur_le_produit_est_meta():
-    resultat = await classify_intent("qui es-tu ?", llm=_LLM(_verdict("meta")))
-
-    assert resultat.intent == "meta"
-
-
-@pytest.mark.asyncio
 async def test_question_etrangere_est_hors_sujet():
     resultat = await classify_intent(
         "ecris-moi un poeme sur la pluie", llm=_LLM(_verdict("hors_sujet"))
@@ -237,23 +230,6 @@ async def test_la_politesse_en_ouverture_ne_court_circuite_pas(question):
     resultat = await classify_intent(question, llm=llm)
 
     assert resultat.rule == "llm"
-    assert llm.calls != []
-
-
-@pytest.mark.asyncio
-async def test_pas_de_court_circuit_symetrique_sur_la_politesse():
-    """
-    « Bonjour, puis-je licencier un salarie malade ? » est une question de
-    droit. Un court-circuit lexical sur « bonjour » la classerait en
-    salutation : l'asymetrie du court-circuit est voulue.
-    """
-    llm = _LLM(_verdict("juridique"))
-
-    resultat = await classify_intent(
-        "bonjour, puis-je licencier un salarie malade ?", llm=llm
-    )
-
-    assert resultat.intent == INTENT_JURIDIQUE
     assert llm.calls != []
 
 

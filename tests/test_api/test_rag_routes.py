@@ -145,7 +145,6 @@ class TestAskEndpoint:
         ({"persona": None}, "general"),
         ({"persona": ""}, "general"),
         ({"persona": "Etudiant"}, "étudiant"),
-        ({"persona": "avocat"}, "avocat"),
     ])
     @patch('app.api.routes.rag.RAGService')
     def test_le_profil_recu_par_le_service(

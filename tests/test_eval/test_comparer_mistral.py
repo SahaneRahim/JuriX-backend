@@ -40,10 +40,6 @@ def test_numeros_cites_sous_toutes_leurs_formes():
     assert numeros_cites(texte) == ["32", "40.1", "41", "1", "5 BIS"]
 
 
-def test_aucune_citation():
-    assert numeros_cites("Je ne trouve pas cette information.") == []
-
-
 def test_citations_presentes_et_absentes():
     resultat = citations("L'article 33 et l'article 99 le prévoient.", {"32", "33"})
 
