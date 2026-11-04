@@ -204,6 +204,15 @@ def pytest_configure(config):
             _CLES_REELLES[nom] = getattr(settings, nom)
             setattr(settings, nom, CLE_FACTICE)
 
+    # Documents d'origine sur le disque local, quel que soit le .env.
+    #
+    # Le .env de developpement peut pointer DOCUMENTS_BASE_URL vers le magasin
+    # distant (le jeu HuggingFace du corpus) : les tests du telechargement
+    # partaient alors sur ce magasin et echouaient en 404, et la garantie
+    # « sans reglage, disque local » ne tenait plus. Le mode distant a ses
+    # propres tests, qui le reglent eux-memes et doublent le reseau (respx).
+    settings.DOCUMENTS_BASE_URL = ""
+
 
 def pytest_collection_modifyitems(config, items):
     """
