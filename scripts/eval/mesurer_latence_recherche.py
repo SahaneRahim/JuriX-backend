@@ -6,7 +6,8 @@ seule et sous 4 ou 8 questions simultanees.
 
 Pourquoi. La recherche exacte compare la question a tous les articles : son
 cout croit avec la charge, et au-dela de SearchService.BUDGET_RECHERCHE_EXACTE_MS
-le chat repasse par l'index (repli). Revue du 29/10/2026 : « 111 ms seule,
+(BUDGET_RECHERCHE_EXACTE_A_FROID_MS pour la premiere recherche d'une base presumee
+froide) le chat repasse par l'index (repli). Revue du 29/10/2026 : « 111 ms seule,
 259 ms de mediane a 4 questions simultanees, 428 ms a 8 ». Ce script le
 remesure sur la base de .env, sans appel au fournisseur pour une question
 deja vectorisee (--vecteurs, le fichier de evaluer_contexte_chat.py).

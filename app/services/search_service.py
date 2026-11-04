@@ -377,6 +377,24 @@ _REGLAGES_EXACTS_SQL = (
 )
 
 
+# Derniere recherche exacte REUSSIE dans ce processus, toutes requetes
+# confondues (horloge monotone) ; None avant la premiere. Elle dit si la base
+# est presumee CHAUDE : voir SearchService._budget_de_la_recherche_exacte_ms.
+_derniere_recherche_exacte_reussie: Optional[float] = None
+
+
+def noter_une_recherche_exacte_reussie(instant: Optional[float] = None) -> None:
+    """La base vient de servir une recherche exacte : elle est chaude."""
+    global _derniere_recherche_exacte_reussie
+    _derniere_recherche_exacte_reussie = time.monotonic() if instant is None else instant
+
+
+def oublier_les_recherches_exactes() -> None:
+    """Plus aucune recherche exacte connue : la suivante est jugee a froid."""
+    global _derniere_recherche_exacte_reussie
+    _derniere_recherche_exacte_reussie = None
+
+
 def _delai_depasse(erreur: BaseException) -> bool:
     """
     Vrai pour une requete annulee par statement_timeout (SQLSTATE 57014,
@@ -622,10 +640,47 @@ class SearchService:
     # (scripts/eval/mesurer_latence_recherche.py, jurix_dev, deux suites de
     # tests d'autres agents a cote) : requete exacte seule 161 ms de mediane
     # (287 au pire) ; sous 8 questions simultanees, 359 ms de mediane, 1 607 ms
-    # au pire, soit 1 repli sur 40 a 1,5 s. Sur Neon (~250 ms a chaud, ~700 ms
-    # a froid selon le tour 2), 3 s laissent environ le double du pire mesure
-    # a 8 questions simultanees.
+    # au pire, soit 1 repli sur 40 a 1,5 s. Sur Neon A CHAUD (~250 ms), 3 s
+    # laissent environ le double du pire mesure a 8 questions simultanees. Les
+    # « ~700 ms a froid » du tour 2 n'etaient pas un vrai reveil : voir le
+    # budget a froid, juste en dessous.
     BUDGET_RECHERCHE_EXACTE_MS = 3000
+    # SAUF A FROID : toute recherche exacte lancee avant une reussite, quand
+    # aucune n'a reussi depuis BASE_FROIDE_APRES_S (ou depuis le demarrage du
+    # processus), a BUDGET_RECHERCHE_EXACTE_A_FROID_MS. Mesure de production du
+    # 04/11/2026, premier controle apres le deploiement de la recherche exacte
+    # (GET /api/v1/controle/chat) : les deux premieres questions ont depasse
+    # 3 s, sont passees par l'index, et la barriere, qui ne croit pas l'index
+    # seul, a ecarte tout le contexte de « Que risque l'auteur d'une escroquerie
+    # sur internet ? », question suggeree : le chat aurait repondu qu'il ne
+    # trouvait rien. Chacune a pris 14 s EN TOUT, mesure du rappel du controle
+    # comprise, qui est une recherche exacte sans delai : le balayage a froid de
+    # ce jour a donc abouti en moins de ~13 s. Les 49 questions suivantes sont
+    # passees par le chemin exact, en 0,6 a 3,4 s chacune, contexte compris.
+    # POURQUOI A FROID : les vecteurs sont ranges hors ligne (stockage
+    # EXTERNAL du halfvec, 2 052 octets, dans la table TOAST). Une recherche
+    # exacte en lit chacun par l'index TOAST, au hasard : sur jurix_dev,
+    # EXPLAIN (ANALYZE, BUFFERS) compte 214 786 acces de pages, dont 27 188
+    # hors du cache. Neon va chercher chaque page absente de son cache local
+    # sur son stockage ; or ce cache est vide a chaque reveil (veille apres
+    # 5 min sans requete, chaque nuit sans la sonde de cron-job.org). A chaud,
+    # la meme requete reste sous la seconde. Le repli, lui, ne doit servir
+    # qu'en SURCHARGE : sous charge, les recherches se suivent, la base est
+    # chaude, et 3 s rendent vite leurs connexions au pool (5 + 5, partage
+    # avec toute l'API) au lieu de le vider en 30 s.
+    # LA LIMITE (revue du 04/11/2026, data/fiabilite/froid/rafale_pool.json) :
+    # chaque question tient 2 connexions pendant son balayage ; cinq premieres
+    # questions dans les ~10 s d'un reveil rempliraient le pool, et les autres
+    # routes attendraient la fin des balayages. Rare a ce trafic. Si le journal
+    # (« 🧊 ... base presumee froide ») montre un jour des balayages au-dela de
+    # ~20 s : une seule recherche a froid a la fois, ou un pool_timeout
+    # superieur au budget plus le repli. Le remede de fond est une table
+    # etroite des vecteurs, sans TOAST (etude : data/fiabilite/froid/etude/).
+    BUDGET_RECHERCHE_EXACTE_A_FROID_MS = 30000
+    # Sous la veille de Neon (5 min) : apres 4 min sans recherche exacte, la
+    # base PEUT s'etre endormie. Un budget long sur une base restee chaude ne
+    # coute rien : c'est un plafond, la requete rend en moins d'une seconde.
+    BASE_FROIDE_APRES_S = 240.0
     EF_SEARCH_DU_REPLI = EF_SEARCH_MAX
     # Articles du plein texte gardes dans VoletsDeLaRecherche, donc dans le
     # cache : de quoi remplir les places du chat (RAGService.PLACES_PLEIN_TEXTE).
@@ -660,6 +715,8 @@ class SearchService:
         # et la duree de ses requetes SQL seules.
         self.chemin_semantique: Optional[str] = None
         self.duree_sql_semantique_ms: Optional[int] = None
+        # Le budget de la DERNIERE recherche exacte, en ms (a froid ou a chaud).
+        self.budget_exact_ms: int = int(self.BUDGET_RECHERCHE_EXACTE_MS)
         # Les deux volets de la DERNIERE recherche hybride, tels que le chat
         # les relit (VoletsDeLaRecherche). Repris du cache avec la reponse
         # pour une recherche exacte ; None sinon sur une reponse du cache.
@@ -1640,6 +1697,25 @@ class SearchService:
         finally:
             self.duree_sql_semantique_ms = int((time.time() - debut) * 1000)
 
+    def _budget_de_la_recherche_exacte_ms(self) -> int:
+        """
+        Le budget de la prochaine recherche exacte : BUDGET_RECHERCHE_EXACTE_A_
+        FROID_MS si aucune n'a reussi depuis BASE_FROIDE_APRES_S (ou jamais dans
+        ce processus), BUDGET_RECHERCHE_EXACTE_MS sinon. Jamais moins que le
+        budget a chaud : un budget a froid regle plus bas ne raccourcit rien.
+
+        Un echec ne change rien : seule une reussite dit la base chaude. Sous
+        une surcharge, les recherches se suivent : tant que l'une d'elles
+        reussit toutes les 4 min, le budget reste court et le repli joue son
+        role. Une surcharge qui ferait tout echouer plus de 4 min redonnerait
+        le budget long a toutes les recherches lancees avant le succes suivant.
+        """
+        a_chaud = int(self.BUDGET_RECHERCHE_EXACTE_MS)
+        derniere = _derniere_recherche_exacte_reussie
+        if derniere is not None and time.monotonic() - derniere <= self.BASE_FROIDE_APRES_S:
+            return a_chaud
+        return max(a_chaud, int(self.BUDGET_RECHERCHE_EXACTE_A_FROID_MS))
+
     async def _vecteurs_par_le_bon_chemin(
         self,
         session: AsyncSession,
@@ -1663,7 +1739,7 @@ class SearchService:
                 # APPROCHES, ceux qui ont produit l'incident du 29/10/2026.
                 logger.warning(
                     f"⏱️ Recherche semantique exacte au-dela de "
-                    f"{self.BUDGET_RECHERCHE_EXACTE_MS} ms, annulee : repli sur l'index "
+                    f"{self.budget_exact_ms} ms, annulee : repli sur l'index "
                     f"HNSW (ef_search {self.EF_SEARCH_DU_REPLI})"
                 )
             self.chemin_semantique = CHEMIN_REPLI_HNSW
@@ -1721,13 +1797,15 @@ class SearchService:
         finances (0 des 10 vrais voisins a ef_search 160), et le chat a
         repondu dessus. Un index approche peut perdre son rappel sans rien
         signaler ; le chat, qui fait rediger une reponse juridique, ne doit
-        plus en dependre. Cout mesure sur Neon : ~250 ms a chaud, ~700 ms a
-        froid, contre 3 a 13 ms par l'index. /search garde l'index.
+        plus en dependre. Cout mesure sur Neon : ~250 ms a chaud, contre 3 a
+        13 ms par l'index ; a un vrai reveil, plusieurs secondes (moins de ~13 s
+        le 04/11/2026), d'ou le budget a froid. /search garde l'index.
 
         Deux protections, dans SA transaction (ou son SAVEPOINT) : l'enonce
         trie sur une expression que l'index ne sait pas servir
         (_build_semantic_statement, `exacte`), et enable_indexscan = off.
-        statement_timeout borne la requete a BUDGET_RECHERCHE_EXACTE_MS : le
+        statement_timeout borne la requete au budget du moment
+        (_budget_de_la_recherche_exacte_ms : long a froid, court a chaud) : le
         serveur l'annule (SQLSTATE 57014), et _vecteurs_du_volet passe par
         l'index. La transaction, ou le SAVEPOINT, est ANNULEE ensuite, meme
         apres un succes : c'est ce qui retire ces reglages, qui couperaient
@@ -1737,13 +1815,29 @@ class SearchService:
         stmt = self._build_semantic_statement(
             query_embedding.tolist(), filters, limit, offset, exacte=True
         )
+        self.budget_exact_ms = self._budget_de_la_recherche_exacte_ms()
+        a_froid = self.budget_exact_ms != int(self.BUDGET_RECHERCHE_EXACTE_MS)
+        debut = time.monotonic()
         point = await session.begin_nested() if sous_point else None
         try:
             await session.execute(
                 text(_REGLAGES_EXACTS_SQL),
-                {"budget_ms": str(int(self.BUDGET_RECHERCHE_EXACTE_MS))},
+                {"budget_ms": str(self.budget_exact_ms)},
             )
-            return (await session.execute(stmt)).all()
+            rows = (await session.execute(stmt)).all()
+            noter_une_recherche_exacte_reussie()
+            if a_froid:
+                # La duree d'une recherche a froid, dans le journal : c'est la
+                # seule mesure de production du budget a froid. « Presumee » :
+                # une base restee eveillee (sondes du jour) passe aussi par la
+                # apres 4 min sans recherche. Pour regler le budget, lire le
+                # maximum et les lignes de nuit, pas la mediane.
+                logger.info(
+                    f"🧊 Recherche semantique exacte, base presumee froide : "
+                    f"{int((time.monotonic() - debut) * 1000)} ms "
+                    f"(budget {self.budget_exact_ms} ms)"
+                )
+            return rows
         finally:
             if point is not None:
                 await point.rollback()

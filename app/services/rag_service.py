@@ -2779,7 +2779,8 @@ class RAGService:
         0,398). Le plein texte, lui, ne depend pas de l'index : sur le repli,
         seuls les textes qu'il confirme sont lus, ou rien, avec le message
         « réessayez » (la recherche par le sens n'a pas pu etre verifiee). Le
-        repli ne sert qu'en surcharge (BUDGET_RECHERCHE_EXACTE_MS) ; ce qu'il
+        repli ne sert qu'en surcharge (BUDGET_RECHERCHE_EXACTE_MS), ou sur une
+        base froide au-dela de BUDGET_RECHERCHE_EXACTE_A_FROID_MS ; ce qu'il
         coute alors est mesure (scripts/eval/evaluer_contexte_chat.py, etat
         « repli »).
 

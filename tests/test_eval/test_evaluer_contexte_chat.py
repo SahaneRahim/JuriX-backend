@@ -253,6 +253,7 @@ def test_l_etat_repli_force_le_repli_sur_l_index():
     rag = module._rag(object(), "repli")
 
     assert rag.search_service.BUDGET_RECHERCHE_EXACTE_MS == 1
+    assert rag.search_service.BUDGET_RECHERCHE_EXACTE_A_FROID_MS == 1
     assert rag.search_service.semantique_exacte is True and rag.llm is None
 
 

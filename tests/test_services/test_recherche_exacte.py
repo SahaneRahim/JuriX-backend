@@ -17,6 +17,9 @@ relit (VoletsDeLaRecherche).
 
 import asyncio
 import logging
+import subprocess
+import sys
+import time
 
 import numpy as np
 import pytest
@@ -328,6 +331,122 @@ class TestRepliSurLIndex:
 
         with pytest.raises(module.VectorSearchError):
             await _volet(_service(db_session))
+
+
+class TestBudgetAFroid:
+    """
+    Production, 04/11/2026, premier controle apres le deploiement de la
+    recherche exacte : a froid, les deux premieres recherches exactes ont
+    depasse 3 s, le repli sur l'index a suivi, et la barriere a ecarte tout le
+    contexte d'une question suggeree. Toute recherche exacte lancee avant une
+    reussite, apres BASE_FROIDE_APRES_S sans aucune (ou depuis le demarrage du
+    processus), a donc le budget long ; une reussite rend la base chaude, et le
+    budget court revient, celui du repli en surcharge.
+    """
+
+    def test_sans_recherche_reussie_le_budget_est_celui_du_froid(self):
+        module.oublier_les_recherches_exactes()
+
+        assert _service(object())._budget_de_la_recherche_exacte_ms() == 30000
+
+    def test_apres_une_reussite_recente_le_budget_est_court(self):
+        module.noter_une_recherche_exacte_reussie()
+
+        assert _service(object())._budget_de_la_recherche_exacte_ms() == 3000
+
+    def test_au_dela_de_quatre_minutes_sans_recherche_la_base_est_presumee_froide(self):
+        service = _service(object())
+        module.noter_une_recherche_exacte_reussie(time.monotonic() - 239)
+        assert service._budget_de_la_recherche_exacte_ms() == 3000
+
+        module.noter_une_recherche_exacte_reussie(time.monotonic() - 241)
+        assert service._budget_de_la_recherche_exacte_ms() == 30000
+
+    def test_un_budget_a_froid_plus_court_ne_raccourcit_rien(self, monkeypatch):
+        monkeypatch.setattr(SearchService, "BUDGET_RECHERCHE_EXACTE_A_FROID_MS", 10)
+        module.oublier_les_recherches_exactes()
+
+        assert _service(object())._budget_de_la_recherche_exacte_ms() == 3000
+
+    def test_un_processus_qui_demarre_presume_la_base_froide(self):
+        """
+        Le cas du 04/11 : la premiere recherche apres un deploiement. Un
+        interpreteur neuf, sans la fixture qui marque la base chaude.
+        """
+        sortie = subprocess.run(
+            [sys.executable, "-c",
+             "from app.services import search_service as m; "
+             "print(m._derniere_recherche_exacte_reussie)"],
+            capture_output=True, text=True, timeout=120, check=True,
+        )
+
+        assert sortie.stdout.strip().splitlines()[-1] == "None"
+
+    @pytest.mark.asyncio
+    async def test_a_froid_la_requete_lente_aboutit_puis_la_base_est_chaude(
+        self, db_session, deux_cents_articles, monkeypatch, caplog
+    ):
+        """
+        Le meme enonce lent (une seconde) : a froid, il aboutit par le chemin
+        exact, et le journal donne sa duree ; la base est alors chaude, et la
+        recherche suivante a le budget court, donc le repli.
+        """
+        monkeypatch.setattr(SearchService, "_enonce_exact", _enonce_lent)
+        monkeypatch.setattr(SearchService, "BUDGET_RECHERCHE_EXACTE_MS", 100)
+        monkeypatch.setattr(SearchService, "BUDGET_RECHERCHE_EXACTE_A_FROID_MS", 10000)
+        module.oublier_les_recherches_exactes()
+        service = _service(db_session)
+
+        with caplog.at_level(logging.INFO, logger=module.logger.name):
+            await _volet(service)
+        assert (service.chemin_semantique, service.budget_exact_ms) == (CHEMIN_EXACT, 10000)
+        assert any(r.getMessage().startswith("🧊 Recherche semantique exacte, base presumee froide : ")
+                   and r.getMessage().endswith(" ms (budget 10000 ms)") for r in caplog.records)
+
+        await _volet(service)
+        assert (service.chemin_semantique, service.budget_exact_ms) == (CHEMIN_REPLI_HNSW, 100)
+
+    @pytest.mark.asyncio
+    async def test_un_repli_ne_rend_pas_la_base_chaude_et_l_alerte_dit_le_budget_a_froid(
+        self, db_session, deux_cents_articles, monkeypatch, caplog
+    ):
+        """
+        Seule une reussite dit la base chaude : apres un echec a froid, la
+        suivante a encore le budget long. L'alerte du repli, seule trace en
+        production, dit le budget de la tentative annulee, ici celui du froid.
+        """
+        monkeypatch.setattr(SearchService, "_enonce_exact", _enonce_lent)
+        monkeypatch.setattr(SearchService, "BUDGET_RECHERCHE_EXACTE_MS", 100)
+        monkeypatch.setattr(SearchService, "BUDGET_RECHERCHE_EXACTE_A_FROID_MS", 200)
+        module.oublier_les_recherches_exactes()
+        service = _service(db_session)
+
+        with caplog.at_level(logging.INFO, logger=module.logger.name):
+            await _volet(service)
+
+        assert (service.chemin_semantique, service.budget_exact_ms) == (CHEMIN_REPLI_HNSW, 200)
+        assert module._derniere_recherche_exacte_reussie is None
+        assert service._budget_de_la_recherche_exacte_ms() == 200
+        alertes = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert alertes == [
+            "⏱️ Recherche semantique exacte au-dela de 200 ms, annulee : repli sur "
+            "l'index HNSW (ef_search 1000)"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_deux_recherches_simultanees_a_froid_ont_toutes_deux_le_budget_long(
+        self, db_session, deux_cents_articles, monkeypatch
+    ):
+        """Une rafale a froid : chaque recherche lancee avant la premiere reussite a le budget long."""
+        monkeypatch.setattr(SearchService, "_enonce_exact", _enonce_lent)
+        monkeypatch.setattr(SearchService, "BUDGET_RECHERCHE_EXACTE_MS", 100)
+        monkeypatch.setattr(SearchService, "BUDGET_RECHERCHE_EXACTE_A_FROID_MS", 10000)
+        module.oublier_les_recherches_exactes()
+        services = [_service(db_session), _service(db_session)]
+
+        await asyncio.gather(*(_volet(s) for s in services))
+
+        assert [(s.chemin_semantique, s.budget_exact_ms) for s in services] == [(CHEMIN_EXACT, 10000)] * 2
 
 
 # ==================== CE QUE LE CHAT RELIT ====================

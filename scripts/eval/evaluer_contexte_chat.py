@@ -984,8 +984,11 @@ def _rag(db: Any, etat: str) -> RAGService:
         rag.search_service.semantique_exacte = False
     if etat == "repli":
         # Toute recherche exacte depasse son budget : le volet passe par
-        # l'index (ef_search 1000), comme sous une surcharge.
+        # l'index (ef_search 1000), comme sous une surcharge. Le budget a
+        # froid aussi : sinon la premiere recherche, ou toute recherche apres
+        # 4 min sans succes, aboutirait par le chemin exact.
         rag.search_service.BUDGET_RECHERCHE_EXACTE_MS = 1
+        rag.search_service.BUDGET_RECHERCHE_EXACTE_A_FROID_MS = 1
     return rag
 
 

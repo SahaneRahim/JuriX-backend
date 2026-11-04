@@ -377,6 +377,24 @@ def _epingler_le_fournisseur_d_embeddings(request):
 
 
 @pytest.fixture(autouse=True)
+def _base_presumee_chaude():
+    """
+    Chaque test part d'une base CHAUDE : la recherche exacte du chat y a son
+    budget court (SearchService.BUDGET_RECHERCHE_EXACTE_MS), celui que les
+    tests du repli abaissent pour le forcer. Le budget a froid a ses propres
+    tests (test_recherche_exacte.py, TestBudgetAFroid), qui oublient cet etat.
+    Apres le test, plus aucune recherche connue : rien ne fuit vers le suivant.
+    """
+    from app.services import search_service
+
+    search_service.noter_une_recherche_exacte_reussie()
+    try:
+        yield
+    finally:
+        search_service.oublier_les_recherches_exactes()
+
+
+@pytest.fixture(autouse=True)
 def _doubler_le_service_d_embeddings(request):
     """Installe la doublure avant chaque test, et restaure l'etat ensuite."""
     from app.services import search_service

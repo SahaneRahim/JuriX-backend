@@ -546,7 +546,8 @@ async def voisins_exacts(db: AsyncSession, vecteur: List[float], k: int = K_RAPP
     """
     Les `k` vrais plus proches voisins : l'index ecarte pour la transaction,
     PostgreSQL compare chaque article a la question et trie. Environ 250 ms
-    sur la base de production (700 ms a froid), 190 a 300 ms en local.
+    sur la base de production a chaud, plusieurs secondes a un vrai reveil
+    (SearchService.BUDGET_RECHERCHE_EXACTE_A_FROID_MS), 190 a 300 ms en local.
     """
     await db.execute(text("SELECT set_config('enable_indexscan', 'off', true)"))
     lignes = (await db.execute(_enonce_des_voisins(vecteur, k, k))).all()
