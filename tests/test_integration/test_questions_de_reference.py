@@ -63,9 +63,10 @@ LA BASE : JURIX_CORPUS_DATABASE_URL, par defaut jurix_dev du conteneur
 jurix-pg (memes articles et memes vecteurs que la production), et non la base
 de test, vide. En LECTURE SEULE : chaque transaction l'est
 (default_transaction_read_only), une ecriture y echouerait. Base injoignable,
-ou sans le corpus vectorise par voyage-4-large : tests ignores, avec la
-raison ; ou EN ECHEC avec JURIX_EXIGER_CORPUS=1, pour qu'un filet absent ne
-passe pas pour un filet vert.
+sans le corpus vectorise par voyage-4-large, ou sans la table que lit la
+recherche exacte (une base d'avant la migration 018_articles_vecteurs) : tests
+ignores, avec la raison ; ou EN ECHEC avec JURIX_EXIGER_CORPUS=1, pour qu'un
+filet absent ne passe pas pour un filet vert.
 """
 
 import dataclasses
@@ -99,6 +100,8 @@ from app.services.controle_du_chat import (
     SEUIL_RAPPEL,
     ControleEnCache,
     _enonce_des_voisins,
+    _enonce_des_vrais_voisins,
+    compter_les_vecteurs,
     controler_le_chat,
     porte_l_article,
     porte_la_regle,
@@ -176,6 +179,14 @@ async def _sonder(moteur) -> str:
         return f"base du corpus injoignable ({type(erreur).__name__}) : {BASE_DU_CORPUS}"
     if not vectorises:
         return f"aucun article vectorise par {EMPREINTE} dans {BASE_DU_CORPUS}"
+    try:
+        async with moteur.connect() as connexion:
+            await connexion.execute(text("SELECT 1 FROM articles_vecteurs LIMIT 1"))
+    except Exception as erreur:
+        return (
+            f"pas de table articles_vecteurs dans {BASE_DU_CORPUS} ({type(erreur).__name__}) : "
+            "appliquer la migration 018_articles_vecteurs"
+        )
     return ""
 
 
@@ -377,7 +388,10 @@ async def _la_route(corpus, questions=QUESTIONS_DE_REFERENCE, sonde=None):
         return None
 
     controle = ControleEnCache(
-        partial(controler_le_chat, corpus, questions, sonde=sonde or sonde_ok),
+        partial(
+            controler_le_chat, corpus, questions, sonde=sonde or sonde_ok,
+            comptes=compter_les_vecteurs,
+        ),
         attente_max_s=DELAI_DU_CALCUL_S + 60,
     )
     return await controle.lire()
@@ -407,6 +421,8 @@ async def test_aujourd_hui_la_route_rend_200_et_rapporte_les_faiblesses(corpus, 
     assert not pannes, (pannes, f"{rapport['duree_ms']} ms, borne {DELAI_DU_CALCUL_S} s")
     assert (code, rapport["statut"], rapport["raisons"]) == (CODE_OK, "ok", []), (
         rapport["raisons"], [e["question"] for e in rapport["echecs"]])
+    table = rapport["table_des_vecteurs"]
+    assert table["articles_vectorises"] == table["lignes"] > 0, table
     garanties = [q for q in QUESTIONS_DE_REFERENCE if q.garantie]
     assert (rapport["garanties"], rapport["en_echec"]) == (len(garanties), 0)
     rappels = [r["rappel_a_10"] for r in rapport["rappel_hnsw"]]
@@ -433,24 +449,24 @@ async def test_aujourd_hui_la_route_rend_200_et_rapporte_les_faiblesses(corpus, 
 
 async def test_la_recherche_exacte_n_emprunte_pas_l_index(corpus):
     """
-    Le rappel ne vaut que si l'une des deux listes est EXACTE : sous
-    enable_indexscan off, le plan ne doit pas toucher l'index HNSW, et sans
-    ce reglage il doit l'emprunter (sinon on comparerait deux recherches
-    exactes).
+    Le rappel ne vaut que si l'une des deux listes est EXACTE : la verite ne
+    doit pas toucher l'index HNSW, et la liste de l'index doit l'emprunter
+    (sinon on comparerait deux recherches exactes).
     """
     vecteur = [1.0] + [0.0] * (EmbeddingService.EMBEDDING_DIM - 1)
 
-    async def plan(reglage: str) -> str:
+    async def plan(enonce, reglage: str = "SELECT 1") -> str:
         async with corpus() as db:
             await db.execute(text(reglage))
-            lignes = (await db.execute(
-                _Expliquer(_enonce_des_voisins(vecteur, 160, 10))
-            )).scalars().all()
+            lignes = (await db.execute(_Expliquer(enonce))).scalars().all()
             await db.rollback()
         return "\n".join(lignes)
 
-    assert "hnsw" not in (await plan("SELECT set_config('enable_indexscan', 'off', true)"))
-    assert "hnsw" in (await plan("SELECT set_config('hnsw.ef_search', '160', true)"))
+    verite = await plan(_enonce_des_vrais_voisins(vecteur, 10))
+    assert "hnsw" not in verite and "articles_vecteurs" in verite, verite
+    assert "hnsw" in (await plan(
+        _enonce_des_voisins(vecteur, 160, 10), "SELECT set_config('hnsw.ef_search', '160', true)"
+    ))
 
 
 async def _tableaux_les_plus_proches(corpus, vecteur, n: int):

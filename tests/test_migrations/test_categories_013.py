@@ -215,6 +215,10 @@ class TestMontee:
         premiere = (_ids(session), _lire(session, loi))
 
         # `stamp` recule la version sans rien executer : 013 repasse en entier.
+        # POURQUOI redescendre sous 018 d'abord : le rejeu repasse par 016, qui
+        # change le type d'articles.embedding, et PostgreSQL le refuse tant que
+        # le declencheur de 018 nomme cette colonne.
+        _alembic("downgrade", "017_blog_posts_table")
         _alembic("stamp", AVANT_013)
         _alembic("upgrade", "head")
         session.expire_all()

@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.core import mesure_sql
 from app.core.config import settings
-from app.models.law import Article, Category, Law
+from app.models.law import Article, ArticleVecteur, Category, Law
 from app.schemas.search import (
     APERCU_CONTENU_CARACTERES,
     ArticleMatch,
@@ -657,25 +657,27 @@ class SearchService:
     # comprise, qui est une recherche exacte sans delai : le balayage a froid de
     # ce jour a donc abouti en moins de ~13 s. Les 49 questions suivantes sont
     # passees par le chemin exact, en 0,6 a 3,4 s chacune, contexte compris.
-    # POURQUOI A FROID : les vecteurs sont ranges hors ligne (stockage
-    # EXTERNAL du halfvec, 2 052 octets, dans la table TOAST). Une recherche
-    # exacte en lit chacun par l'index TOAST, au hasard : sur jurix_dev,
-    # EXPLAIN (ANALYZE, BUFFERS) compte 214 786 acces de pages, dont 27 188
-    # hors du cache. Neon va chercher chaque page absente de son cache local
-    # sur son stockage ; or ce cache est vide a chaque reveil (veille apres
-    # 5 min sans requete, chaque nuit sans la sonde de cron-job.org). A chaud,
-    # la meme requete reste sous la seconde. Le repli, lui, ne doit servir
-    # qu'en SURCHARGE : sous charge, les recherches se suivent, la base est
-    # chaude, et 3 s rendent vite leurs connexions au pool (5 + 5, partage
-    # avec toute l'API) au lieu de le vider en 30 s.
+    # POURQUOI A FROID : ces mesures sont celles d'articles.embedding, dont les
+    # vecteurs sont ranges hors ligne (stockage EXTERNAL du halfvec, 2 052
+    # octets, dans la table TOAST). Une recherche exacte en lisait chacun par
+    # l'index TOAST, au hasard : sur jurix_dev, EXPLAIN (ANALYZE, BUFFERS)
+    # comptait 214 786 acces de pages, dont 27 188 hors du cache. Neon va
+    # chercher chaque page absente de son cache local sur son stockage ; or ce
+    # cache est vide a chaque reveil (veille apres 5 min sans requete, chaque
+    # nuit sans la sonde de cron-job.org). Depuis la migration
+    # 018_articles_vecteurs, la recherche exacte lit une table etroite, sans
+    # TOAST, et le budget a froid n'est plus qu'un filet : le reveil reste une
+    # lecture de toute cette table, et il n'a pas ete mesure sur Neon. Le
+    # repli, lui, ne doit servir qu'en SURCHARGE : sous charge, les recherches
+    # se suivent, la base est chaude, et 3 s rendent vite leurs connexions au
+    # pool (5 + 5, partage avec toute l'API) au lieu de le vider en 30 s.
     # LA LIMITE (revue du 04/11/2026, data/fiabilite/froid/rafale_pool.json) :
     # chaque question tient 2 connexions pendant son balayage ; cinq premieres
     # questions dans les ~10 s d'un reveil rempliraient le pool, et les autres
     # routes attendraient la fin des balayages. Rare a ce trafic. Si le journal
     # (« 🧊 ... base presumee froide ») montre un jour des balayages au-dela de
     # ~20 s : une seule recherche a froid a la fois, ou un pool_timeout
-    # superieur au budget plus le repli. Le remede de fond est une table
-    # etroite des vecteurs, sans TOAST (etude : data/fiabilite/froid/etude/).
+    # superieur au budget plus le repli.
     BUDGET_RECHERCHE_EXACTE_A_FROID_MS = 30000
     # Sous la veille de Neon (5 min) : apres 4 min sans recherche exacte, la
     # base PEUT s'etre endormie. Un budget long sur une base restee chaude ne
@@ -1325,9 +1327,12 @@ class SearchService:
         dim = EmbeddingService.EMBEDDING_DIM
         candidates = self._ann_candidates(limit)
 
-        distance = Article.embedding.cosine_distance(literal(query_vector, HALFVEC(dim)))
+        question = literal(query_vector, HALFVEC(dim))
         if exacte:
-            return self._enonce_exact(distance, filters, limit, offset)
+            return self._enonce_exact(
+                ArticleVecteur.embedding.cosine_distance(question), filters, limit, offset
+            )
+        distance = Article.embedding.cosine_distance(question)
 
         inner = (
             select(
@@ -1375,11 +1380,17 @@ class SearchService:
 
         Etage 1, la sous-requete `proches` : la distance de CHAQUE article
         vectorise a la question, sur des lignes etroites (identifiant et
-        distance), et les `limit + offset` plus proches. Le tri porte sur
-        `distance + 0` : l'index HNSW ne sert que `colonne <=> constante` nue,
-        le planificateur ne peut donc pas en refaire un parcours de l'index,
-        quel que soit son cout. L'identifiant departage deux articles a
-        distance egale (textes en double), d'un appel a l'autre.
+        distance), et les `limit + offset` plus proches. Elle lit
+        articles_vecteurs, et non articles.embedding : les memes octets, dans
+        la ligne et non dans la TOAST, donc un balayage sequentiel au lieu de
+        ~32 000 lectures une par une, qui coutaient plusieurs secondes a chaque
+        reveil de Neon (migration 018_articles_vecteurs ; `distance` vient de
+        _build_semantic_statement). Le tri porte sur `distance + 0` : l'index
+        HNSW ne sert que `colonne <=> constante` nue, et cette table n'en a
+        aucun ; si elle en recevait un, le planificateur ne pourrait toujours
+        pas en faire un parcours de l'index, quel que soit son cout.
+        L'identifiant departage deux articles a distance egale (textes en
+        double), d'un appel a l'autre.
 
         Etage 2 : le texte et la loi de ces seuls articles. Mesure sur
         jurix_dev (29/10/2026, 32 303 articles vectorises, 12 questions
@@ -1391,14 +1402,13 @@ class SearchService:
         from sqlalchemy import literal_column
 
         proches = (
-            select(Article.id.label("article_id"), distance.label("distance"))
-            .select_from(Article)
-            .join(Law, Law.id == Article.law_id)
-            .where(Article.embedding.isnot(None))
+            select(ArticleVecteur.article_id.label("article_id"), distance.label("distance"))
+            .select_from(ArticleVecteur)
+            .join(Law, Law.id == ArticleVecteur.law_id)
         )
         proches = self._apply_filters_pgvector(proches, filters)
         proches = (
-            proches.order_by(distance + literal_column("0"), Article.id)
+            proches.order_by(distance + literal_column("0"), ArticleVecteur.article_id)
             .limit(limit + offset)
             .subquery("proches")
         )
@@ -1797,9 +1807,10 @@ class SearchService:
         finances (0 des 10 vrais voisins a ef_search 160), et le chat a
         repondu dessus. Un index approche peut perdre son rappel sans rien
         signaler ; le chat, qui fait rediger une reponse juridique, ne doit
-        plus en dependre. Cout mesure sur Neon : ~250 ms a chaud, contre 3 a
-        13 ms par l'index ; a un vrai reveil, plusieurs secondes (moins de ~13 s
-        le 04/11/2026), d'ou le budget a froid. /search garde l'index.
+        plus en dependre. Cout mesure sur Neon, avant la table
+        articles_vecteurs : ~250 ms a chaud, contre 3 a 13 ms par l'index ; a
+        un vrai reveil, plusieurs secondes (moins de ~13 s le 04/11/2026), d'ou
+        le budget a froid, qui reste comme filet. /search garde l'index.
 
         Deux protections, dans SA transaction (ou son SAVEPOINT) : l'enonce
         trie sur une expression que l'index ne sait pas servir

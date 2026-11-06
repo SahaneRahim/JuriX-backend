@@ -4,6 +4,7 @@ Modèles SQLAlchemy pour les lois, articles et catégories.
 Ce module définit les modèles de base de données pour le système JuriX:
 - Law: Documents juridiques (lois, décrets, ordonnances)
 - Article: Articles individuels d'une loi
+- ArticleVecteur: Copie etroite des vecteurs, lue par la recherche exacte du chat
 - Category: Catégories juridiques (les 14 domaines canoniques, migration 013)
 
 Features v2.1:
@@ -284,6 +285,10 @@ class Article(Base):
     # colonne reste differee pour les chemins qui chargent les articles. La
     # recherche les lit en SQL, sans passer par l'objet. En contexte
     # asynchrone, lire l'attribut exige undefer(Article.embedding).
+    #
+    # La recherche exacte du chat lit sa copie, ArticleVecteur : un declencheur
+    # suit cette colonne, et changer son type exige de le retirer d'abord
+    # (migration 018_articles_vecteurs).
     embedding = deferred(Column(HALFVEC(1024), nullable=True))
     # Empreinte du fournisseur qui a produit `embedding` : modele, revision,
     # gabarits. Deux modeles produisent des espaces sans rapport, et un cosinus
@@ -316,6 +321,47 @@ class Article(Base):
 
     def __repr__(self) -> str:
         return f"<Article(id={self.id}, number='{self.number}', law_id={self.law_id})>"
+
+
+class ArticleVecteur(Base):
+    """
+    Copie etroite des vecteurs, que seule la recherche EXACTE du chat lit
+    (SearchService._enonce_exact, et la verite du controle du chat).
+
+    POURQUOI UNE TABLE A PART. `articles.embedding` est range hors ligne
+    (stockage EXTERNAL du halfvec, dans la table TOAST) : une recherche exacte
+    y lit chaque vecteur un par un, ce qui coute plusieurs secondes sur un
+    calcul Neon qui se reveille. Ici, le vecteur est DANS la ligne (STORAGE
+    PLAIN) : un balayage sequentiel suffit. Memes octets, meme operateur, meme
+    tri : les resultats sont identiques (migration 018_articles_vecteurs, ou
+    sont les mesures). L'index HNSW et /search restent sur articles.embedding.
+
+    JAMAIS ECRITE PAR L'APPLICATION : un declencheur sur `articles` la tient a
+    jour (articles_vecteurs_suivre) ; le modele ne sert qu'a la lire. Elle
+    derive si des vecteurs sont ecrits declencheurs coupes : GET
+    /api/v1/controle/chat compare les comptes (compter_les_vecteurs).
+
+    Attributes:
+        article_id: L'article (cle primaire, supprimee avec lui)
+        law_id: Sa loi, pour filtrer sans lire `articles`
+        embedding: Le meme vecteur que articles.embedding, dans la ligne
+    """
+
+    __tablename__ = "articles_vecteurs"
+
+    article_id = Column(
+        Integer,
+        ForeignKey("articles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # POURQUOI sans cle etrangere : la loi d'un article est deja garantie par
+    # `articles.law_id`, et cette colonne n'en est que la copie. La suppression
+    # d'une loi arrive ici par `articles`, en cascade.
+    law_id = Column(Integer, nullable=False)
+    embedding = Column(HALFVEC(1024), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<ArticleVecteur(article_id={self.article_id}, law_id={self.law_id})>"
 
 
 # Indexes for performance

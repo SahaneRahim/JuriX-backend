@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import undefer
 
-from app.models.law import Article, Law
+from app.models.law import Article, ArticleVecteur, Law
 from app.services.embedding_service import EmbeddingService
 from app.services.legal_domain_classifier import (
     AFFAIRES,
@@ -317,6 +317,12 @@ class TestEmbeddingGeneration:
         assert all(a.embedding is not None for a in embeddable)
         assert all(a.embedding is None for a in skipped)
         assert len(embeddable[0].embedding) == EmbeddingService.EMBEDDING_DIM
+        # Et la recherche exacte du chat les voit : le declencheur de la
+        # migration 018 suit l'ecriture de l'ORM.
+        lus_par_le_chat = (await db_session.execute(
+            select(ArticleVecteur.article_id).where(ArticleVecteur.law_id == law_row.id)
+        )).scalars().all()
+        assert sorted(lus_par_le_chat) == sorted(a.id for a in embeddable)
 
     @pytest.mark.asyncio
     async def test_each_vector_carries_its_provenance(self, db_session, law_row):

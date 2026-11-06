@@ -57,6 +57,20 @@ def base(sync_db_session):
     return session
 
 
+def _la_table_du_chat_suit_les_articles(session) -> None:
+    """
+    La recherche exacte du chat lit articles_vecteurs : un vecteur ecrit doit y
+    arriver, par le declencheur de la migration 018, sur le chemin reel du
+    script.
+    """
+    ecarts = session.execute(text("""
+        SELECT count(*) FROM articles a
+        FULL JOIN articles_vecteurs v ON v.article_id = a.id
+        WHERE a.embedding IS DISTINCT FROM v.embedding
+    """)).scalar()
+    assert ecarts == 0
+
+
 def _ids(lot):
     return [r["id"] for r in lot]
 
@@ -104,6 +118,7 @@ class TestEcriture:
         assert np.allclose(relu, vecteurs[0], atol=1e-4)
         assert float(relu @ vecteurs[0]) > 0.9999
         assert regen._count_remaining(base, None, False, EMPREINTE) == 0
+        _la_table_du_chat_suit_les_articles(base)
 
     def test_un_vecteur_d_une_autre_dimension_est_refuse_par_la_colonne(self, base):
         """Le typmod de la colonne garde la dimension, au caractere pres."""
@@ -348,6 +363,7 @@ class TestChargementDesLots:
         assert etat == {1: EMPREINTE, 2: "gemini|ancien", 3: None, 4: EMPREINTE, 5: None}
         relu = np.array(base.get(Article, 1).embedding, dtype=np.float32)
         assert np.allclose(relu, vecteurs[1], atol=1e-4)
+        _la_table_du_chat_suit_les_articles(base)
 
     def test_le_compte_a_blanc_n_ecrit_rien(self, base, lots):
         dossier, instantane, _ = lots

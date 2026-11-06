@@ -19,6 +19,7 @@ import asyncio
 import os
 import re
 from datetime import date
+from functools import partial
 from pathlib import Path
 from typing import List, Optional, Set, Tuple, Union
 
@@ -34,6 +35,7 @@ from app.services.controle_du_chat import (
     ContexteDuChat,
     ControleEnCache,
     Verdict,
+    compter_les_vecteurs,
     contexte_du_chat,
     controler_le_chat,
     juger,
@@ -1336,6 +1338,112 @@ class TestLeRepliSurLIndex:
             )
 
 
+class TestLaTableDesVecteurs:
+    """
+    La recherche exacte du chat ne lit que articles_vecteurs : une ecriture
+    faite declencheurs coupes en ecarte un article sans la moindre erreur. Le
+    rapport compare les comptes.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _les_questions_tiennent(self, monkeypatch):
+        async def verifier(fabrique, item):
+            return Verdict(question=item, chemin="exact")
+
+        monkeypatch.setattr(controle, "verifier_une_question", verifier)
+
+    @staticmethod
+    def _comptes(vectorises, lignes):
+        async def comptes(fabrique):
+            return vectorises, lignes
+
+        return comptes
+
+    async def test_des_comptes_egaux_ne_font_rien_echouer_et_se_lisent_au_rapport(self):
+        rapport = await controler_le_chat(None, [_question()], comptes=self._comptes(7, 7))
+
+        assert rapport["statut"] == "ok" and rapport["raisons"] == []
+        assert rapport["table_des_vecteurs"] == {"articles_vectorises": 7, "lignes": 7}
+
+    @pytest.mark.parametrize("vectorises, lignes", [(7, 6), (7, 8), (7, 0)],
+                             ids=["manquante", "en-trop", "vide"])
+    async def test_une_difference_est_une_raison_du_controle_entier(self, vectorises, lignes):
+        rapport = await controler_le_chat(
+            None, [_question()], comptes=self._comptes(vectorises, lignes)
+        )
+
+        assert rapport["statut"] == "echec" and rapport["en_echec"] == 0
+        assert rapport["raisons"] == [
+            f"table des vecteurs du chat en derive : {lignes} lignes pour {vectorises} articles "
+            "vectorises, et la recherche exacte ne lit qu'elle (remede : migration "
+            "018_articles_vecteurs)"
+        ]
+        assert rapport["table_des_vecteurs"] == {
+            "articles_vectorises": vectorises, "lignes": lignes,
+        }
+
+    async def test_des_comptes_illisibles_ne_sont_pas_un_succes(self):
+        """Une erreur n'est nommee que par sa classe : le rapport est public."""
+        async def comptes(fabrique):
+            raise RuntimeError("connexion a hote-secret refusee")
+
+        rapport = await controler_le_chat(None, [_question()], comptes=comptes)
+
+        assert rapport["statut"] == "echec"
+        assert rapport["raisons"] == ["table des vecteurs du chat non comptee (RuntimeError)"]
+        assert rapport["table_des_vecteurs"] is None
+        assert "hote-secret" not in repr(rapport)
+
+    async def test_des_comptes_sans_fin_sont_bornes(self):
+        async def comptes(fabrique):
+            await asyncio.sleep(10)
+
+        rapport = await controler_le_chat(None, [_question()], delai_s=0.05, comptes=comptes)
+
+        assert rapport["statut"] == "echec"
+        assert rapport["raisons"] == ["table des vecteurs du chat non comptee en 0 s"]
+
+    def test_leur_borne_tient_dans_la_marge_du_rapport_garde(self):
+        """Au-dela, un calcul a son echeance serait perdu en entier pour eux."""
+        marge = ControleEnCache(lambda: None).delai_max_s - controle.DELAI_DU_CALCUL_S
+
+        assert controle.DELAI_DES_COMPTES_S < marge
+
+    async def test_une_panne_de_voyage_ne_cache_pas_une_derive(self):
+        async def sonde_en_panne():
+            return "fournisseur d'embeddings en echec, 2 essais (ConnectError)"
+
+        rapport = await controler_le_chat(
+            None, [_question()], sonde=sonde_en_panne, comptes=self._comptes(7, 6)
+        )
+
+        assert rapport["verifiees"] == 0
+        assert len(rapport["raisons"]) == 2
+        assert rapport["raisons"][1].startswith("table des vecteurs du chat en derive")
+
+    async def test_sans_comptes_le_rapport_le_dit(self):
+        rapport = await controler_le_chat(None, [_question()])
+
+        assert rapport["statut"] == "ok" and rapport["table_des_vecteurs"] is None
+
+    async def test_ils_passent_apres_les_questions(self, monkeypatch):
+        """La duree des questions reste celle de la recherche, comptes exclus."""
+        ordre: List[str] = []
+
+        async def verifier(fabrique, item):
+            ordre.append("question")
+            return Verdict(question=item, chemin="exact")
+
+        async def comptes(fabrique):
+            ordre.append("comptes")
+            return 7, 7
+
+        monkeypatch.setattr(controle, "verifier_une_question", verifier)
+        await controler_le_chat(None, [_question()], comptes=comptes)
+
+        assert ordre == ["question", "comptes"]
+
+
 class TestLesFaiblessesConnues:
     """
     Revue du tour 5 : comptees comme les autres, les faiblesses connues
@@ -1935,6 +2043,96 @@ class TestSurLaBase:
         assert rapport["statut"] == "ok" and rapport["raisons"] == []
         assert rapport["en_echec"] == 0 and rapport["verifiees"] == 1
         assert rapport["questions_verifiees"][0]["ok"] is True
+
+    async def test_un_corpus_revectorise_declencheurs_coupes_fait_tomber_le_rappel(
+        self, db_session, category_ids, fabrique, vecteur_de_la_question
+    ):
+        """
+        Ce que les comptes ne peuvent pas voir : autant de lignes, d'autres
+        vecteurs. La verite du rappel lit la table du chat et l'index lit
+        `articles` : ils ne s'accordent plus, et la mesure echoue.
+        """
+        await _corpus(db_session, category_ids, panne=False)
+        await db_session.execute(text("SET LOCAL session_replication_role = replica"))
+        for article_id, in (await db_session.execute(text("SELECT id FROM articles"))).all():
+            await db_session.execute(
+                text("UPDATE articles SET embedding = CAST(:v AS halfvec) WHERE id = :id"),
+                {"id": article_id, "v": str(_aleatoire(article_id).tolist())},
+            )
+        await db_session.commit()
+
+        verdict = await verifier_une_question(fabrique, _question(rappel=True))
+
+        assert await compter_les_vecteurs(fabrique) == (32, 32)
+        assert all(r < controle.SEUIL_RAPPEL for r in verdict.rappels.values()), verdict.rappels
+        assert not verdict.ok
+
+    async def test_une_base_saine_compte_autant_de_lignes_que_de_vecteurs(
+        self, db_session, category_ids, fabrique, vecteur_de_la_question
+    ):
+        """Un article sans vecteur n'est dans aucun des deux comptes."""
+        await _corpus(db_session, category_ids, panne=False)
+        await db_session.execute(text(
+            "INSERT INTO articles (id, law_id, number, content, \"order\") "
+            "SELECT 19920099, law_id, '99', 'Article sans vecteur.', 99 FROM articles "
+            "WHERE id = 19920037"
+        ))
+        await db_session.commit()
+
+        assert await compter_les_vecteurs(fabrique) == (32, 32)
+
+    async def test_un_vecteur_ajoute_declencheurs_coupes_fait_rendre_503(
+        self, db_session, category_ids, fabrique, vecteur_de_la_question
+    ):
+        """
+        Le rapport garde tel qu'en production, sur la base : la question tient
+        (l'article manquant n'est pas son sujet), et seul le compte voit la
+        derive.
+        """
+        await _corpus(db_session, category_ids, panne=False)
+        await db_session.execute(text("SET LOCAL session_replication_role = replica"))
+        await db_session.execute(text(
+            "INSERT INTO articles (id, law_id, number, content, \"order\", embedding) "
+            "SELECT 19920099, law_id, '99', 'Article ajoute.', 99, embedding FROM articles "
+            "WHERE id = 19920037"
+        ))
+        await db_session.commit()
+
+        code, rapport = await ControleEnCache(
+            partial(controler_le_chat, fabrique, [_question()], comptes=compter_les_vecteurs)
+        ).lire()
+
+        assert code == 503 and rapport["en_echec"] == 0
+        assert rapport["table_des_vecteurs"] == {"articles_vectorises": 33, "lignes": 32}
+        assert rapport["raisons"][0].startswith(
+            "table des vecteurs du chat en derive : 32 lignes pour 33 articles vectorises"
+        )
+
+    async def test_une_ligne_orpheline_du_mode_replica_se_voit_aussi(
+        self, db_session, category_ids, fabrique, vecteur_de_la_question
+    ):
+        """Le mode replica coupe aussi la cascade : la ligne survit a son article."""
+        await _corpus(db_session, category_ids, panne=False)
+        await db_session.execute(text("SET LOCAL session_replication_role = replica"))
+        await db_session.execute(text("DELETE FROM articles WHERE id = 19920037"))
+        await db_session.commit()
+
+        assert await compter_les_vecteurs(fabrique) == (31, 32)
+
+    async def test_les_comptes_ne_voient_pas_une_ecriture_en_cours(
+        self, db_session, category_ids, fabrique, vecteur_de_la_question
+    ):
+        """Une ingestion en cours n'est pas une derive : article et ligne viennent ensemble."""
+        await _corpus(db_session, category_ids, panne=False)
+        await db_session.execute(text(
+            "INSERT INTO articles (id, law_id, number, content, \"order\", embedding) "
+            "SELECT 19920099, law_id, '99', 'Article ajoute.', 99, embedding FROM articles "
+            "WHERE id = 19920037"
+        ))
+
+        assert await compter_les_vecteurs(fabrique) == (32, 32)
+        await db_session.commit()
+        assert await compter_les_vecteurs(fabrique) == (33, 33)
 
     async def test_au_dela_du_delai_les_questions_restantes_echouent(self, monkeypatch):
         async def lente(fabrique, item):

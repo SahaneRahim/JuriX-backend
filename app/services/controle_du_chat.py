@@ -37,15 +37,19 @@ lirait (ceux que le prompt retient, budget du contexte compris) :
    comptent un texte attendu. Le plein texte peut sauver le contexte d'une
    question dont les vecteurs se perdent ; ce point le voit quand meme ;
 5. pour les questions marquees `rappel`, le RAPPEL@10 DE L'INDEX HNSW a
-   chaque valeur de EF_SEARCH_DU_RAPPEL, contre une recherche exacte, sans
-   index (meme vecteur, articles publies). L'incident : 0 sur 10.
+   chaque valeur de EF_SEARCH_DU_RAPPEL, contre une recherche exacte sur
+   articles_vecteurs, sans index (meme vecteur, articles publies). L'incident :
+   0 sur 10.
 Et pour le controle entier :
 6. le FOURNISSEUR D'EMBEDDINGS repond, hors de la memoire des vecteurs de
    questions (sonder_le_fournisseur), qui masquerait sinon une panne de
    Voyage ;
 7. la recherche exacte du chat n'est pas retombee sur l'index pour la
    PLUPART des questions (PART_MAX_EN_REPLI) : c'est elle qui protege le chat
-   d'un index qui se perd, et une base trop lente la coupe sans bruit.
+   d'un index qui se perd, et une base trop lente la coupe sans bruit ;
+8. la TABLE DES VECTEURS que lit la recherche exacte (articles_vecteurs) compte
+   autant de lignes que d'articles vectorises (compter_les_vecteurs) : un
+   article qui n'y est pas n'existe plus pour le chat, sans rien signaler.
 
 LE CODE DE LA ROUTE : QUESTIONS GARANTIES ET FAIBLESSES CONNUES (revue du
 tour 5, 30/10/2026). Chaque question de reference est GARANTIE, ou FAIBLESSE
@@ -54,8 +58,8 @@ raison, ses attendus etant justes (questions_de_reference.FAIBLESSES_CONNUES,
 avec leur diagnostic ; 6 le 30/10/2026). Le rapport est « echec », et la
 route rend 503, si :
 - une question GARANTIE echoue, quelle qu'en soit la raison ;
-- la sonde du fournisseur echoue (6), ou la recherche exacte est en repli
-  pour la plupart des questions (7) ;
+- la sonde du fournisseur echoue (6), la recherche exacte est en repli pour
+  la plupart des questions (7), ou la table des vecteurs derive (8) ;
 - aucune question garantie n'est verifiee, ou le calcul est en erreur ou
   abandonne a son delai (ControleEnCache).
 Sinon « ok » et 200, MEME SI des faiblesses connues echouent. Le rapport les
@@ -106,7 +110,7 @@ from pgvector.sqlalchemy import HALFVEC
 from sqlalchemy import literal, literal_column, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.law import Article, Law
+from app.models.law import Article, ArticleVecteur, Law
 from app.schemas.rag import RAGRequest
 from app.schemas.search import ChunkResult
 from app.services import rag_service, search_service
@@ -139,6 +143,13 @@ CONCURRENCE = 2
 # Plus de cinq fois le calcul local ; au-dela, le chat lui-meme serait trop
 # lent pour ses utilisateurs, et l'alerte est juste.
 DELAI_DU_CALCUL_S = 120.0
+# Borne de la comparaison des comptes. Elle passe APRES les questions, donc
+# parfois a l'echeance de DELAI_DU_CALCUL_S : elle doit tenir dans les 15 s que
+# ControleEnCache laisse ensuite, sinon un rapport entier serait perdu pour
+# elle. Mesure du 05/11/2026 sur une copie de jurix_dev : 10 558 pages (le tas
+# d'articles, seul reste froid une fois les questions passees), 46 ms a chaud,
+# 0,19 s depuis le disque ; a 0,4 ms par page sur Neon froid, ~4 s.
+DELAI_DES_COMPTES_S = 10.0
 # CE QUE LE MODELE LIT AVANT L'ARTICLE QUI REPOND (juger). Le premier extrait
 # qui repond : un article attendu qui porte la regle demandee (et, s'il
 # renvoie a un autre pour sa peine, le rang ou l'article vise est lu aussi :
@@ -505,8 +516,7 @@ def _enonce_des_voisins(vecteur: List[float], candidats: int, k: int):
     L'idiome du volet semantique (SearchService._build_semantic_statement),
     ecrit ici pour que la mesure ne bouge pas avec lui : `<=>` sur la colonne
     nue, seul rattachable a l'index ; tri strict des candidats a l'exterieur
-    (`+ 0`), l'identifiant departageant les ex aequo. Sous enable_indexscan
-    off, le meme enonce est la recherche exacte.
+    (`+ 0`), l'identifiant departageant les ex aequo.
     """
     distance = Article.embedding.cosine_distance(
         literal(vecteur, HALFVEC(EmbeddingService.EMBEDDING_DIM))
@@ -542,15 +552,47 @@ async def voisins_par_l_index(
     return [ligne.article_id for ligne in lignes]
 
 
+def _enonce_des_vrais_voisins(vecteur: List[float], k: int):
+    """
+    Les `k` vrais plus proches voisins publies de `vecteur`. Sur
+    articles_vecteurs, qui ne porte aucun index vectoriel : PostgreSQL compare
+    chaque article a la question et trie, quel que soit le plan.
+    """
+    distance = ArticleVecteur.embedding.cosine_distance(
+        literal(vecteur, HALFVEC(EmbeddingService.EMBEDDING_DIM))
+    )
+    return (
+        select(ArticleVecteur.article_id)
+        .join(Law, Law.id == ArticleVecteur.law_id)
+        .where(Law.status == "published")
+        .order_by(distance, ArticleVecteur.article_id)
+        .limit(k)
+    )
+
+
 async def voisins_exacts(db: AsyncSession, vecteur: List[float], k: int = K_RAPPEL) -> List[int]:
     """
-    Les `k` vrais plus proches voisins : l'index ecarte pour la transaction,
-    PostgreSQL compare chaque article a la question et trie. Environ 250 ms
-    sur la base de production a chaud, plusieurs secondes a un vrai reveil
-    (SearchService.BUDGET_RECHERCHE_EXACTE_A_FROID_MS), 190 a 300 ms en local.
+    Les `k` vrais plus proches voisins : la verite de la mesure de l'index.
+
+    POURQUOI articles_vecteurs, ET NON LA COLONNE QUE L'INDEX PARCOURT. Mesure
+    du 05/11/2026, copie de jurix_dev (data/fiabilite/froid/migration-018/,
+    resultat-comparer.json et resultat-froid.json) :
+    - la verite ne bouge pas : 301 listes de 10 identiques sur 301 (51 questions,
+      200 articles, 50 tableaux budgetaires) ;
+    - sur `articles`, elle coutait plus cher qu'avant la table. La recherche du
+      chat ne chauffe plus la TOAST : pour la premiere question `rappel` apres
+      un reveil, la verite y lisait seule 21 415 pages froides, soit 32 732 pages
+      distinctes pour la question, contre 21 492 avant la table, et de 1 a 2,3 s
+      depuis le disque. Sur la table, elle relit ce que le chat vient de lire :
+      11 317 pages distinctes, 0,2 s ;
+    - elle voit ce que les comptes ne voient pas (compter_les_vecteurs) : l'index
+      lit `articles` et elle lit la table, leur accord dit aussi que les deux
+      copies portent les memes vecteurs, pour les questions mesurees.
+
+    LE PRIX : un rappel effondre peut venir de l'index OU d'une table qui derive.
+    Lire alors `table_des_vecteurs`, puis comparer les deux colonnes en base.
     """
-    await db.execute(text("SELECT set_config('enable_indexscan', 'off', true)"))
-    lignes = (await db.execute(_enonce_des_voisins(vecteur, k, k))).all()
+    lignes = (await db.execute(_enonce_des_vrais_voisins(vecteur, k))).all()
     return [ligne.article_id for ligne in lignes]
 
 
@@ -947,6 +989,70 @@ def _maintenant_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# ==================== LA TABLE DES VECTEURS ====================
+
+
+async def compter_les_vecteurs(fabrique: FabriqueDeSessions) -> Tuple[int, int]:
+    """
+    (articles vectorises, lignes de articles_vecteurs).
+
+    POURQUOI. La recherche exacte du chat ne lit plus que cette table, qu'un
+    declencheur tient a jour (migration 018_articles_vecteurs). Des vecteurs
+    ecrits declencheurs coupes la font deriver sans aucune erreur : l'article
+    manquant n'est simplement plus jamais retrouve, et sans ce compte, aucune
+    question de reference ne le dirait, sauf a porter sur lui.
+
+    EN UN SEUL ENONCE : deux lectures verraient deux etats de la base, et une
+    ingestion entre les deux ferait sonner l'alerte pour rien. Le declencheur
+    ecrivant dans la transaction de l'article, un meme instantane voit les deux
+    ou aucun. Aucune lecture de vecteur : `IS NOT NULL` ne sort pas la valeur
+    de la TOAST.
+
+    LA LIMITE : des comptes egaux ne prouvent pas des vecteurs egaux. Comparer
+    les vecteurs relirait toute la TOAST, le cout que la table a retire. Un
+    corpus revectorise declencheurs coupes ne se voit donc pas ici, mais dans
+    le rappel de l'index : voir voisins_exacts.
+    """
+    async with fabrique() as db:
+        try:
+            ligne = (await db.execute(text(
+                "SELECT (SELECT count(*) FROM articles WHERE embedding IS NOT NULL) AS vectorises, "
+                "(SELECT count(*) FROM articles_vecteurs) AS lignes"
+            ))).one()
+        finally:
+            await db.rollback()
+    return ligne.vectorises, ligne.lignes
+
+
+async def _derive_de_la_table(
+    fabrique: FabriqueDeSessions,
+    comptes: Callable[[FabriqueDeSessions], Awaitable[Tuple[int, int]]],
+    delai_s: float,
+) -> Tuple[Optional[Dict[str, int]], Optional[str]]:
+    """
+    Les comptes du rapport, et la raison d'un echec s'il y en a une. Des comptes
+    qu'on ne peut pas lire sont un echec : rien de verifie n'est pas un succes.
+    Une erreur n'est nommee que par sa classe, le rapport etant public.
+    """
+    borne_s = min(delai_s, DELAI_DES_COMPTES_S)
+    try:
+        async with asyncio.timeout(borne_s):
+            vectorises, lignes = await comptes(fabrique)
+    except TimeoutError:
+        return None, f"table des vecteurs du chat non comptee en {borne_s:.0f} s"
+    except Exception as erreur:
+        logger.warning(f"⚠️ Controle du chat : comptes des vecteurs en echec ({erreur!r})")
+        return None, f"table des vecteurs du chat non comptee ({type(erreur).__name__})"
+    lus = {"articles_vectorises": vectorises, "lignes": lignes}
+    if vectorises == lignes:
+        return lus, None
+    return lus, (
+        f"table des vecteurs du chat en derive : {lignes} lignes pour {vectorises} articles "
+        "vectorises, et la recherche exacte ne lit qu'elle (remede : migration "
+        "018_articles_vecteurs)"
+    )
+
+
 async def controler_le_chat(
     fabrique: FabriqueDeSessions,
     questions: Sequence[QuestionDeReference] = QUESTIONS_DE_REFERENCE,
@@ -954,6 +1060,7 @@ async def controler_le_chat(
     concurrence: int = CONCURRENCE,
     delai_s: float = DELAI_DU_CALCUL_S,
     sonde: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
+    comptes: Optional[Callable[[FabriqueDeSessions], Awaitable[Tuple[int, int]]]] = None,
 ) -> Dict[str, Any]:
     """
     Le rapport du controle : « ok » si les questions GARANTIES et le controle
@@ -968,6 +1075,10 @@ async def controler_le_chat(
     verifiees : sans vecteur, elles ne diraient que la panne deja connue, et
     chacune tiendrait un fil d'appel a Voyage (_EXECUTEUR_QUESTIONS, 4 fils
     partages avec les utilisateurs) jusqu'a son delai.
+
+    `comptes` : la comparaison de la table des vecteurs (compter_les_vecteurs,
+    en production), lancee APRES les questions : leur duree reste celle de la
+    recherche, et une panne de Voyage ne la cache pas.
     """
     debut = time.monotonic()
     verifie_le = _maintenant_iso()
@@ -1039,6 +1150,11 @@ async def controler_le_chat(
             f"sur {len(verdicts)} : la base est trop lente pour elle, et le chat lit "
             "l'index, dont la perte a fait l'incident du 29/10/2026"
         )
+    table_des_vecteurs: Optional[Dict[str, int]] = None
+    if comptes is not None:
+        table_des_vecteurs, derive = await _derive_de_la_table(fabrique, comptes, delai_s)
+        if derive is not None:
+            raisons.append(derive)
 
     rapport: Dict[str, Any] = {
         # Rien de verifie n'est pas un succes.
@@ -1063,6 +1179,9 @@ async def controler_le_chat(
             fournisseur if fournisseur is not None
             else ("ok" if sonde is not None else "non sonde")
         ),
+        # Articles vectorises et lignes de articles_vecteurs ; None s'ils n'ont
+        # pas ete comptes.
+        "table_des_vecteurs": table_des_vecteurs,
         # Qui a servi le volet semantique des questions : le repli de la
         # recherche exacte sur l'index s'y compte.
         "chemins_semantiques": dict(Counter(v.chemin or "inconnu" for v in verdicts)),

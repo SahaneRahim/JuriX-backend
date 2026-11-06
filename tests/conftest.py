@@ -646,7 +646,7 @@ async def pg_engine(_migrated_schema):
 # l'état des migrations, pas des données de test.
 _DATA_TABLES = (
     "message_feedback", "messages", "conversations", "persona_interactions",
-    "persona_stats", "articles", "laws", "categories", "users",
+    "persona_stats", "articles_vecteurs", "articles", "laws", "categories", "users",
     "query_cache", "embedding_cache", "search_events", "blog_posts",
 )
 

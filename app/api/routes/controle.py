@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from app.core.database import AsyncSessionLocal
 from app.services.controle_du_chat import (
     ControleEnCache,
+    compter_les_vecteurs,
     controler_le_chat,
     sonder_le_fournisseur,
 )
@@ -25,7 +26,12 @@ from app.services.controle_du_chat import (
 router = APIRouter()
 
 _controle = ControleEnCache(
-    partial(controler_le_chat, AsyncSessionLocal, sonde=sonder_le_fournisseur)
+    partial(
+        controler_le_chat,
+        AsyncSessionLocal,
+        sonde=sonder_le_fournisseur,
+        comptes=compter_les_vecteurs,
+    )
 )
 
 
@@ -43,15 +49,17 @@ async def controle_du_chat(controle: ControleEnCache = Depends(controle_en_cache
       est a l'art. 318, pas a l'art. 320 qui la double), parmi les 4 premiers
       extraits, sans autre texte avant lui (hors extraits toleres par la
       question). L'article qu'une question nomme est lu en premier, par la
-      lecture directe. Le fournisseur d'embeddings repond, et la recherche
-      exacte du chat tient. Regle et mesures : controle_du_chat,
+      lecture directe. Le fournisseur d'embeddings repond, la recherche
+      exacte du chat tient, et sa table des vecteurs compte autant de lignes
+      que d'articles vectorises. Regle et mesures : controle_du_chat,
       RANG_MAX_DE_LA_REPONSE. Les FAIBLESSES CONNUES (plus bas) n'y changent
       rien, qu'elles echouent ou qu'elles tiennent ;
     - 503 : une panne NOUVELLE, dite dans `raisons` : une question garantie
       en echec (detail question par question dans `echecs` : ce qui manque,
       ce que le modele aurait lu, les autres textes lus avant la reponse), la
-      sonde du fournisseur, le repli de la recherche exacte sur l'index, ou
-      un calcul en erreur ou abandonne ;
+      sonde du fournisseur, le repli de la recherche exacte sur l'index, la
+      derive de la table des vecteurs (`table_des_vecteurs`), ou un calcul en
+      erreur ou abandonne ;
     - 202 : aucun rapport encore (premier appel apres un redemarrage, calcul
       de plus de 25 s) ; le calcul se poursuit et sert l'appel suivant. Pour
       cron-job.org, c'est un succes : un deploiement ne fait pas sonner
@@ -136,7 +144,8 @@ async def controle_du_chat(controle: ControleEnCache = Depends(controle_en_cache
        503, dans `faiblesses`.
 
     COUT D'UN CALCUL : les recherches du chat pour chaque question (51), sans
-    generation ; un appel a Voyage pour la sonde (deux s'il echoue), plus un
+    generation ; deux comptes, ceux de la table des vecteurs ; un appel a
+    Voyage pour la sonde (deux s'il echoue), plus un
     par question au premier calcul apres un demarrage (leurs vecteurs restent
     ensuite en memoire) ; 4 connexions sur les 10 du pool, deux minutes au
     plus : les utilisateurs gardent les autres, meme en demonstration.

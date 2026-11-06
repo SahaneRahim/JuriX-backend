@@ -25,6 +25,7 @@ from app.main import app
 from app.services import search_service
 from app.services.controle_du_chat import (
     ControleEnCache,
+    compter_les_vecteurs,
     controler_le_chat,
     sonder_le_fournisseur,
 )
@@ -162,8 +163,11 @@ def test_le_controle_de_la_route_porte_toutes_les_questions_de_reference():
 
     assert calculer.func is controler_le_chat
     assert calculer.args == (AsyncSessionLocal,)
-    # En production, le fournisseur d'embeddings est sonde a chaque calcul.
-    assert calculer.keywords == {"sonde": sonder_le_fournisseur}
+    # En production, le fournisseur d'embeddings est sonde a chaque calcul, et
+    # la table des vecteurs du chat comptee.
+    assert calculer.keywords == {
+        "sonde": sonder_le_fournisseur, "comptes": compter_les_vecteurs,
+    }
     assert controler_le_chat.__defaults__[0] is QUESTIONS_DE_REFERENCE
     assert route._controle.duree_de_vie_s == 30 * 60
     # cron-job.org coupe a 30 s ; le calcul, lui, est borne.

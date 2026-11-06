@@ -1,8 +1,9 @@
 """
-La dimension des embeddings : un accord a trois, et une garde au demarrage.
+La dimension des embeddings : un accord a quatre, et une garde au demarrage.
 
-Trois declarations portent la meme dimension — la colonne (Article.embedding),
-la configuration (settings.EMBEDDING_DIM) et le service. Si elles divergent,
+Quatre declarations portent la meme dimension — les deux colonnes
+(Article.embedding, et sa copie ArticleVecteur.embedding), la configuration
+(settings.EMBEDDING_DIM) et le service. Si elles divergent,
 rien n'echoue a l'import : l'ingestion casse a la premiere ecriture, la
 recherche a la premiere question, et l'hybride avale cette erreur en retombant
 sans bruit sur le plein texte. Ces tests tournent sans base.
@@ -16,19 +17,21 @@ from pgvector.sqlalchemy import HALFVEC
 from pydantic import ValidationError
 
 from app.core.config import Settings, settings
-from app.models.law import Article
+from app.models.law import Article, ArticleVecteur
 from app.services.embedding_service import EmbeddingService
 
 
 def test_colonne_configuration_et_service_s_accordent():
     colonne = Article.__table__.c.embedding.type.dim
+    copie = ArticleVecteur.__table__.c.embedding.type.dim
 
-    assert colonne == settings.EMBEDDING_DIM == EmbeddingService.EMBEDDING_DIM
+    assert colonne == copie == settings.EMBEDDING_DIM == EmbeddingService.EMBEDDING_DIM
 
 
-def test_la_colonne_est_en_halfvec():
+@pytest.mark.parametrize("modele", [Article, ArticleVecteur])
+def test_la_colonne_est_en_halfvec(modele):
     """Deux octets par composante : 2 Ko par article au lieu de 4."""
-    assert isinstance(Article.__table__.c.embedding.type, HALFVEC)
+    assert isinstance(modele.__table__.c.embedding.type, HALFVEC)
 
 
 @pytest.mark.parametrize("dimension", [3072, 1536, 768, 512])

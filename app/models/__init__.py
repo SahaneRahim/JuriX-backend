@@ -13,13 +13,14 @@ from app.models.conversation import (
     PersonaStat,
 )
 from app.models.email_token import EmailToken
-from app.models.law import Article, Category, Law
+from app.models.law import Article, ArticleVecteur, Category, Law
 from app.models.user import User
 
 __all__ = [
     # Law models
     "Law",
     "Article",
+    "ArticleVecteur",
     "Category",
     # Conversation models
     "Conversation",

@@ -444,6 +444,15 @@ python scripts/regenerate_embeddings.py --all                   # reprenable, ap
 python scripts/regenerate_embeddings.py --reindex               # index en masse
 ```
 
+La recherche exacte du chat ne lit pas `articles.embedding` mais sa copie
+`articles_vecteurs`, dont le vecteur est dans la ligne et non dans la TOAST
+(migration `018_articles_vecteurs`). Un déclencheur la tient à jour : tout
+chemin d'écriture ordinaire la suit, y compris ces scripts. Un chargement fait
+déclencheurs coupés (`DISABLE TRIGGER`, `session_replication_role = replica`)
+la laisse derrière : `GET /api/v1/controle/chat` compare les comptes et rend
+503, et rejouer la migration la remet à niveau (le mode d'emploi est dans sa
+docstring).
+
 Les vecteurs `voyage-4-large` de tout le corpus ont déjà été calculés par la
 mesure (`data/mesure_voyage`, hors git). Ils se chargent sans appel à l'API ;
 un article dont le texte a changé depuis l'instantané garde son vecteur à NULL,

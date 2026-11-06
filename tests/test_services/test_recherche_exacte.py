@@ -9,10 +9,12 @@ budget de temps au-dela duquel il passe par l'index a ef_search 1000 ; /search
 garde l'index, a ef_search 400 au moins.
 
 Ces tests disent : que l'enonce exact ne PEUT pas passer par l'index (plan
-reel), qu'il rend les vrais plus proches voisins (calcul numpy), que le repli
-se declenche sur le delai du serveur et le dit, que ses reglages ne fuient pas
-dans la transaction de l'appelant, et que le cache garde au chat ce qu'il
-relit (VoletsDeLaRecherche).
+reel), qu'il rend les vrais plus proches voisins (calcul numpy), qu'il rend
+exactement ce que rendait l'enonce sur articles.embedding, d'avant la table
+articles_vecteurs (TestLaTableDesVecteurs), que le repli se declenche sur le
+delai du serveur et le dit, que ses reglages ne fuient pas dans la transaction
+de l'appelant, et que le cache garde au chat ce qu'il relit
+(VoletsDeLaRecherche).
 """
 
 import asyncio
@@ -23,7 +25,8 @@ import time
 
 import numpy as np
 import pytest
-from sqlalchemy import select, text
+from pgvector.sqlalchemy import HALFVEC
+from sqlalchemy import literal, literal_column, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -93,6 +96,7 @@ async def deux_cents_articles(db_session):
     ])
     await db_session.commit()
     await db_session.execute(text("ANALYZE articles"))
+    await db_session.execute(text("ANALYZE articles_vecteurs"))
     await db_session.execute(text("ANALYZE laws"))
 
 
@@ -148,11 +152,25 @@ class TestEnonceExact:
         """
         sql = self._sql()
 
-        assert "ORDER BY (articles.embedding <=> " in sql
-        assert ") + 0, articles.id" in sql
-        assert "ORDER BY articles.embedding <=>" not in sql
+        assert "ORDER BY (articles_vecteurs.embedding <=> " in sql
+        assert ") + 0, articles_vecteurs.article_id" in sql
+        assert "ORDER BY articles_vecteurs.embedding <=>" not in sql
         # Aucun reglage de l'index : il n'y a pas de parcours a regler.
         assert "hnsw.ef_search" not in sql
+
+    def test_l_etage_1_ne_lit_que_la_table_des_vecteurs_et_les_lois(self):
+        """La lecture d'articles est ce que coutait un reveil : il ne doit en rester aucune."""
+        sql = self._sql(SearchFilters(status="published"))
+        interieur = sql.split(") AS proches")[0].split("FROM (", 1)[1]
+
+        assert "FROM articles_vecteurs JOIN laws ON laws.id = articles_vecteurs.law_id" in interieur
+        assert "articles." not in interieur
+
+    def test_l_etage_2_reste_sur_articles(self):
+        exterieur = self._sql().split(") AS proches")[1]
+
+        assert "JOIN articles ON articles.id = proches.article_id" in exterieur
+        assert "embedding" not in exterieur
 
     def test_le_texte_n_est_lu_que_pour_les_plus_proches(self):
         """Etage 1 etroit (identifiant, distance), etage 2 : le texte des seuls retenus."""
@@ -252,6 +270,8 @@ class TestRechercheExacte:
 def _enonce_lent(self, distance, filters, limit, offset):
     """Un enonce exact qui depasse tout budget : une seconde de sommeil d'abord."""
     lent = select(Article.id).where(text("pg_sleep(1) IS NOT NULL")).limit(1).subquery()
+    # `distance` porte sur articles_vecteurs, que cet enonce ne lit pas.
+    distance = Article.embedding.cosine_distance(literal(QUESTION.tolist(), HALFVEC(DIM)))
     return (
         select(
             Article.id.label("article_id"), Article.number,
@@ -331,6 +351,181 @@ class TestRepliSurLIndex:
 
         with pytest.raises(module.VectorSearchError):
             await _volet(_service(db_session))
+
+
+def _enonce_sur_articles(service, vecteur, filtres, limit, offset):
+    """
+    La reference : l'etage 1 de l'enonce exact d'avant la migration 018, sur
+    articles.embedding, recopie de SearchService._enonce_exact tel qu'il etait.
+    """
+    distance = Article.embedding.cosine_distance(literal(vecteur, HALFVEC(DIM)))
+    proches = (
+        select(Article.id.label("article_id"), distance.label("distance"))
+        .select_from(Article)
+        .join(Law, Law.id == Article.law_id)
+        .where(Article.embedding.isnot(None))
+    )
+    proches = service._apply_filters_pgvector(proches, filtres)
+    proches = (
+        proches.order_by(distance + literal_column("0"), Article.id)
+        .limit(limit + offset)
+        .subquery("proches")
+    )
+    return (
+        select(proches.c.article_id, proches.c.distance)
+        .order_by(proches.c.distance + literal_column("0"), proches.c.article_id)
+        .limit(limit)
+        .offset(offset)
+    )
+
+
+@pytest.fixture
+async def corpus_a_filtrer(db_session, category_ids):
+    """
+    Quatre lois que chaque filtre departage, des articles sans vecteur, et des
+    vecteurs en double : deux articles a egale distance, que seul l'identifiant
+    range.
+    """
+    from datetime import date
+
+    categories = sorted(category_ids.values())
+    db_session.add_all([
+        Law(id=940, reference="LOI-940", title="Loi 940", content="Contenu.", type="loi",
+            language="fr", status="published", category_id=categories[0],
+            publication_date=date(1992, 8, 14)),
+        Law(id=941, reference="DEC-941", title="Decret 941", content="Contenu.", type="decret",
+            language="en", status="published", category_id=categories[1],
+            publication_date=date(2015, 3, 1)),
+        Law(id=942, reference="LOI-942", title="Loi 942", content="Contenu.", type="loi",
+            language="fr", status="draft", category_id=categories[0],
+            publication_date=date(2020, 1, 1)),
+        Law(id=943, reference="ORD-943", title="Ordonnance 943", content="Contenu.",
+            type="ordonnance", language="fr", status="published"),
+    ])
+    await db_session.flush()
+    db_session.add_all([
+        Article(id=94000 + i, law_id=940 + i % 4, number=str(i + 1), content=f"Article {i + 1}.",
+                order=i + 1, embedding=None if i % 10 == 9 else _vecteur(5000 + i // 2).tolist())
+        for i in range(120)
+    ])
+    await db_session.commit()
+    return categories
+
+
+class TestLaTableDesVecteurs:
+    """
+    La recherche exacte lit articles_vecteurs (migration 018) : sa premiere
+    promesse est de ne rien changer aux resultats, et le reste de la recherche
+    ne doit pas la lire.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("limit, offset", [(8, 0), (32, 0), (5, 7)])
+    @pytest.mark.parametrize("filtrer", [
+        lambda categories: None,
+        lambda categories: SearchFilters(status="published"),
+        lambda categories: SearchFilters(status="published", language="fr"),
+        lambda categories: SearchFilters(language="en"),
+        lambda categories: SearchFilters(types=["decret", "ordonnance"]),
+        lambda categories: SearchFilters(status="draft"),
+        lambda categories: SearchFilters(year_from=2000, year_to=2018),
+        lambda categories: SearchFilters(category_ids=categories[:1]),
+    ], ids=["sans", "publies", "publies-fr", "en", "types", "brouillons", "periode", "categorie"])
+    async def test_memes_articles_et_memes_distances_que_sur_articles(
+        self, db_session, corpus_a_filtrer, filtrer, limit, offset
+    ):
+        filtres = filtrer(corpus_a_filtrer)
+        service = SearchService.__new__(SearchService)
+        # Un vecteur du corpus comme question : il y a deux jumeaux.
+        vecteur = _vecteur(5010).tolist()
+
+        attendu = (await db_session.execute(
+            _enonce_sur_articles(service, vecteur, filtres, limit, offset)
+        )).all()
+        lu = (await db_session.execute(
+            service._build_semantic_statement(vecteur, filtres, limit, offset, exacte=True)
+        )).all()
+
+        assert attendu, "un filtre qui ne garde rien ne prouverait rien"
+        assert [(r.article_id, r.distance) for r in lu] == [tuple(r) for r in attendu]
+
+    @pytest.mark.asyncio
+    async def test_deux_vecteurs_identiques_sont_ranges_par_l_identifiant(
+        self, db_session, corpus_a_filtrer
+    ):
+        service = SearchService.__new__(SearchService)
+
+        lignes = (await db_session.execute(service._build_semantic_statement(
+            _vecteur(5010).tolist(), None, 2, 0, exacte=True
+        ))).all()
+
+        assert [r.article_id for r in lignes] == [94020, 94021]
+        assert lignes[0].distance == lignes[1].distance
+
+    @pytest.mark.asyncio
+    async def test_la_recherche_exacte_lit_la_table_et_le_repli_les_articles(
+        self, db_session, deux_cents_articles, monkeypatch
+    ):
+        """
+        La table videe, sans toucher a `articles` : la recherche exacte ne
+        trouve plus rien, l'index et son repli rendent autant. Si le repli
+        lisait la table, il perdrait ce qu'il doit sauver.
+        """
+        await db_session.execute(text("DELETE FROM articles_vecteurs"))
+        await db_session.commit()
+
+        exacte = _service(db_session)
+        assert await _volet(exacte) == []
+        assert exacte.chemin_semantique == CHEMIN_EXACT
+
+        index = _service(db_session, exacte=False)
+        assert len(await _volet(index)) == 10
+        assert index.chemin_semantique == CHEMIN_HNSW
+
+        monkeypatch.setattr(SearchService, "_enonce_exact", _enonce_lent)
+        monkeypatch.setattr(SearchService, "BUDGET_RECHERCHE_EXACTE_MS", 100)
+        repli = _service(db_session)
+        assert len(await _volet(repli)) == 10
+        assert repli.chemin_semantique == CHEMIN_REPLI_HNSW
+
+    @pytest.mark.parametrize("reglages", [{"ef_search": 1000}, {}], ids=["repli", "search"])
+    def test_les_enonces_de_l_index_restent_sur_articles_embedding(self, reglages):
+        service = SearchService.__new__(SearchService)
+
+        sql = str(service._build_semantic_statement(
+            [0.001] * DIM, SearchFilters(status="published"), 32, 0, **reglages
+        ).compile(dialect=postgresql.dialect()))
+
+        assert "articles.embedding <=>" in sql
+        assert "articles_vecteurs" not in sql
+
+    @pytest.mark.asyncio
+    async def test_le_plan_exact_lit_la_table_et_le_repli_l_index(
+        self, db_session, deux_cents_articles
+    ):
+        service = SearchService.__new__(SearchService)
+
+        async def plan(**reglages) -> str:
+            enonce = service._build_semantic_statement(
+                QUESTION.tolist(), SearchFilters(status="published"), 32, 0, **reglages
+            )
+            sql = str(enonce.compile(
+                dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+            ))
+            conn = await db_session.connection()
+            return "\n".join(r[0] for r in await conn.exec_driver_sql("EXPLAIN " + sql))
+
+        # Sur 200 lignes, trier coute moins que l'index : voir test_vector_schema.py.
+        await db_session.execute(text("SET LOCAL enable_seqscan = off"))
+        await db_session.execute(text("SET LOCAL enable_sort = off"))
+        repli = await plan(ef_search=1000)
+        await db_session.execute(text("SET LOCAL enable_seqscan = on"))
+        await db_session.execute(text("SET LOCAL enable_sort = on"))
+        await db_session.execute(text(module._REGLAGES_EXACTS_SQL), {"budget_ms": "1500"})
+        exact = await plan(exacte=True)
+
+        assert INDEX in repli and "articles_vecteurs" not in repli, repli
+        assert "Seq Scan on articles_vecteurs" in exact and INDEX not in exact, exact
 
 
 class TestBudgetAFroid:
