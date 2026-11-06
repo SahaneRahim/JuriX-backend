@@ -1,0 +1,147 @@
+{
+ "provenance": "jurix_dev (localhost:5433), lu en lecture seule (default_transaction_read_only) le 30/10/2026 ; contenus recopiés tels quels",
+ "textes": {
+  "663": "Décret N°2021/597 du 13 octobre 2021 modifiant et complétant certaines dispositions du décret n°2012/350 du 19 juillet 2012 portant ouverture d'un Consulat en Pied du Cameroun à Bouar (République Centrafricaine)",
+  "1230": "Loi n° 2020/009 du 20 juillet 2020 modifiant et complétant certaines dispositions de la loi n° 90/053 du 19 décembre 1990 relative à la liberté d'association",
+  "2271": "Loi N°2010/012 du 21 décembre 2010 relative à la cybersécurité et la cybercriminalité au Cameroun",
+  "2274": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+  "2282": "Loi N°2012/001 du 19 avril 2012 portant Code électoral, modifiée et complétée par la loi n°2012/017 du 21 décembre 2012"
+ },
+ "lignes": [
+  {
+   "id": 56288,
+   "law_id": 663,
+   "number": "LEGAL_BASIS",
+   "order": 0,
+   "kind": "legal_basis",
+   "title": "Base légale",
+   "content": "2021/597 DU 13 OCT 2021 DECRET N°\n\nmodifiant et complétant certaines dispositions du décret nº2012/350 du 19 juillet 2012 portant ouverture d'un Consulat en Pied du Cameroun à Bouar (République Centrafricaine).\n\nLE PRESIDENT DE LA REPUBLIQUE\n\nVU la Constitution ;\n\n- VU le décret n°2011/408 du 09 décembre 2011 portant organisation du Gouvernement, modifié et complété par décret nº2018/190 du 02mars 2018;\n- VU la loi n°87/1198 du 07 septembre 1987 portant organisation des Services Extérieures Permanents du Ministère des Affaires Etrangères ;\n- VU le décret n°2013/112 du 22 avril 2013 portant organisation du Ministère des Relations Extérieures,\n\nDECRETE :"
+  },
+  {
+   "id": 56289,
+   "law_id": 663,
+   "number": "1",
+   "order": 1,
+   "kind": "article",
+   "title": null,
+   "content": "Les dispositions de l'Article 2 du décret N°2012/350 du 19 juillet 2012, portant ouverture d'un Consulat en Pied du Cameroun à Bouar (République Centrafricaine), sont modifiées et complétées ainsi qu'il suit :\n\n- «ARTICLE 2.- (nouveau) La Juridiction de compétence dudit Consulat couvre les Préfectures de la Sangha Mbaéré, la Mambéré Kadéi, la Nana Mambéré, l'Ouham Pendé, l'Ouham Fafa, le Lim Pendé et le Mambere. »"
+  },
+  {
+   "id": 56290,
+   "law_id": 663,
+   "number": "2",
+   "order": 2,
+   "kind": "boilerplate",
+   "title": null,
+   "content": "Le présent décret sera enregistré, publié suivant la procédure d'urgence, puis inséré au Journal Officiel en français et en anglais. /-\n\nYaoundé, le1 3 OCT 2021\n\nESIDENT DE LA REPUBLIQUE,\n\n★\n\n★\n\nPRESIDEPAUL BIYA"
+  },
+  {
+   "id": 58733,
+   "law_id": 1230,
+   "number": "LEGAL_BASIS",
+   "order": 0,
+   "kind": "boilerplate",
+   "title": "Base légale",
+   "content": "ETREGLEMENTAIR LEGISLATIVE AND STATUTORY AEFAIRS\n\n2020/09 LOI N° DU2 0 JUIL 2020\n\nMODIFIANT ET COMPLETANT CERTAINES DISPOSITIONS DE LA LOI N° 90/053 DU 19 DECEMBRE 1990 RELATIVE A LA LIBERTE D'ASSOCIATION\n\nLe Parlement a délibéré et adopté, le Président de la République promulgue la loi dont la teneur suit :"
+  },
+  {
+   "id": 58734,
+   "law_id": 1230,
+   "number": "1",
+   "order": 1,
+   "kind": "article",
+   "title": null,
+   "content": "Les dispositions de l'article 5 alinéa 4 de la loi n° 90/053 du 19 décembre 1990 relative à la liberté d'association sont modifiées et complétées ainsi qu'il suit :\n\n«ARTICLE 5.- (4) (nouveau) Les partis politiques, les syndicats, les associations sportives, les organisations non gouvernementales, ainsi qus es a es a e ae aues es particuliers. »"
+  },
+  {
+   "id": 58735,
+   "law_id": 1230,
+   "number": "2",
+   "order": 2,
+   "kind": "article",
+   "title": null,
+   "content": "La présente loi abroge toutes les dispositions antérieures contraires, notamment celles de la loi n° 90/053 du 19 décembre 1990 relative à la liberté d'association."
+  },
+  {
+   "id": 91549,
+   "law_id": 2282,
+   "number": "165",
+   "order": 171,
+   "kind": "article",
+   "title": null,
+   "content": "La déclaration de candidature est accompagnée, pour chaque candidat titulaire ou suppléant :\n\n- d'un extrait d'acte de naissance datant de moins de trois (03) mois ;\n- d'un certificat de nationalité ;\n- d'un bulletin n° 3 du casier judiciaire datant de moins de trois (03) mois ;\n- d'une déclaration par laquelle chaque candidat titulaire ou suppléant certifie sur l'honneur qu'il n'est candidat que sur cette liste et qu'il ne se trouve dans aucun cas d'inéligibilité prévu par la loi ;\n- d'un certificat d'imposition ou de non imposition ;\n- d'une attestation d'inscription sur une liste électorale ;\n- de l'original de versement du cautionnement ;\n- d'une attestation par laquelle le parti politique investit l'intéressé en qualité de candidat.\n\nArt. 166 - (nouveau) (1) Le candidat titulaire et son suppléant doivent conjointement verser au trésor public un cautionnement fixé à un\n\nDGE\n\nX\n\n\nElections Cameroon - ELECAM\n\nmillion de FCFA, selon les formes et modalités prévues par l'article 124 alinéa 2.\n\n(2) Le cautionnement est restitué par le trésor public dans les cas visés à l'article 147 de la présente loi."
+  },
+  {
+   "id": 97293,
+   "law_id": 2271,
+   "number": "52.1",
+   "order": 48,
+   "kind": "article",
+   "title": null,
+   "content": "(1) En cas d'infraction cybernétique, les Officiers de Police Judiciaire à compétence générale et les agents habilités de l'Agence, procèdent aux enquêtes conformément aux dispositions du Code de Procédure Pénale.\n(2) Avant leur entrée en fonction, les agents habilités de l'Agence prêtent serment, devant le Tribunal de Première Instance compétent, selon la formule suivante : « Je jure de remplir loyalement mes fonctions et d'observer en tout les devoirs qu'elles m'imposent, de garder secrètes les informations dont j'ai eu connaissance à l'occasion ou dans l'exercice de mes fonctions ».\n\n\n19"
+  },
+  {
+   "id": 97294,
+   "law_id": 2271,
+   "number": "52.2",
+   "order": 49,
+   "kind": "article",
+   "title": null,
+   "content": "(3) Les Officiers de Police Judiciaire et les agents habilités de l'Agence peuvent, lors des investigations, accéder aux moyens de transport, à tout local à usage professionnel, à l'exclusion des domiciles privés, en vue de rechercher, de constater les infractions, de demander la communication de tous les documents professionnels et en prendre copie, recueillir, sur convocation ou sur place, les renseignements et justifications. Article 53.- (1) Les perquisitions en matière de cybercriminalité sont susceptibles de porter sur des données qui peuvent être des supports physiques ou des copies réalisées en présence des personnes qui assistent à la perquisition. (2) Lorsqu'une copie des données saisies a été faite, celle-ci peut être détruite sur instruction du Procureur de la République pour des raisons de sécurité. (3) Sur accord du Procureur de la République, seuls seront gardés sous scellé par l'Officier de Police Judiciaire, les objets, documents et données utilisées à la manifestation de la vérité. (4) Les personnes présentes lors de la perquisition peuvent être réquisitionnées de fournir les renseignements sur les objets, documents et données saisis. Article 54.- Les perquisitions et les saisies sont effectuées conformément aux dispositions du Code de Procédure Pénale en tenant compte du dépérissement des preuves. Article 55.- (1) Lorsqu'il apparaît que les données saisies ou obtenues au cours de l'enquête ou de l'instruction ont fait l'objet d'opérations de transformation empêchant d'accéder en clair ou sont de nature à compromettre les informations qu'elles contiennent, le Procureur de la République, le Juge d'Instruction ou la juridiction de jugement peuvent réquisitionner toute personne physique ou morale qualifiée, en vue d'effectuer les opérations techniques permettant d'obtenir la version en clair desdites données. (2) Lorsqu'un moyen de cryptographie a été utilisé, les autorités judiciaires peuvent exiger la convention secrète de déchiffrement du cryptogramme. Article 56.- La réquisition prévue à l'article 50 ci-dessus peut être faite à tout expert. Dans ce cas, son exécution est faite conformément aux dispositions du Code de procédure pénale relatives à la commission d'expert. Aes ues s Lun Lnes ess (t s ne commission rogatoire tant nationale qu'internationale, à toute personne morale ou physique pour rechercher les éléments constitutifs des infractions de cybercriminalité, dont au moins l'un des éléments constitutifs a été commis sur le territoire camerounais ou dont l'un des auteurs ou complices se trouve dans\n\nledit territoire."
+  },
+  {
+   "id": 97295,
+   "law_id": 2271,
+   "number": "52.3",
+   "order": 50,
+   "kind": "article",
+   "title": null,
+   "content": "(2) Sous réserve des règles de réciprocité entre le Cameroun et les pays étrangers liés par un accord de coopération judiciaire, les commissions rogatoires sont exécutées conformément aux dispositions du Code de Procédure Pénale. Article 58.- (1) Les personnes physiques ou morales qui fournissent des prestations de cryptographie visant à assurer une fonction de confidentialité, sont tenues de remettre aux Officiers de Police Judiciaire ou aux agents habilités de l'Agence, sur leur demande, les conventions permettant le déchiffrement des données transformées au moyen des prestations qu'elles ont fournies. (2) Les Officiers de Police Judiciaire et agents habilités de l'Agence peuvent demander aux fournisseurs des prestations visés à l'alinéa 1 ci-dessus de mettre eux-mêmes en œuvre ces conventions, sauf si ceux-ci démontrent qu'ils ne sont pas en mesure de satisfaire à de telles réquisitions. Article 59.- (1) Lorsque les nécessités de l'enquête ou de l'instruction le justifient, l'audition ou l'interrogatoire d'une personne et/ou la confrontation entre plusieurs personnes, peuvent être effectuées en plusieurs points du territoire national se trouvant reliés par des moyens de communications électroniques garantissant la confidentialité de la transmission. Il est dressé, dans chacun des lieux, un Procès-verbal des opérations qui y ont été effectuées. Ces opérations peuvent faire l'objet d''enregistrement audiovisuel et/ou sonore. (2) Lorsque les circonstances l'exigent, l'interprétation peut être faite au cours d'une audition, d'un interrogatoire ou d'une confrontation par des moyens de communications électroniques. (3) Les dispositions du présent article sont également applicables pour l'exécution simultanée, sur un point du territoire national et sur un point situé à l'extérieur, des demandes d'entraide émanant des autorités judiciaires étrangères ou des actes d'entraide réalisés à l'étranger sur demande des autorités judiciaires camerounaises. (4) Les modalités d'application du présent article sont définies par\n\nvoie réglementaire."
+  },
+  {
+   "id": 97434,
+   "law_id": 2274,
+   "number": "67.1",
+   "order": 39,
+   "kind": "article",
+   "title": null,
+   "content": "En dehors des prestations prévues à l'article 66, alinéas (1) et (3), le salaire doit être payé ery ss t t t t t st dt are est nulle et de nul effet. Article 68.- (1) A l'exception des professions pour lesquelles des usages établis prévoient une périodicité de paiement différente et qui seront déterminées par arrêté du ministre chargé du Travail, pris après avis de la Commission nationale consultative du travail, le salaire doit être payé à mn s d rl e s s (t) n s ur demande, recevoir au bout de quinze (15) jours un acompte portant sur la moitié de la quotité mensuelle de leur rémunération de base, leur situation étant obligatoirement apurée lors du paiement immédiatement consécutif. (2) Les paiements mensuels doivent être effectués au plus tard huit (8) jours après la fin du mois de travail qui donne droit au salaire."
+  },
+  {
+   "id": 97435,
+   "law_id": 2274,
+   "number": "67.2",
+   "order": 40,
+   "kind": "article",
+   "title": null,
+   "content": "En dehors des prestations prévues à l'article 66, alinéas (1) et (3), le salaire doit être payé ery ss t t t t t st dt are est nulle et de nul effet. Article 68.- (1) A l'exception des professions pou\n(3) En cas de résiliation ou de rupture de contrat, le salaire et les indemnités doivent être payés dès la cessation de service. Toutefois, en cas de litige, l'employeur peut obtenir l'immobilisation provisoire entre ses mains de tout ou partie de la fraction saisissable des sommes dues par ordonnance du président du tribunal compétent. (4) Les travailleurs absents le jour de la paie peuvent retirer leurs salaires aux heures normales d'ouverture de la caisse et conformément au règlement intérieur de l'entreprise. (5) Le paiement du salaire doit être effectué les jours ouvrables seulement et au lieu du travail ou à pris ds n s ss si d ut - uu pour les travailleurs qui y sont normalement occupés. Article 69.- (1) Le paiement du salaire doit être constaté par une pièce dressée ou certifiée par l'employeur ou son représentant et émargée par chaque travailleur ou par deux témoins si ce dernier nen , d s s d s s o s s les même conditions que les pièces comptables et doivent être présentées à toute réquisition de l'inspection du travail. (2) Les employeurs sont tenus de délivrer aux travailleurs au moment du paiement, un bulletin de paie individuel dont la contexture est fixée par arrêté du ministre chargé du Travail, pris après avis de la Commission nationale consultative du travail. (3) N'est pas opposable au travailleur la mention \"pour solde de tout compte\" ou toute autre mention équivalente souscrite par lui, soit au cours de l'exécution, soit après la résiliation de son contrat de travail et par laquelle le travailleur renonce à tout ou partie des droits qu'il tient de son contrat de travail. (4) L'acceptation sans protestation, ni réserve, par le travailleur d'un bulletin de paye ne peut valoir renonciation de sa part au paiement de tout ou partie du salaire, des indemnités et accessoires du salaire qui lui sont dus en vertu des dispositions législatives, réglementaires, conventionnelles ou contractuelles. Cette acceptation ne suspend pas la prescription telle que définie à l'article 74, elle ne fait pas obstacle à la révision du compte de salaire du travailleur. Section II: Des privilèges et garanties de la créance de salaire Article 70.- (1) La créance de salaire bénéficie d'un privilège préférable à tous les autres privilèges Benu e t s ssse e e xs xi par les textes législatifs ou réglementaires. -r e e r r e l s ee s e (e intérêts prévus à l'article 39. Article 71.- Les textes législatifs particuliers accordant le bénéfice de l'action directe ou certains privilèges spéciaux en faveur de certaines catégories de travailleurs s'appliquent à la créance de salaire. Article 72.- En cas de liquidation judiciaire ou de faillite, les sommes précomptées par le Trésor public, postérieurement à la date de cessation des paiements, sur les mandats dus à un employeur, sont rapportées à la masse. Art e me,l n (t - ton judiciaire ou en faillite, continue à bénéficier de cette prestation, dans les limites de l'article 66."
+  },
+  {
+   "id": 97436,
+   "law_id": 2274,
+   "number": "67.3",
+   "order": 41,
+   "kind": "article",
+   "title": null,
+   "content": "En dehors des prestations prévues à l'article 66, alinéas (1) et (3), le salaire doit être payé ery ss t t t t t st dt are est nulle et de nul effet. Article 68.- (1) A l'exception des professions pou\n(2) L'assistance judiciaire lui est acquise d'office pour toute demande d'autorisation de saisie-arrêt qu'il jugerait opportun de présenter devant le tribunal compétent. Section III: De la prescription de l'action en paiement du salaire Article 74.- (1) L'action en paiement du salaire se prescrit par trois (3) ans. A l'égard de la prescription, les indemnités liées à la rupture de contrat de travail sont assimilées au salaire. (2) La prescription commence à courir à la date à laquelle les salaires sont exigibles. Elle cesse de cop r e t rd dl salaire devant l'inspecteur du travail du ressort, soit lorsqu'il y a compte arrêté, cédule ou obligation\n\nou citation en justice non périmée."
+  },
+  {
+   "id": 97475,
+   "law_id": 2274,
+   "number": "161.1",
+   "order": 80,
+   "kind": "article",
+   "title": null,
+   "content": "(1) L'arbitrage des différends collectifs du travail non réglés par la conciliation est assuré par un conseil d'arbitrage institué dans le ressort de chaque Cour d'appel et composé comme suit: Président:\n\n- un magistrat de la Cour d'appel du ressort;\n\nMembres:\n\n- a) un assesseur employeur;\n- b) un assesseur travailleur.\n\ncesss s d, sm s s sr mes près le tribunal de grande instance du ressort statuant en matière sociale. (2) Un greffier de la Cour d'appel assure le secrétariat. Article 162.- (1) Le conseil d'arbitrage ne peut statuer sur d'autres objets que ceux déterminés par le procès-verbal de non-conciliation ou ceux qui, résultant d'événements postérieurs à l'établissement dudit procès-verbal, sont la conséquence directe du différend en cours. (2) Il statue en droit sur les différends relatifs à l'interprétation et à l'exécution des lois, règlements, conventions collectives et accords d'établissement en vigueur."
+  },
+  {
+   "id": 97476,
+   "law_id": 2274,
+   "number": "161.2",
+   "order": 81,
+   "kind": "article",
+   "title": null,
+   "content": "(3) Il statue en équité sur les autres différends, notamment lorsque ceux-ci portent sur les salaires ou les conditions de travail, quand celles-ci ne sont pas fixées par les dispositions des lois, règlements, conventions collectives et accords d'établissement en vigueur, ainsi que sur les différends relatifs à la négociation et à la révision des clauses des conventions collectives. (4) Il a les plus larges pouvoirs pour s'informer de la situation économique des entreprises et de la situation des travailleurs intéressés par le conflit. Il peut procéder à toutes enquêtes auprès des entreprises et des syndicats et requérir les parties de po ne u o on o, t ou administratif susceptible de lui être utile pour l'accomplissement de sa mission. Il peut recourir aux offices d'experts et de toutes les personnes qualifiées susceptibles de l'éclairer. Art r e, d s e s e i (dt -t tiu ressort. (2) A l'expiration d'un délai de huit (8) jours francs à compter de la notification et si aucune des parties n'a manifesté son opposition, la sentence acquiert force exécutoire dans les conditions fixées à l'article 164 ci-dessous. Il en est de même si une opposition ayant été formée, elle a été levée avant l'expiration dudit délai. (3) L'opposition est formée, à peine de nullité absolue, par lettre recommandée avec accusé de réception à l'inspecteur du travail du ressort. Article 164.- (1) L'exécution de l'accord de conciliation et de la sentence arbitrale non frappée d'opposition est obligatoire. Dans leur silence sur la date d'effet, l'accord de conciliation et la sentence arbitrale produisent effet à dater du jour de la tentative de conciliation. (2) Les syndicats professionnels régulièrement constitués peuvent exercer toutes les actions qui naissent d'un accord de conciliation ou d'une sentence arbitrale, non frappés d'opposition. (3) Les accords de conciliation et les sentences arbitrales sont immédiatement affichés dans les locaux de l'inspection du travail et publiés au Journal Officiel. (4) Les minutes des accords de conciliation et des sentences arbitrales sont déposées au greffe du tribunal de grande instance du lieu du différend. (5) Les procédures de conciliation et d'arbitrage sont gratuites. Article 165.- Le lock-out ou la grève engagés en contravention des dispositions qui précèdent peuvent entraîner:\n\n- a) pour les employeurs:\n- o - le paiement aux travailleurs des journées de salaires perdues de ce fait;\n- o- pendant deux (2) ans au moins, l'inéligibilité aux fonctions de membre d'une chambre consulaire et l'interdiction de participer sous une façon quelconque à une entreprise de travaux ou à un marché de fournitures pour le compte de l'État, d'une collectivité publique locale ou d'un établissement public. L'inéligibilité est prononcée par le juge de droit commun à la requête du ministre chargé du Travail;\n- b) pour les travailleurs:\n- o - la rupture du contrat de travail pour faute lourde;\n\n\n- la condamnation à une amende de 20 000 à 100 000 francs."
+  }
+ ]
+}

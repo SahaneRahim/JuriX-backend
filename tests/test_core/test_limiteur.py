@@ -368,6 +368,44 @@ class TestConcurrence:
             pass
 
 
+class TestCopie:
+    """
+    La copie qui sert a PREVOIR (le plan du controle du blog, revue du tour 6) : elle
+    calcule les departs comme le vrai, et rien de ce qu'on y reserve ne touche au vrai.
+    """
+
+    def test_elle_prevoit_le_depart_que_le_vrai_donnera(self, horloge):
+        lim = limiteur(horloge, requetes_par_minute=30, jetons_par_minute=20_000)
+        lim.reserver(jetons=5_000).corriger(14_000)
+        lim.repousser(3.0)
+        horloge.t += 10.0
+        instant = [horloge.t]
+        copie = lim.copie(lambda: instant[0])
+
+        prevu = copie.reserver(jetons=8_000)
+        prevu.corriger(13_000)
+        instant[0] = prevu.depart + 30.0
+        suivant = copie.reserver(jetons=8_000)
+
+        assert prevu.depart == 1060.0 and suivant.depart == 1120.0
+        assert copie.jetons_par_minute == lim.jetons_par_minute == 20_000
+        # Rien n'a été réservé dans le vrai : il donne le même départ que la copie.
+        assert lim.reserver(jetons=8_000).depart == 1060.0
+
+    def test_vide_elle_a_les_limites_sans_l_etat(self, horloge):
+        lim = limiteur(horloge, requetes_par_minute=30, jetons_par_minute=20_000)
+        lim.reserver(jetons=20_000)
+        lim.repousser(30.0)
+        copie = lim.copie(lambda: horloge.t, vide=True)
+
+        assert copie.reserver(jetons=8_000).attente == 0.0
+        assert copie.reserver(jetons=20_000).attente == 60.0
+        assert lim.reserver(jetons=1).attente == 60.0
+
+    def test_sans_budget_de_jetons(self, horloge):
+        assert limiteur(horloge, requetes_par_minute=30).jetons_par_minute is None
+
+
 @pytest.mark.parametrize(
     "texte, secondes",
     [

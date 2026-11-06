@@ -259,8 +259,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
     # Lisible par le code du front (fetch), et pas seulement dans les outils
-    # de developpement : la duree serveur d'une recherche y devient mesurable.
-    expose_headers=["Server-Timing"],
+    # de developpement : la duree serveur d'une recherche y devient mesurable,
+    # et le delai d'un 429 ou d'un 503 (quota, saturation) peut s'annoncer.
+    expose_headers=["Server-Timing", "Retry-After"],
     max_age=CORS_MAX_AGE_S,
 )
 

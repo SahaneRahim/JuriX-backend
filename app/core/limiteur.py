@@ -227,6 +227,40 @@ class Limiteur:
         """Echeance posee par `repousser` (ou -inf)."""
         return self._pas_avant
 
+    @property
+    def jetons_par_minute(self) -> Optional[int]:
+        """Le budget de jetons par minute (None : sans budget de jetons)."""
+        return self._jetons_minute.plafond
+
+    def copie(self, horloge: Callable[[], float], *, vide: bool = False) -> "Limiteur":
+        """
+        Un double de ce limiteur, sur `horloge`, pour PREVOIR des departs : memes
+        limites et meme etat (fenetres, debit, echeance de `repousser`), ou aucun
+        etat (`vide`). On y reserve (`reserver`, puis `Reservation.corriger`) ce
+        qu'on prevoit d'envoyer : rien n'est reserve ici, rien n'attend.
+
+        POURQUOI (revue du tour 6 du blog). Le controle IA envoie ses appels l'un
+        apres l'autre dans un budget de 20 000 jetons par minute : il doit savoir
+        AVANT le premier si le dernier finira dans son delai, et donner a chaque
+        appel l'attente que ce plan lui laisse. Le calcul est celui de `reserver`
+        lui-meme, joue sur la copie : jamais un second calcul qui divergerait du
+        vrai. La copie n'a pas de places (`concurrence`) : elle ne dort jamais.
+        """
+        double = Limiteur(self.nom, horloge=horloge)
+        double.intervalle, double.tolerance = self.intervalle, self.tolerance
+        with self._verrou:
+            for nom in ("_jetons_minute", "_jetons_entree_minute", "_requetes_jour", "_jetons_jour"):
+                fenetre = getattr(self, nom)
+                copiee = _Fenetre(fenetre.duree, fenetre.plafond)
+                if not vide:
+                    copiee.entrees = deque([list(entree) for entree in fenetre.entrees])
+                setattr(double, nom, copiee)
+            if not vide:
+                double._tat, double._dernier_depart = self._tat, self._dernier_depart
+                double._pas_avant = self._pas_avant
+                double._raison_pas_avant = self._raison_pas_avant
+        return double
+
     def repousser(self, secondes: float, raison: str = "repousse") -> None:
         """Plus aucun depart avant `secondes` : le fournisseur a repondu 429."""
         with self._verrou:

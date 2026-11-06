@@ -1,0 +1,61 @@
+{
+ "provenance": "Extraits du jeu fixe du tour 4 (data/blog/tour4/jeu-controle.json du dépôt du backend, relevés dans jurix_dev en lecture seule le 04/11/2026), recopiés tels quels, OCR compris ; et deux passages copiés par ministral-14b dans sa réponse réelle sur ce jeu (data/blog/tour4/reponse-bail.json et reponse-travail.json).",
+ "extraits": {
+  "bail": {
+   "3": {
+    "intitule": "Code civil applicable au Cameroun, annoté de la jurisprudence de la Cour suprême",
+    "numero": "1743",
+    "suite": false,
+    "texte": "Si le bailleur vend la chose louée, l'acquéreur ne peut expulser le fermier ou le locataire qui a un bail authentique ou dont la date est certaine à moins qu'il ne se soit réservé ce droit par le contrat de bail."
+   },
+   "5": {
+    "intitule": "Acte uniforme révisé portant sur le droit commercial général du 15 décembre 2010",
+    "numero": "127",
+    "suite": false,
+    "texte": "Le bailleur peut s'opposer au droit au renouvellement du bail à durée déterminée ou indéterminée, sans avoir à régler d'indemnité d'éviction, dans les cas suivants :\n\n- 1°) s'il justifie d'un motif grave et légitime à l'encontre du preneur sortant.\n\nCe motif doit consister soit dans l'inexécution par le locataire d'une obligation substantielle du bail, soit encore dans la cessation de l'exploitation de l'activité ; Ce motif ne peut être invoqué que si les faits se sont poursuivis ou rnon m s n e s e ss d s oe notification par tout moyen permettant d'établir la réception effective par le destinataire, d'avoir à les faire cesser.\n\n- 2°) s'il envisage de démolir l'immeuble comprenant les lieux loués, et de le reconstruire. Le bailleur doit dans ce cas justifier de la nature et de la description des travaux projetés.\n\nLler r b rr r ie d'un droit de priorité pour se voir attribuer un nouveau bail dans l'immeuble reconstruit. Si les locaux reconstruits ont une destination différente de celle des locaux objet du bail, ou s'il n'est pas offert au preneur un bail dans les nouveaux locaux, le bailleur doit verser au preneur l'indemnité d'éviction prévue à l'article 126 ci-dessus."
+   },
+   "6": {
+    "intitule": "Acte uniforme révisé portant sur le droit commercial général du 15 décembre 2010",
+    "numero": "133",
+    "suite": false,
+    "texte": "Le preneur et le bailleur sont tenus chacun en ce qui le concerne au respect de chacune des clauses et conditions du bail sous peine de résiliation.\n\nLa demande en justice aux fins de résiliation du bail doit être précédée d'une mise en demeure d'avoir à respecter la ou les clauses ou conditions violées. La mise en demeure est faite par acte d'huissier ou notifiée par tout moyen permettant d'établir sa réception effective par le destinataire.\n\nA peine de nullité, la mise en demeure doit indiquer la ou les clauses et conditions du bail non respectées et informer le destinataire qu'à défaut de s'exécuter dans un délai d'un mois à compter de sa réception, la juridiction compétente statuant à bref délai est saisie aux fins de résiliation du bail et d'expulsion, le cas échéant, du preneur et de tout occupant de son chef.\n\nLe contrat de bail peut prévoir une clause résolutoire de plein droit. La juridiction compétente statuant à bref délai constate la résiliation du bail et prononce, le cas échéant, l'expulsion du preneur et de tout occupant de son chef, en cas d'inexécution d'une clause ou d'une condition du bail après la mise en demeure visée aux alinéas précédents.\n\nLa partie qui entend poursuivre la résiliation du bail doit notifier aux créanciers inscrits une copie de l'acte introductif d'instance. La décision prononçant ou constatant la résiliation du bail ne peut intervenir qu'après I si a ot ins s , oit,s\n\n\nChapitre 8 - Dispositions d'ordre public"
+   },
+   "7": {
+    "intitule": "Code civil applicable au Cameroun, annoté de la jurisprudence de la Cour suprême",
+    "numero": "1752",
+    "suite": false,
+    "texte": "Le locataire qui ne garnit pas la maison de meubles suffisants, peut être expulsé, à moins qu'il ne donne des sûretés capables de répondre du loyer."
+   }
+  },
+  "travail": {
+   "5": {
+    "intitule": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "numero": "39",
+    "suite": false,
+    "texte": "Article 39.- (1) Toute rupture abusive du contrat peut donner lieu à des dommages-intérêts. Sont no s s s s s du tras sn sa-s s no sae s nlecat (2) La juridiction compétente peut constater l'abus par une enquête sur les causes et les cirt t a t t n t t a t nte par la partie qui a rompu le contrat. (3) Dans tous cas de licenciement, il appartient à l'employeur d'apporter la preuve du caractère légitime du motif qu'il allègue. (4) Le montant des dommages-intérêts est fixé compte-tenu, en général, de tous les éléments qui peuvent justifier l'existence et déterminer l'étendue du préjudice causé et notamment:\n\n- a) lorsque la responsabilité incombe au travailleur, de son niveau de qualification et de l'emploi occupé;\n- b) lorsque la responsabilité incombe à l'employeur, de la nature des services engagés, de l'ancienneté des services, de l'âge du travailleur et des droits à quelque titre que ce soit.\n\nToutefois, le montant des dommages-intérêts, sans excéder un (1) mois de salaire par année d'ancienneté dans l'entreprise, ne peut être inférieur à trois (3) mois de salaire. (5) En cas de licenciement légitime d'un travailleur survenu sans observation par l'employeur des formalités prévues, le montant des dommages-intérêts ne peut excéder un (1) mois de salaire."
+   },
+   "9": {
+    "intitule": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "numero": "39",
+    "suite": true,
+    "texte": "(6) Le salaire à prendre en considération aux alinéas précédents est le salaire moyen mensuel brut des douze (12) derniers mois d'activité du travailleur. (7) Ces dommages-intérêts ne se confondent ni avec l'indemnité pour non-observation du préavis, ni avec l'indemnité de licenciement."
+   }
+  }
+ },
+ "passages_reels": {
+  "bail P12": {
+   "phrase": "La résiliation du bail pour un bail professionnel nécessite une mise en demeure préalable et une décision de justice, même si une clause résolutoire est prévue.",
+   "passage": "\"La demande en justice... doit être précédée d'une mise en demeure... La juridiction compétente... prononce... l'expulsion\" (Extrait 6).",
+   "extraits": [
+    6
+   ]
+  },
+  "travail P14": {
+   "phrase": "Les indemnités peuvent aller jusqu’à un mois de salaire par année d’ancienneté, sans pouvoir être inférieures à trois mois de salaire.",
+   "passage": "\"Le montant des dommages-intérêts... ne peut être inférieur à trois (3) mois de salaire... sans excéder un (1) mois de salaire par année d'ancienneté\" (Art. 39(4)).",
+   "extraits": [
+    5
+   ]
+  }
+ }
+}

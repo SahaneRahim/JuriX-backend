@@ -68,6 +68,34 @@ class Settings(BaseSettings):
     # Jetons de la suite demandee quand une reponse est coupee (une seule).
     MISTRAL_JETONS_SUITE: int = 2048
 
+    # ---- Blog : le modele du CONTROLE IA (controle_du_billet.py) ----
+    # POURQUOI UN MODELE A PART. Decision du proprietaire du 04/11/2026 : « un
+    # modele plus fort » pour le controle SEULEMENT, s'il attrape l'expulsion
+    # sans decision de justice et la charge de la preuve inversee. Mesure du
+    # meme jour sur le jeu fixe (data/blog/tour5-modeles/large4-low.log) :
+    # mistral-large-4 attrape les 8 phrases fausses (dont les 2 de la preuve
+    # inversee jugees « contredite », donc bloquantes), sans fausse alerte sur
+    # 18 phrases justes ; ministral-14b, 4 sur 8 et aucune « contredite ». La
+    # generation et le chat gardent MISTRAL_MODEL. Vide : MISTRAL_MODEL.
+    # mistral-medium et mistral-small sont fermes a la cle gratuite (0 requete
+    # par minute) ; mistral-large-latest est refuse (403).
+    BLOG_CONTROLE_MODELE: str = "mistral-large-4"
+    # Son effort de raisonnement (« reasoning_effort »). POURQUOI « low » :
+    # c'est l'effort MESURE (8 sur 8, 78,7 s pour les 23 phrases du bail) ;
+    # « none » est refuse par mistral-large-4, qui raisonne toujours (HTTP 400,
+    # code 3051), d'ou une valeur verifiee des le demarrage.
+    BLOG_CONTROLE_REFLEXION: Literal["low", "medium", "high"] = "low"
+    # Jetons par minute que la cle permet a ce modele. POURQUOI 20 000 : c'est
+    # la limite de mistral-large-4 au palier gratuit (en-tete
+    # x-ratelimit-limit-tokens-minute, sonde du 04/11), contre 937 500 pour
+    # ministral-14b ; un controle d'article, en UN appel (tour 7), en coute
+    # 13 600 a 15 600 (mesures, reflexion comprise ; en deux lots, l'essai du
+    # tour 6 en a paye 25 000). Le client reserve ce budget avant chaque appel,
+    # et un seul controle part a la fois. 0 : pas de budget local (seuls les
+    # 429 du fournisseur le font alors respecter, et le controle se juge en
+    # lots de 20 phrases).
+    BLOG_CONTROLE_JETONS_PAR_MINUTE: int = Field(default=20_000, ge=0)
+
     # Groq (LPU pour Routage / Système 1 ultra-rapide < 100 ms)
     GROQ_API_KEY: str = ""
     # Modele du classement d'intention (chaque message du chat).

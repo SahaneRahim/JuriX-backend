@@ -1,0 +1,242 @@
+{
+ "provenance": "Article RÉEL généré le 04/11/2026 par la vraie chaîne (essai du tour 4, data/blog/e2e-tour4/generation-travail.json du dépôt du backend) : les champs que le contrôle IA lit, recopiés tels quels (22 phrases, lots 11 + 11, 10 052 caractères d'extraits). Et les sources de l'article réel du bail (generation-bail.json), que la revue du tour 6 ajoutait à la suite pour porter les extraits à 18 000-24 000 caractères, comme un article du générateur peut en avoir (24 000 au plus).",
+ "travail": {
+  "title": "Licenciement abusif au Cameroun : quelles indemnités pour le salarié ?",
+  "context": "Un salarié au Cameroun se voit notifier un licenciement par son employeur. Il suspecte que cette décision est abusive, c'est-à-dire qu'elle ne repose sur aucun motif valable ou légitime. Il souhaite savoir quelles indemnités lui sont dues dans ce cas précis, conformément à la loi camerounaise.",
+  "summary": "En cas de licenciement abusif au Cameroun, le salarié peut prétendre à des indemnités spécifiques, notamment des dommages-intérêts, une indemnité de préavis non respecté et, sous conditions, une indemnité de licenciement. Ces indemnités sont encadrées par le Code du travail et leur montant dépend de critères comme l’ancienneté, le salaire et la gravité du manquement de l’employeur. Ce dernier doit prouver la légitimité de son motif pour éviter ces compensations.",
+  "key_points": [
+   "Un licenciement sans préavis ou sans respect du délai légal oblige l’employeur à verser au salarié une indemnité compensant le salaire qu’il aurait perçu pendant ce délai.",
+   "En cas de rupture abusive du contrat (hors faute lourde), le salarié ayant au moins deux ans d’ancienneté a droit à une indemnité de licenciement distincte, calculée selon son ancienneté et fixée par arrêté ministériel.",
+   "Les dommages-intérêts pour licenciement abusif sont obligatoires et leur montant varie entre trois mois et un mois de salaire par année d’ancienneté, selon la gravité du préjudice subi par le salarié.",
+   "L’employeur doit prouver la légitimité de son motif de licenciement devant une juridiction compétente, à défaut de quoi le salarié peut réclamer ces indemnités.",
+   "Le salaire de référence pour calculer les indemnités est le salaire moyen brut des douze derniers mois d’activité du salarié."
+  ],
+  "citizen_impact": "Si un salarié estime que son licenciement est abusif, il peut saisir la juridiction compétente pour faire constater l’abus et obtenir les indemnités prévues par la loi. Pour cela, il doit prouver le préjudice subi et l’employeur devra justifier la légitimité de sa décision. Les indemnités incluent le salaire non perçu pendant le préavis non respecté, une indemnité de licenciement (si ancienneté suffisante) et des dommages-intérêts, dont le montant dépend de son ancienneté et de son salaire moyen. Il est conseillé de consulter un avocat ou un conseiller en droit du travail pour engager cette démarche.",
+  "citations": [
+   {
+    "url": "/laws/2274?article=36",
+    "suite": false,
+    "title": "Un licenciement sans préavis ou sans respect du délai légal oblige l’employeur à verser au salarié une indemnité compensant le salaire qu’il aurait perçu pendant ce délai non respecté.",
+    "law_id": 2274,
+    "excerpt": "Article 36.- (1) Toute rupture de contrat à durée indéterminée, sans préavis ou sans que le délai de préavis ait été intégralement observé, emporte obligation pour la partie responsable de verser à lu se e e o n u ne out,l nature dont aurait bénéficié le travailleur durant le délai de préavis qui […]",
+    "verifie": true,
+    "reference": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "article_id": 97420,
+    "law_reference": "LOI-1992-007",
+    "article_number": "36"
+   },
+   {
+    "url": "/laws/2274?article=37",
+    "suite": false,
+    "title": "Un salarié ayant au moins deux ans d’ancienneté dans l’entreprise a droit à une indemnité de licenciement distincte de celle du préavis, calculée en fonction de son ancienneté, sous réserve des modalités fixées par arrêté ministériel.",
+    "law_id": 2274,
+    "excerpt": "Article 37.- (1) En cas de rupture de contrat à durée indéterminée du fait de l'employeur, hormis le cas de faute lourde, le travailleur ayant accompli dans l'entreprise une durée de service continue au moins égale à deux (2) ans, a droit à une indemnité de licenciement distincte de celle du […]",
+    "verifie": true,
+    "reference": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "article_id": 97420,
+    "law_reference": "LOI-1992-007",
+    "article_number": "37"
+   },
+   {
+    "url": "/laws/2274?article=39",
+    "suite": false,
+    "title": "En cas de licenciement abusif, le salarié peut obtenir des dommages-intérêts dont le montant minimum est de trois mois de salaire et dont le plafond est d’un mois de salaire par année d’ancienneté, calculé sur la base du salaire moyen brut des douze derniers mois.",
+    "law_id": 2274,
+    "excerpt": "Article 39.- (1) Toute rupture abusive du contrat peut donner lieu à des dommages-intérêts. Sont no s s s s s du tras sn sa-s s no sae s nlecat (2) La juridiction compétente peut constater l'abus par une enquête sur les causes et les cirt t a t t n t t a t nte par la partie qui a rompu le contrat. […]",
+    "verifie": true,
+    "reference": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "article_id": 97420,
+    "law_reference": "LOI-1992-007",
+    "article_number": "39"
+   },
+   {
+    "url": "/laws/2274?article=39",
+    "suite": true,
+    "title": "Le salaire pris en compte pour calculer les indemnités est le salaire moyen mensuel brut des douze derniers mois d’activité du salarié.",
+    "law_id": 2274,
+    "excerpt": "[…] (6) Le salaire à prendre en considération aux alinéas précédents est le salaire moyen mensuel brut des douze (12) derniers mois d'activité du travailleur. (7) Ces dommages-intérêts ne se confondent ni avec l'indemnité pour non-observation du préavis, ni avec l'indemnité de licenciement.",
+    "verifie": true,
+    "reference": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "article_id": 97421,
+    "law_reference": "LOI-1992-007",
+    "article_number": "39"
+   }
+  ],
+  "suggested_question": "Mon employeur m’a licencié sans motif valable selon moi. Quelles preuves dois-je rassembler pour prouver le caractère abusif de ce licenciement et comment puis-je réclamer les indemnités qui me sont dues ?",
+  "sources": [
+   {
+    "n": 1,
+    "law_id": 2274,
+    "law_title": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "article_number": "35",
+    "article_id": 97420,
+    "suite": false,
+    "extrait": "(1) Pendant la durée du préavis, l'employeur et le travailleur sont tenus au respect de toutes les obligations réciproques qui leur incombent. (2) En vue de la recherche d'un autre emploi, le travailleur bénéficie pendant la durée du préavis d'un jour de liberté par semaine pris, à son choix, globalement ou heure par heure et payé à plein salaire. (3) La partie à l'égard de laquelle ces obligations ne seraient pas respectées ne pourra se voir imposer un délai de préavis, sans préjudice des dommages-intérêts qu'elle jugerait bon de demander."
+   },
+   {
+    "n": 2,
+    "law_id": 2274,
+    "law_title": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "article_number": "36",
+    "article_id": 97420,
+    "suite": false,
+    "extrait": "Article 36.- (1) Toute rupture de contrat à durée indéterminée, sans préavis ou sans que le délai de préavis ait été intégralement observé, emporte obligation pour la partie responsable de verser à lu se e e o n u ne out,l nature dont aurait bénéficié le travailleur durant le délai de préavis qui n'aura pas été effectivement respecté. (2) Cependant, la rupture de contrat peut intervenir sans préavis en cas de faute lourde, sous réserve de l'appréciation de la juridiction compétente en ce qui concerne la gravité de la faute."
+   },
+   {
+    "n": 3,
+    "law_id": 2274,
+    "law_title": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "article_number": "37",
+    "article_id": 97420,
+    "suite": false,
+    "extrait": "Article 37.- (1) En cas de rupture de contrat à durée indéterminée du fait de l'employeur, hormis le cas de faute lourde, le travailleur ayant accompli dans l'entreprise une durée de service continue au moins égale à deux (2) ans, a droit à une indemnité de licenciement distincte de celle du préavis dont la détermination tient compte de l'ancienneté. (2) Un arrêté du ministre chargé du Travail, pris après avis de la Commission nationale consultative du travail, fixe les modalités d'attribution et de calcul de l'indemnité de licenciement."
+   },
+   {
+    "n": 4,
+    "law_id": 2274,
+    "law_title": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "article_number": "38",
+    "article_id": 97420,
+    "suite": false,
+    "extrait": "Article 38.- Le contrat de travail à durée déterminée ne peut cesser avant terme qu'en cas de faute lourde, de force majeure ou d'accord des parties constaté par écrit."
+   },
+   {
+    "n": 5,
+    "law_id": 2274,
+    "law_title": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "article_number": "39",
+    "article_id": 97420,
+    "suite": false,
+    "extrait": "Article 39.- (1) Toute rupture abusive du contrat peut donner lieu à des dommages-intérêts. Sont no s s s s s du tras sn sa-s s no sae s nlecat (2) La juridiction compétente peut constater l'abus par une enquête sur les causes et les cirt t a t t n t t a t nte par la partie qui a rompu le contrat. (3) Dans tous cas de licenciement, il appartient à l'employeur d'apporter la preuve du caractère légitime du motif qu'il allègue. (4) Le montant des dommages-intérêts est fixé compte-tenu, en général, de tous les éléments qui peuvent justifier l'existence et déterminer l'étendue du préjudice causé et notamment:\n\n- a) lorsque la responsabilité incombe au travailleur, de son niveau de qualification et de l'emploi occupé;\n- b) lorsque la responsabilité incombe à l'employeur, de la nature des services engagés, de l'ancienneté des services, de l'âge du travailleur et des droits à quelque titre que ce soit.\n\nToutefois, le montant des dommages-intérêts, sans excéder un (1) mois de salaire par année d'ancienneté dans l'entreprise, ne peut être inférieur à trois (3) mois de salaire. (5) En cas de licenciement légitime d'un travailleur survenu sans observation par l'employeur des formalités prévues, le montant des dommages-intérêts ne peut excéder un (1) mois de salaire."
+   },
+   {
+    "n": 6,
+    "law_id": 2279,
+    "law_title": "Décret N°94/199 du 07 octobre 1994 portant Statut Général de la Fonction Publique de l'État, modifié et complété par le décret n°2000/287 du 12 octobre 2000",
+    "article_number": "120",
+    "article_id": 90163,
+    "suite": false,
+    "extrait": "(1) Outre les éventuels droits à pension, le fonctionnaire licencié perçoit une indemnité égale :\n\n- a) à douze (12) fois son traitement mensuel indiciaire en cas d'inaptitude physique ;\n- b) à trois (3) fois son traitement mensuel indiciaire en cas d'insuffisance professionnelle ;\n- c) à vingt quatre (24) fois son traitement mensuel indiciaire en cas de suppression de poste de travail\n(2) Ces indemnités sont versées en une seule fois au moment du licenciement.\n\n(3) L'acte prononçant le licenciement d'un fonctionnaire liquide la totalité de ses droits, y compris éventuellement sa pension de retraite."
+   },
+   {
+    "n": 7,
+    "law_id": 2285,
+    "law_title": "Code civil applicable au Cameroun, annoté de la jurisprudence de la Cour suprême",
+    "article_number": "107",
+    "article_id": 95171,
+    "suite": false,
+    "extrait": "Hormis pour les contrats conclus en considération de la personne du débiteur et ceux prévus expressément par la loi de chaque Etat-partie, la cessation des paiements déclarée par décision de justice n'est pas une cause de résolution et toute clause de résolution pour un tel motif est réputée non écrite. Aut se o t e e e o e e ts -te te cours à charge de fournir la prestation promise à l'autre partie. Si le contrat est synallagmatique et si le syndic n'a pas fourni la prestation promise, l'autre partie peut soulever Ilx e e s oe e e sns s i oe ose. Le syndic peut être mis en demeure, par lettre recommandée ou par tout moyen laissant trace écrite, d'exercer son option ou de fournir la prestation promise, dans un délai de trente jours, sous peine de résolution, de plein droit, du contrat."
+   },
+   {
+    "n": 8,
+    "law_id": 2285,
+    "law_title": "Code civil applicable au Cameroun, annoté de la jurisprudence de la Cour suprême",
+    "article_number": "109",
+    "article_id": 95171,
+    "suite": false,
+    "extrait": "Art. 109.- Faute par le syndic d'user de sa faculté d'option ou de fournir la prestation promise dans le délai imparti par la mise en demeure, son inexécution peut donner lieu, outre la résolution, à des dommages-intérêts dont le montant sera produit au passif au profit de l'autre partie. Loes n ous os o e us r e u les dommages-intérêts dus pour la résolution. Toutefois, la juridiction compétente saisie de son action en résolution contre le syndic, peut prononcer la compensation ou l'autoriser à différer la restitution des acomptes jusqu'à ce qu'il ait été statué sur les dommages-intérêts. A. t, e rt lor n mnn i syndic peut être autorisé à y procéder par le Juge-commissaire selon la procédure prévue par le présent art. et le suivant, nonobstant toute disposition contraire mais sans préjudice du droit au préavis et aux indemnités liées à la résiliation du contrat de travail. Avant la saisine du Juge-commissaire, le syndic établit l'ordre des licenciements conformément aux dispositions du\n\ndroit du travail applicable.\n\n\nSont proposés, en premier lieu, les licenciements des travailleurs présentant les moindres aptitudes professionnelles ponrs s s os es lis es ss s e e ns s ns l'ancienneté étant calculée selon les dispositions du droit du travail applicable.\n\nEn vue de recueillir leur avis et leurs suggestions, le syndic informe, par écrit, les délégués du personnel des mesures qu'il a l'intention de prendre en leur fournissant la liste des travailleurs dont il envisage le licenciement et en précisant les critères qu'il a retenus. Les délégués du personnel doivent répondre, par écrit, sous huit jours."
+   },
+   {
+    "n": 9,
+    "law_id": 2274,
+    "law_title": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "article_number": "39",
+    "article_id": 97421,
+    "suite": true,
+    "extrait": "(6) Le salaire à prendre en considération aux alinéas précédents est le salaire moyen mensuel brut des douze (12) derniers mois d'activité du travailleur. (7) Ces dommages-intérêts ne se confondent ni avec l'indemnité pour non-observation du préavis, ni avec l'indemnité de licenciement."
+   },
+   {
+    "n": 10,
+    "law_id": 2274,
+    "law_title": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "article_number": "40",
+    "article_id": 97421,
+    "suite": false,
+    "extrait": "Article 40.- (1) Les dispositions de l'article 34 alinéa (1) ci-dessus ne s'appliquent pas en cas de licenciement pour motif économique. Jmu un ut nt t ut nt t t ut pour un ou plusieurs motifs non inhérents à la personne du travailleur et résultant d'une suppression ou transformation d'emploi ou d'une modification du contrat de travail, consécutive à des difficultés économiques, à des mutations technologiques ou à des restructurations internes. (3) Pour tenter d'éviter un licenciement pour motif économique, l'employeur qui envisage un tel licenciement doit réunir les délégués du personnel s'il en existe et rechercher avec eux en présence de l'inspecteur du travail du ressort, toutes les autres possibilités telles que: la réduction des heures de travail, le travail par roulement, le travail à temps partiel, le chômage technique, le réaménagement des primes, indemnités et avantages de toute nature, voire la réduction des salaires. c n s s s (dt s s sc s s (dre est intervenu, un procès-verbal signé par les parties et par l'inspecteur du travail précise les mesures retenues et la durée de leur validité. r , s e r ls n e e e (it est licencié avec paiement du préavis et s'il remplit les conditions d'attribution, de l'indemnité de licenciement. (6)\n\n- a) Lorsque les négociations prévues ci-dessus n'ont pas pu aboutir à un accord ou si, malgré lns , s ,s s s s s sklir l'ordre des licenciements en tenant compte des aptitudes professionnelles, de l'ancienneté dans l'entreprise et des charges familiales des travailleurs. Dans tous les cas, l'ordre des licenciements doit tenir compte en priorité des aptitudes professionnelles.\n- b) En vue de recueillir leurs avis et suggestions, l'employeur doit communiquer par écrit aux délégués du personnel, la liste des travailleurs qu'il se propose de licencier en précisant les critères de choix retenus.\n- c) Les délégués du personnel doivent faire parvenir leur réponse écrite dans un délai de huit (8) jours francs maximum.\n4. soo os d s s d e , n de s sans délai au ministre chargé du Travail pour arbitrage.\n\nLre ns e e s n d p n rrre autorisation de l'inspecteur du travail du ressort. (8) En cas de contestation sur le motif ou l'ordre des licenciements, la charge de la preuve incombe à l'employeur. De e i d, se , e e dt b ee (2) ans dans la même entreprise.\n(10) Un arrêté du ministre chargé du Travail, pris après avis de la Commission nationale consultative du travail, fixe les modalités d'application du présent article.\n\nArtt,l ( , ss sss , d -t eu est tenu d'en aviser dans les quinze (15) jours l'autorité qui a visé le contrat."
+   },
+   {
+    "n": 11,
+    "law_id": 2274,
+    "law_title": "Loi N°92/007 du 14 août 1992 portant Code du travail",
+    "article_number": "30",
+    "article_id": 97416,
+    "suite": false,
+    "extrait": "(1) Il est interdit à l'employeur d'infliger des amendes.\n\n(2) La seule sanction fondée sur le pouvoir disciplinaire de l'employeur qui puisse entraîner la privation de salaire est celle de la mise à pied qui entraîne l'absence de prestation de travail.\n\n(3) La mise à pied est nulle et de nul effet si les conditions suivantes ne sont pas simultanément remplies:\n\n- a) être d'une durée maximale de huit (8) jours ouvrables, déterminée au moment où elle est prononcée;\n- b) être notifiée au travailleur par écrit avec indication des motifs pour lesquels elle a été infligée;\n- c) être communiquée dans les quarante-huit (48) heures à l'inspecteur du travail du ressort.\n\nSrl lt ut d nn (tre duquel elle a été prononcée perçoit une indemnité compensatrice correspondant au salaire perdu et, éventuellement des dommages-intérêts, s'il apporte la preuve qu'il a subi de ce fait un préjudice distinct de celui de la perte du salaire."
+   },
+   {
+    "n": 12,
+    "law_id": 2285,
+    "law_title": "Code civil applicable au Cameroun, annoté de la jurisprudence de la Cour suprême",
+    "article_number": "1746",
+    "article_id": 94803,
+    "suite": false,
+    "extrait": "S'il s'agit de biens ruraux, l'indemnité que le bailleur doit payer au fermier, est du tiers du prix du bail pour tout le temps qui reste à courir."
+   }
+  ]
+ },
+ "sources_du_bail": [
+  {
+   "n": 1,
+   "law_id": 2285,
+   "law_title": "Code civil applicable au Cameroun, annoté de la jurisprudence de la Cour suprême",
+   "article_number": "1657",
+   "article_id": 94816,
+   "suite": false,
+   "extrait": "- Le bail des meubles fournis pour garnir une maison entière, un corps de logis entier, une boutique, ou tous autres appartements, est censé fait pour la durée ordinaire des baux de maison, corps de logis, boutiques ou autres appartements, selon l'usage des lieux ."
+  },
+  {
+   "n": 2,
+   "law_id": 2277,
+   "law_title": "Acte uniforme révisé portant sur le droit commercial général du 15 décembre 2010",
+   "article_number": "128",
+   "article_id": 89446,
+   "suite": false,
+   "extrait": "Le bailleur peut, sans versement d'indemnité d'éviction, refuser le renouvellement du bail portant sur les locaux d'habitation accessoires des locaux principaux, pour les habiter lui-même ou les faire habiter par son conjoint ou ses ascendants, ses descendants ou ceux de son conjoint.\n\nCette reprise ne peut être exercée lorsque le preneur établit que la privation de jouissance des locaux d'habitation accessoires apporte un trouble grave à la jouissance du bail dans les locaux principaux, ou lorsque les locaux principaux et les locaux d'habitation forment un tout indivisible."
+  },
+  {
+   "n": 3,
+   "law_id": 2285,
+   "law_title": "Code civil applicable au Cameroun, annoté de la jurisprudence de la Cour suprême",
+   "article_number": "1743",
+   "article_id": 94800,
+   "suite": false,
+   "extrait": "Si le bailleur vend la chose louée, l'acquéreur ne peut expulser le fermier ou le locataire qui a un bail authentique ou dont la date est certaine à moins qu'il ne se soit réservé ce droit par le contrat de bail."
+  },
+  {
+   "n": 4,
+   "law_id": 2285,
+   "law_title": "Code civil applicable au Cameroun, annoté de la jurisprudence de la Cour suprême",
+   "article_number": "1751",
+   "article_id": 94808,
+   "suite": false,
+   "extrait": "L'acquéreur à pacte de rachat ne peut user de la faculté d'expulser le preneur, jusqu'à ce que, par l'expiration du délai fixé pour le réméré, il devienne propriétaire incommutable."
+  },
+  {
+   "n": 5,
+   "law_id": 2277,
+   "law_title": "Acte uniforme révisé portant sur le droit commercial général du 15 décembre 2010",
+   "article_number": "127",
+   "article_id": 89445,
+   "suite": false,
+   "extrait": "Le bailleur peut s'opposer au droit au renouvellement du bail à durée déterminée ou indéterminée, sans avoir à régler d'indemnité d'éviction, dans les cas suivants :\n\n- 1°) s'il justifie d'un motif grave et légitime à l'encontre du preneur sortant.\n\nCe motif doit consister soit dans l'inexécution par le locataire d'une obligation substantielle du bail, soit encore dans la cessation de l'exploitation de l'activité ; Ce motif ne peut être invoqué que si les faits se sont poursuivis ou rnon m s n e s e ss d s oe notification par tout moyen permettant d'établir la réception effective par le destinataire, d'avoir à les faire cesser.\n\n- 2°) s'il envisage de démolir l'immeuble comprenant les lieux loués, et de le reconstruire. Le bailleur doit dans ce cas justifier de la nature et de la description des travaux projetés.\n\nLler r b rr r ie d'un droit de priorité pour se voir attribuer un nouveau bail dans l'immeuble reconstruit. Si les locaux reconstruits ont une destination différente de celle des locaux objet du bail, ou s'il n'est pas offert au preneur un bail dans les nouveaux locaux, le bailleur doit verser au preneur l'indemnité d'éviction prévue à l'article 126 ci-dessus."
+  },
+  {
+   "n": 6,
+   "law_id": 2277,
+   "law_title": "Acte uniforme révisé portant sur le droit commercial général du 15 décembre 2010",
+   "article_number": "133",
+   "article_id": 89451,
+   "suite": false,
+   "extrait": "Le preneur et le bailleur sont tenus chacun en ce qui le concerne au respect de chacune des clauses et conditions du bail sous peine de résiliation.\n\nLa demande en justice aux fins de résiliation du bail doit être précédée d'une mise en demeure d'avoir à respecter la ou les clauses ou conditions violées. La mise en demeure est faite par acte d'huissier ou notifiée par tout moyen permettant d'établir sa réception effective par le destinataire.\n\nA peine de nullité, la mise en demeure doit indiquer la ou les clauses et conditions du bail non respectées et informer le destinataire qu'à défaut de s'exécuter dans un délai d'un mois à compter de sa réception, la juridiction compétente statuant à bref délai est saisie aux fins de résiliation du bail et d'expulsion, le cas échéant, du preneur et de tout occupant de son chef.\n\nLe contrat de bail peut prévoir une clause résolutoire de plein droit. La juridiction compétente statuant à bref délai constate la résiliation du bail et prononce, le cas échéant, l'expulsion du preneur et de tout occupant de son chef, en cas d'inexécution d'une clause ou d'une condition du bail après la mise en demeure visée aux alinéas précédents.\n\nLa partie qui entend poursuivre la résiliation du bail doit notifier aux créanciers inscrits une copie de l'acte introductif d'instance. La décision prononçant ou constatant la résiliation du bail ne peut intervenir qu'après I si a ot ins s , oit,s\n\n\nChapitre 8 - Dispositions d'ordre public"
+  },
+  {
+   "n": 7,
+   "law_id": 2285,
+   "law_title": "Code civil applicable au Cameroun, annoté de la jurisprudence de la Cour suprême",
+   "article_number": "1752",
+   "article_id": 94811,
+   "suite": false,
+   "extrait": "Le locataire qui ne garnit pas la maison de meubles suffisants, peut être expulsé, à moins qu'il ne donne des sûretés capables de répondre du loyer."
+  }
+ ]
+}

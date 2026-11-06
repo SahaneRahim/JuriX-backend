@@ -27,10 +27,41 @@ CE QUI COUPAIT LES REPONSES, ET CE QUI LE REMPLACE :
   le budget demande.
 - Chaque appel journalise modele, fin, jetons et duree : la prochaine coupure
   se lira dans les journaux.
+
+TOUR 6 DU BLOG : LE MODELE DU CONTROLE IA, mistral-large-4 (decision du
+proprietaire du 04/11/2026, apres mesure : data/blog/tour5-modeles).
+- Il EXIGE ce que ce client n'envoyait pas. Deux refus HTTP 400, avant toute
+  generation : « reasoning_effort none is not supported for this model,
+  supported values: high, low, medium » (code 3051) et « top_p must be 1 when
+  using greedy sampling » (code 3054 : temperature 0 sans top_p). Ces champs
+  ne partent QUE pour les modeles de MODELES_A_RAISONNEMENT
+  (exigences_du_modele) : les requetes du chat et de la generation
+  (ministral-14b) ne changent pas d'un octet.
+- Sa reponse vient EN MORCEAUX : [{"type": "thinking", "thinking": [...]},
+  {"type": "text", "text": "{...}"}]. Le client passait la liste telle
+  quelle, et le controle n'y lisait rien (502). Seuls les morceaux « text »
+  sont la reponse (texte_des_morceaux) ; un contenu en texte simple, celui de
+  ministral-14b, est rendu tel quel.
+- `rendre_le_modele` : generate rend aussi le modele qui a VRAIMENT repondu
+  (le champ « model » de la reponse), que le controle note dans controle_ia.
+- 20 000 jetons par minute, contre 937 500 pour ministral-14b : son limiteur
+  porte ce budget (limites_du_modele). Chaque appel y reserve ses jetons
+  d'entree estimes, remplaces par l'usage reel a la reponse ; l'etat suit
+  l'en-tete x-ratelimit-remaining-tokens-minute (_compter). Sans effet sur un
+  limiteur sans budget de jetons : celui du chat ne change pas.
+- Le client du controle n'a PAS de modele de secours (`avec_secours`) : un
+  controle juge par ministral-8b sous le nom de mistral-large-4 n'en serait
+  pas un. Un 429 qui dure devient MistralOverloadedError, avec le delai
+  connu (`retry_after`) que la route rend en Retry-After.
+- Revue du tour 6 : `attente_max` (generate) remplace, pour UN appel, les
+  MISTRAL_ATTENTE_MAX_S du chat. Le controle y passe la marge de son plan : il
+  attend que le controle d'avant sorte de la minute, quand le delai de la
+  route le permet (_budget_d_attente). Sans `attente_max`, rien ne change.
 """
 
 import json
 import logging
+import math
 import random
 import re
 import threading
@@ -78,6 +109,30 @@ _MOTS_CLES_RETIRES = frozenset({"minItems", "maxItems"})
 
 SANTE_CACHE_S = 60.0
 
+# ==================== MODELES A RAISONNEMENT (TOUR 6) ====================
+
+# Les efforts que mistral-large-4 accepte (refus du 04/11, code 3051).
+EFFORTS_DE_RAISONNEMENT = ("low", "medium", "high")
+# POURQUOI « low » par defaut : c'est l'effort mesure (8 phrases fausses sur
+# 8) et le plus bas accepte ; « none », ou le « minimal » de Gemini, que
+# certains appelants passent, deviennent donc « low ».
+EFFORT_PAR_DEFAUT = "low"
+# Les modeles qui raisonnent TOUJOURS et refusent la requete sans ces champs.
+# POURQUOI une liste fermee : ce sont les seuls refus CONSTATES (sondes et
+# mesures du 04/11, data/blog/tour5-modeles) ; un autre modele ne recoit rien
+# de plus. mistral-large-4-0 est l'autre identifiant du meme modele dans
+# GET /v1/models.
+MODELES_A_RAISONNEMENT = frozenset({"mistral-large-4", "mistral-large-4-0"})
+# Les champs qu'exige un modele a raisonnement : retires quand une requete
+# passe a un autre modele (le secours).
+_CHAMPS_EXIGES = ("reasoning_effort", "top_p")
+
+# POURQUOI 3,5 caracteres par jeton : MESURE sur mistral-large-4, 3,97
+# (bail : 16 045 caracteres de systeme et de prompt, 4 046 jetons d'entree)
+# et 4,0 (travail : 22 324 pour 5 582). 3,5 surestime d'environ 13 % : la
+# reservation faite avant l'envoi ne passe pas sous le vrai.
+CARACTERES_PAR_JETON = 3.5
+
 
 class MistralServiceError(Exception):
     """Base exception for Mistral service errors."""
@@ -90,8 +145,17 @@ class MistralQuotaError(MistralServiceError):
 
 
 class MistralOverloadedError(MistralServiceError):
-    """Saturation passagere (429 de debit, 5xx, attente trop longue) : reessayer."""
-    pass
+    """
+    Saturation passagere (429 de debit, 5xx, attente trop longue) : reessayer.
+
+    `retry_after` : dans combien de secondes un nouvel essai a une chance,
+    quand on le sait (Retry-After du fournisseur, attente du limiteur) ; la
+    route du controle le rend en Retry-After. None sinon.
+    """
+
+    def __init__(self, *args: Any, retry_after: Optional[float] = None):
+        super().__init__(*args)
+        self.retry_after = retry_after
 
 
 # ==================== LIMITEURS (UN PAR MODELE) ====================
@@ -100,23 +164,123 @@ _LIMITEURS: Dict[str, Limiteur] = {}
 _VERROU_LIMITEURS = threading.Lock()
 
 
+def modele_du_controle() -> str:
+    """Le modele du controle IA du blog : BLOG_CONTROLE_MODELE, ou MISTRAL_MODEL s'il est vide."""
+    return (settings.BLOG_CONTROLE_MODELE or "").strip() or settings.MISTRAL_MODEL
+
+
+def limites_du_modele(modele: str) -> Dict[str, Any]:
+    """
+    Les limites du limiteur de `modele`.
+
+    Le modele du controle du blog, quand il n'est ni celui du chat ni le
+    secours, a les siennes (tour 6). POURQUOI : sa cle ne lui permet que
+    BLOG_CONTROLE_JETONS_PAR_MINUTE jetons par minute (20 000 pour
+    mistral-large-4), et un seul controle part a la fois ; une seule requete
+    a la fois, donc. Les limites des autres modeles ne changent pas.
+    """
+    par_seconde = (
+        settings.MISTRAL_REQUETES_PAR_SECONDE_SECOURS
+        if modele == settings.MISTRAL_MODEL_SECOURS
+        else settings.MISTRAL_REQUETES_PAR_SECONDE
+    )
+    limites: Dict[str, Any] = {
+        "requetes_par_minute": par_seconde * 60,
+        "concurrence": settings.MISTRAL_CONCURRENCE,
+    }
+    if modele == modele_du_controle() and modele not in (
+        settings.MISTRAL_MODEL, settings.MISTRAL_MODEL_SECOURS,
+    ):
+        limites.update(
+            jetons_par_minute=settings.BLOG_CONTROLE_JETONS_PAR_MINUTE or None, concurrence=1,
+        )
+    return limites
+
+
 def limiteur_mistral(modele: str) -> Limiteur:
     """Le limiteur du modele, partage par tout le processus."""
     with _VERROU_LIMITEURS:
         limiteur = _LIMITEURS.get(modele)
         if limiteur is None:
-            par_seconde = (
-                settings.MISTRAL_REQUETES_PAR_SECONDE_SECOURS
-                if modele == settings.MISTRAL_MODEL_SECOURS
-                else settings.MISTRAL_REQUETES_PAR_SECONDE
-            )
-            limiteur = Limiteur(
-                f"mistral:{modele}",
-                requetes_par_minute=par_seconde * 60,
-                concurrence=settings.MISTRAL_CONCURRENCE,
-            )
+            limiteur = Limiteur(f"mistral:{modele}", **limites_du_modele(modele))
             _LIMITEURS[modele] = limiteur
         return limiteur
+
+
+# ==================== CE QU'UN MODELE EXIGE, CE QU'IL REND ====================
+
+
+def exigences_du_modele(modele: str, temperature: Any, reflexion: Optional[str]) -> Dict[str, Any]:
+    """
+    Les champs que `modele` exige en plus du corps commun ; {} pour tout
+    modele hors de MODELES_A_RAISONNEMENT (le chat, la generation).
+
+    `reasoning_effort` : `reflexion` s'il est accepte, EFFORT_PAR_DEFAUT
+    sinon. `top_p` 1 a la temperature 0 : le seul top_p que le modele accepte
+    alors (code 3054) ; a une autre temperature, son defaut suffit.
+    """
+    if modele not in MODELES_A_RAISONNEMENT:
+        return {}
+    exigences: Dict[str, Any] = {
+        "reasoning_effort": reflexion if reflexion in EFFORTS_DE_RAISONNEMENT else EFFORT_PAR_DEFAUT,
+    }
+    if temperature == 0:
+        exigences["top_p"] = 1.0
+    return exigences
+
+
+def pour_le_modele(corps: Dict[str, Any], modele: str) -> Dict[str, Any]:
+    """
+    Le corps d'une requete, adresse a `modele` (le secours) : les champs
+    qu'exigeait le modele d'origine retires, ceux qu'exige `modele` poses.
+    Entre deux modeles sans exigence, seul « model » change.
+    """
+    nouveau = {cle: valeur for cle, valeur in corps.items() if cle not in _CHAMPS_EXIGES}
+    nouveau["model"] = modele
+    nouveau.update(exigences_du_modele(modele, corps.get("temperature"), corps.get("reasoning_effort")))
+    return nouveau
+
+
+def texte_des_morceaux(contenu: Any) -> str:
+    """
+    Le texte d'un contenu de message : la chaine elle-meme, ou, pour un
+    contenu en morceaux (modele a raisonnement), les seuls morceaux « text »
+    mis bout a bout. La reflexion (« thinking ») n'est pas la reponse : ses
+    propres morceaux « text », imbriques, ne sont jamais lus.
+    """
+    if contenu is None:
+        return ""
+    if isinstance(contenu, str):
+        return contenu
+    textes: List[str] = []
+    for morceau in contenu if isinstance(contenu, list) else [contenu]:
+        if isinstance(morceau, str):
+            textes.append(morceau)
+        elif isinstance(morceau, dict) and morceau.get("type") == "text":
+            texte = morceau.get("text")
+            textes.append(texte if isinstance(texte, str) else "")
+    return "".join(textes)
+
+
+def jetons_d_entree_estimes(corps: Dict[str, Any]) -> int:
+    """Les jetons d'entree d'une requete, estimes sur les caracteres de ses messages."""
+    caracteres = sum(
+        len(texte_des_morceaux(message.get("content")))
+        for message in corps.get("messages") or []
+        if isinstance(message, dict)
+    )
+    return math.ceil(caracteres / CARACTERES_PAR_JETON)
+
+
+def _entier(valeur: Any) -> Optional[int]:
+    if isinstance(valeur, bool):
+        return None
+    if isinstance(valeur, int):
+        return valeur
+    try:
+        return int(str(valeur).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def schema_strict(schema: Any) -> Any:
@@ -223,12 +387,16 @@ FORBIDDEN:
         timeout: Optional[float] = None,
         *,
         limiteur_pour: Callable[[str], Limiteur] = limiteur_mistral,
+        avec_secours: bool = True,
     ):
         self.api_key = api_key or settings.MISTRAL_API_KEY
         self.model_name = model_name or settings.MISTRAL_MODEL
         self.timeout = timeout or settings.MISTRAL_TIMEOUT_S
         # Injectable : les tests fournissent des limiteurs sur horloge factice.
         self._limiteur_pour = limiteur_pour
+        # False pour le controle du blog (mistral_du_controle) : jamais de
+        # modele de secours, dont le nom ne serait pas celui du controle.
+        self.avec_secours = avec_secours
         self._sante: Optional[Tuple[float, Dict[str, Any]]] = None
 
         if not self.api_key:
@@ -249,6 +417,8 @@ FORBIDDEN:
         return self._limiteur_pour(modele or self.model_name)
 
     def _secours(self, modele: str) -> Optional[str]:
+        if not self.avec_secours:
+            return None
         secours = settings.MISTRAL_MODEL_SECOURS
         return secours if secours and secours != modele else None
 
@@ -277,15 +447,74 @@ FORBIDDEN:
             raise MistralQuotaError(f"Quota Mistral epuise (HTTP 402) : {message}")
         raise MistralServiceError(f"Erreur API Mistral (HTTP {code}): {message}")
 
-    def _place(self, modele: str, debut: float):
-        """La place du limiteur, dans ce qui reste du budget d'attente."""
-        limiteur = self.limiteur(modele)
-        restant = settings.MISTRAL_ATTENTE_MAX_S - (limiteur.maintenant() - debut)
-        return limiteur.creneau(attente_max=max(0.0, restant))
+    @staticmethod
+    def _budget_d_attente(attente_max: Optional[float]) -> float:
+        """
+        L'attente permise a un appel : `attente_max` si l'appelant la donne (le
+        controle du blog), sinon MISTRAL_ATTENTE_MAX_S (le chat, la generation).
 
-    def _abandonner(self, limiteur: Limiteur, debut: float, essai: int, attente: float) -> bool:
+        POURQUOI (revue du tour 6) : les 20 s de MISTRAL_ATTENTE_MAX_S sont le
+        budget d'attente du chat. Le controle partage 20 000 jetons par minute
+        avec le controle d'avant : il doit parfois attendre plus de 20 s que
+        celui-ci sorte de la minute, et le delai de sa route (120 s) le permet.
+        Avec 20 s, il echouait en 503, et chaque relance refaisait de meme. Le
+        controle passe donc la marge de son plan
+        (controle_du_billet.BudgetDuControle ; un appel par article, tour 7).
+        """
+        return settings.MISTRAL_ATTENTE_MAX_S if attente_max is None else max(0.0, attente_max)
+
+    def jetons_d_entree(self, prompt: str, system: Optional[str] = None) -> int:
+        """
+        Les jetons d'entree que generate(prompt, system) reservera dans le
+        limiteur (jetons_d_entree_estimes, sur les memes messages) : le plan du
+        controle les prevoit ainsi, au jeton pres.
+        """
+        return jetons_d_entree_estimes({"messages": [
+            {"role": "system", "content": system or self.SYSTEM_INSTRUCTION},
+            {"role": "user", "content": prompt},
+        ]})
+
+    def _place(self, modele: str, debut: float, jetons: int = 0, attente_max: Optional[float] = None):
+        """
+        La place du limiteur, dans ce qui reste du budget d'attente
+        (_budget_d_attente). `jetons` : ce que l'appel reserve dans le budget de
+        jetons du modele, s'il en a un.
+        """
+        limiteur = self.limiteur(modele)
+        restant = self._budget_d_attente(attente_max) - (limiteur.maintenant() - debut)
+        return limiteur.creneau(jetons, attente_max=max(0.0, restant))
+
+    @staticmethod
+    def _compter(limiteur: Limiteur, reservation: Any, reponse: httpx.Response, donnees: Any) -> None:
+        """
+        Les jetons que l'appel a VRAIMENT coutes, a la place de l'estimation
+        reservee : l'usage de la reponse (reflexion comprise), rien pour un
+        refus. Puis ce que le fournisseur dit qu'il reste : il compte aussi
+        les appels des autres processus, et peut compter plus longtemps que
+        la minute du limiteur (04/11 : 0 jeton restant apres le controle du
+        travail, parti 65 s apres la fin de celui du bail). Sans effet sur un
+        limiteur sans budget de jetons (celui du chat).
+        """
+        usage = donnees.get("usage") if isinstance(donnees, dict) else None
+        usage = usage if isinstance(usage, dict) else {}
+        total = _entier(usage.get("total_tokens"))
+        if total is None:
+            entree, sortie = _entier(usage.get("prompt_tokens")), _entier(usage.get("completion_tokens"))
+            total = entree + sortie if entree is not None and sortie is not None else None
+        if total is not None:
+            reservation.corriger(total)
+        elif reponse.status_code != 200:
+            reservation.corriger(0)
+        restant = _entier(reponse.headers.get("x-ratelimit-remaining-tokens-minute"))
+        if restant is not None:
+            limiteur.recaler(jetons_restants_minute=restant)
+
+    def _abandonner(
+        self, limiteur: Limiteur, debut: float, essai: int, attente: float,
+        attente_max: Optional[float] = None,
+    ) -> bool:
         return essai == ESSAIS or (
-            limiteur.maintenant() - debut + attente > settings.MISTRAL_ATTENTE_MAX_S
+            limiteur.maintenant() - debut + attente > self._budget_d_attente(attente_max)
         )
 
     async def _envoyer(
@@ -295,27 +524,38 @@ FORBIDDEN:
         timeout: float,
         secours_permis: bool = True,
         debut: Optional[float] = None,
+        attente_max: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         POST hors flux, avec les nouveaux essais. Rend le JSON de la reponse.
 
         `debut` : instant du premier essai. Le modele de secours le recoit,
         si bien que les 20 s d'attente sont un budget pour l'APPEL, pas par
-        modele.
+        modele. `attente_max` : ce budget, s'il n'est pas celui du chat
+        (_budget_d_attente) ; attente du limiteur et nouveaux essais compris.
+
+        La reponse rendue porte toujours « model » : celui qu'a donne le
+        fournisseur, sinon celui de la requete partie (le secours, s'il a
+        repondu).
         """
         modele = corps["model"]
         limiteur = self.limiteur(modele)
         debut = limiteur.maintenant() if debut is None else debut
         cause = "saturation"
+        # Dans combien de secondes un nouvel essai a une chance (le Retry-After
+        # du controle), quand on le sait.
+        reprise: Optional[float] = None
+        jetons = jetons_d_entree_estimes(corps)
         async with httpx.AsyncClient(timeout=timeout, transport=transport_http) as client:
             for essai in range(1, ESSAIS + 1):
                 try:
-                    async with self._place(modele, debut):
+                    async with self._place(modele, debut, jetons, attente_max) as reservation:
                         reponse = await client.post(
                             MISTRAL_API_URL, headers=self._headers(), json=corps
                         )
                 except AttenteTropLongue as e:
                     cause = f"attente {e.attente:.0f} s ({e.raison})"
+                    reprise = e.attente
                     break
                 except httpx.TimeoutException as e:
                     # Une generation qui depasse son delai ne se relance pas :
@@ -326,17 +566,22 @@ FORBIDDEN:
                 except httpx.TransportError as e:
                     attente, cause = 2.0 ** (essai - 1), f"reseau {e!r}"
                 else:
+                    donnees = reponse.json() if reponse.status_code == 200 else None
+                    self._compter(limiteur, reservation, reponse, donnees)
                     if reponse.status_code == 200:
-                        return reponse.json()
+                        if isinstance(donnees, dict) and not donnees.get("model"):
+                            donnees["model"] = modele
+                        return donnees
                     attente = self._attente_apres(
                         reponse.status_code, reponse.content, reponse.headers, essai
                     )
                     cause = f"HTTP {reponse.status_code}"
+                reprise = attente
                 # Le delai impose est inscrit AVANT de decider d'abandonner :
                 # sinon un Retry-After plus long que le budget etait perdu, et
                 # l'appel suivant repartait aussitot vers le modele sanctionne.
                 limiteur.repousser(attente, cause)
-                if self._abandonner(limiteur, debut, essai, attente):
+                if self._abandonner(limiteur, debut, essai, attente, attente_max):
                     break
                 logger.warning(
                     "⚠️ Mistral %s : %s, nouvel essai dans %.1f s (%d/%d)",
@@ -347,10 +592,12 @@ FORBIDDEN:
         if secours:
             logger.warning("⚠️ Mistral %s sature (%s) : modele de secours %s", modele, cause, secours)
             return await self._envoyer(
-                {**corps, "model": secours}, timeout=timeout, secours_permis=False, debut=debut
+                pour_le_modele(corps, secours), timeout=timeout, secours_permis=False, debut=debut,
+                attente_max=attente_max,
             )
         raise MistralOverloadedError(
-            f"Le service Mistral est momentanément saturé ({cause}). Réessayez dans un instant."
+            f"Le service Mistral est momentanément saturé ({cause}). Réessayez dans un instant.",
+            retry_after=reprise,
         )
 
     async def _flux(
@@ -453,6 +700,7 @@ FORBIDDEN:
         max_tokens: int,
         flux: bool = False,
         format_de_reponse: Optional[Dict[str, Any]] = None,
+        reflexion: Optional[str] = None,
     ) -> Dict[str, Any]:
         corps: Dict[str, Any] = {
             "model": self.model_name,
@@ -464,6 +712,9 @@ FORBIDDEN:
             corps["stream"] = True
         if format_de_reponse:
             corps["response_format"] = format_de_reponse
+        # Rien pour un modele sans exigence (exigences_du_modele) : le corps du
+        # chat et de la generation reste celui d'avant le tour 6.
+        corps.update(exigences_du_modele(self.model_name, temperature, reflexion))
         return corps
 
     @staticmethod
@@ -503,6 +754,9 @@ FORBIDDEN:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         response_mime_type: Optional[str] = None,
         response_schema: Optional[Dict] = None,
+        reflexion: Optional[str] = None,
+        rendre_le_modele: bool = False,
+        attente_max: Optional[float] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -512,6 +766,16 @@ FORBIDDEN:
         la reponse reste coupee. Une reponse coupee en texte libre est
         completee une fois ; une reponse JSON ne l'est pas (un JSON recolle par
         une suite n'est pas fiable) : l'appelant decide.
+
+        `reflexion` : l'effort de raisonnement, envoye aux seuls modeles qui
+        l'exigent (exigences_du_modele) ; les autres l'ignorent, comme avant.
+        `rendre_le_modele` : ajoute "modele", le modele qui a VRAIMENT repondu
+        (le champ « model » de la reponse) ; le controle du blog le note.
+        `attente_max` : l'attente permise a l'appel (limiteur et nouveaux
+        essais), au lieu des MISTRAL_ATTENTE_MAX_S du chat ; le controle du blog
+        y passe la marge de son plan (revue du tour 6, _budget_d_attente).
+        Une reponse en morceaux (reflexion, puis texte) est rendue sans sa
+        reflexion (texte_des_morceaux).
         """
         messages = [
             {"role": "system", "content": system or self.SYSTEM_INSTRUCTION},
@@ -523,9 +787,10 @@ FORBIDDEN:
             donnees = await self._envoyer(
                 self._corps(
                     messages, temperature=temperature, max_tokens=max_tokens,
-                    format_de_reponse=format_de_reponse,
+                    format_de_reponse=format_de_reponse, reflexion=reflexion,
                 ),
                 timeout=self.delai_hors_flux(max_tokens),
+                attente_max=attente_max,
             )
         except MistralServiceError:
             raise
@@ -534,9 +799,10 @@ FORBIDDEN:
             raise MistralServiceError(f"Erreur de génération Mistral: {e}") from e
 
         choix = donnees["choices"][0]
-        texte = (choix.get("message") or {}).get("content") or ""
+        texte = texte_des_morceaux((choix.get("message") or {}).get("content"))
         fin = FINS.get(choix.get("finish_reason"), "UNKNOWN")
-        self._journal(donnees.get("model") or self.model_name, fin, donnees.get("usage"), debut)
+        servi = donnees.get("model") or self.model_name
+        self._journal(servi, fin, donnees.get("usage"), debut)
 
         if fin == "MAX_TOKENS" and format_de_reponse is None and texte and not en_boucle(texte):
             suite, fin = await self._suite(messages, texte, temperature)
@@ -545,6 +811,8 @@ FORBIDDEN:
         resultat: Dict[str, Any] = {"response": texte, "fin": fin}
         if fin in FINS_INCOMPLETES:
             resultat["tronquee"] = True
+        if rendre_le_modele:
+            resultat["modele"] = servi
         return resultat
 
     async def _suite(
@@ -565,7 +833,7 @@ FORBIDDEN:
             logger.warning("⚠️ Suite de reponse impossible : %s", e)
             return "", "MAX_TOKENS"
         choix = donnees["choices"][0]
-        contenu = (choix.get("message") or {}).get("content") or ""
+        contenu = texte_des_morceaux((choix.get("message") or {}).get("content"))
         fin = FINS.get(choix.get("finish_reason"), "UNKNOWN")
         self._journal(
             donnees.get("model") or self.model_name, fin, donnees.get("usage"), debut, suite=True
@@ -714,3 +982,16 @@ FORBIDDEN:
 def get_mistral_service() -> MistralService:
     """Singleton cached instance de MistralService."""
     return MistralService()
+
+
+def mistral_du_controle() -> MistralService:
+    """
+    Le client du controle IA du blog (tour 6) : BLOG_CONTROLE_MODELE (ou
+    MISTRAL_MODEL s'il est vide), SANS modele de secours.
+
+    POURQUOI pas de singleton : un objet par controle ne coute rien, et un
+    reglage change (les tests) est pris tel quel. Le limiteur, lui, est celui
+    du modele, partage par tout le processus (limiteur_mistral) : c'est lui
+    qui tient le budget de jetons.
+    """
+    return MistralService(model_name=modele_du_controle(), avec_secours=False)
