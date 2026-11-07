@@ -1209,6 +1209,21 @@ _SQL_ARTICLES_STRICTS = text("""
 RANGS_DES_RENVOIS = 4
 RENVOIS_MAX = 2
 SOURCE_ARTICLE_RENVOYE = "article_renvoye"
+
+
+def _place_de_l_article_renvoye(extraits: List[ChunkResult], renvoi: ChunkResult) -> int:
+    """
+    Ou lire l'article que vise `renvoi` : juste apres le dernier extrait du
+    MEME texte qui le precede, donc devant les autres textes lus entre les
+    deux ; juste apres lui sinon (voir RAGService._avec_les_renvois).
+    """
+    rang = next(i for i, c in enumerate(extraits) if c.fusion_key == renvoi.fusion_key)
+    meme_texte = [i for i in range(rang) if extraits[i].law_id == renvoi.law_id]
+    # Sans extrait du meme texte avant lui, l'ordre de la recherche tient :
+    # les autres textes y sont tous mieux classes que le texte du renvoi.
+    if not meme_texte or meme_texte[-1] == rang - 1:
+        return rang + 1
+    return meme_texte[-1] + 1
 _RENVOI_A_UN_ARTICLE = re.compile(
     r"\bpeines?\b[^.;:\n]{0,40}?\bl[’']article\s+(\d+)(?![\d-])", re.IGNORECASE
 )
@@ -2918,16 +2933,27 @@ class RAGService:
         return confirmes
 
     async def _avec_les_renvois(self, extraits: List[ChunkResult]) -> List[ChunkResult]:
-        """L'article vise par une peine, lu juste apres l'extrait qui le vise."""
+        """
+        L'article vise par une peine, lu juste apres l'extrait qui le vise,
+        sauf si un AUTRE TEXTE est lu entre les extraits du meme texte et
+        celui qui renvoie : la regle passe alors avant cet autre texte.
+
+        Pourquoi (controle de production du 07/11/2026, « What penalty does the
+        Penal Code provide for theft? ») : le vol d'effets militaires
+        (PRC-5695 art. 54) et le vol aggrave (PRC-4722 art. 320) sont a
+        egalite a quelques millièmes pres ; le bruit du vecteur de Voyage d'un
+        appel a l'autre (cosinus 0,997) les permute. Lu derriere art. 54,
+        art. 320 au rang 4 poussait l'art. 318 au rang 5, hors des extraits
+        lus. Place devant l'autre texte, la regle est lue quel que soit
+        l'ordre de cette egalite.
+        """
         resultat = list(extraits)
         lus = 0
         for extrait in extraits[:RANGS_DES_RENVOIS]:
             numero = numero_renvoye(extrait)
             if numero is None or lus >= RENVOIS_MAX:
                 continue
-            place = next(
-                i for i, c in enumerate(resultat) if c.fusion_key == extrait.fusion_key
-            ) + 1
+            place = _place_de_l_article_renvoye(resultat, extrait)
             deja = next(
                 (c for c in resultat if c.law_id == extrait.law_id and str(c.number) == numero),
                 None,
@@ -2935,7 +2961,7 @@ class RAGService:
             if deja is not None:
                 if resultat.index(deja) > place:
                     resultat.remove(deja)
-                    resultat.insert(place, deja)
+                    resultat.insert(_place_de_l_article_renvoye(resultat, extrait), deja)
                 continue
             ligne = (await self.db.execute(
                 _SQL_ARTICLE_RENVOYE, {"law_id": extrait.law_id, "numero": numero}
