@@ -148,6 +148,37 @@ ARTICLE_PATTERNS = [
     r'\s*[.:\-–]?\s*',
 ]
 
+# En-tete d'article au MILIEU d'une ligne. L'extraction de certains PDF (Code du
+# travail de 1992, Code de procedure penale, Code civil annote...) colle des
+# pages entieres en un seul paragraphe : « ...du travail. Article 34.- (1) Le
+# contrat... ». Les motifs ci-dessus, ancres en debut de ligne, n'y voyaient
+# rien : l'article 34 restait dans le morceau 33, et les articles 36 a 41 dans
+# les morceaux 35.1 et 35.2. La recherche directe de « l'article 39 » ne le
+# trouvait pas, et aucune citation ne pouvait le nommer.
+#
+# Le risque inverse est un renvoi pris pour un en-tete, d'ou quatre gardes :
+# - une MAJUSCULE, sans IGNORECASE : « l'article 34 » n'est jamais candidat ;
+# - un separateur apres le numero, jamais un tiret suivi d'un chiffre
+#   (« Article 333-8 » est un numero du Code CIMA) ;
+# - pas apres un chiffre, une preposition ou un article defini (« de Article 5 :
+#   ... »), ni sur une ligne de tableau ;
+# - surtout, LA SUITE DES NUMEROS (_en_tetes_a_garder) : un candidat doit tomber
+#   entre l'article qui le precede et celui qui le suit. Une loi modificative
+#   qui cite « Article 5.- (nouveau) » dans son article 2 reste entiere.
+_EN_TETE_EN_LIGNE = re.compile(
+    r"(?<=\S)[ \t]+(?=(?:Article|ARTICLE|Art\.|ART\.)[ \t]*"
+    r"(?P<numero>\d{1,4})(?:er|ère)?(?:[ \t]+(?:bis|ter|quater))?[ \t]*"
+    r"(?:\.[ \t]*[-–—]+(?!\d)|[-–—]+(?!\d)|:|\.(?=[ \t]+[(A-ZÀ-Þ])))"
+)
+_AVANT_UN_RENVOI = re.compile(
+    r"(?:\d|\b(?:de|du|des|à|au|aux|et|ou|par|selon|voir|cf\.?|l'|l’|le|la|les))$",
+    re.IGNORECASE,
+)
+# Ecart maximal entre deux numeros successifs, quand un seul voisin borne le
+# candidat (fin de texte) : au-dela, ce n'est plus la suite du texte.
+_ECART_MAX_EN_LIGNE = 20
+
+
 # Pattern for préambule/preamble detection - multiple patterns for flexibility
 PREAMBLE_PATTERNS = [
     r'(?:^|\n)\s*(PRÉAMBULE|PREAMBULE|PREAMBLE)\s*[.:]?\s*',
@@ -589,6 +620,8 @@ def extract_articles(
 
     # 2. Preprocess and detect pattern
     processed_text = _preprocess_text(text, preserve_formatting)
+    if not preserve_formatting:
+        processed_text = _separer_en_tetes_en_ligne(processed_text)
     english = _semantique_anglaise(processed_text, language)
     pattern = _detect_article_pattern(processed_text, english)
     pages = _PageIndex(processed_text)
@@ -645,6 +678,81 @@ def _preprocess_text(text: str, preserve_formatting: bool) -> str:
     text = '\n'.join(lines)
 
     return text
+
+
+def _numero_entier(match: re.Match) -> Optional[int]:
+    """Numero entier d'un marqueur de debut de ligne ; None s'il n'en a pas."""
+    for groupe in match.groups():
+        if groupe is None:
+            continue
+        chiffres = re.match(r"\d+", groupe)
+        if chiffres:
+            return int(chiffres.group(0))
+        return _ordinal_en_nombre(groupe)
+    return None
+
+
+def _en_tetes_a_garder(
+    candidats: List[Tuple[int, int]], reperes: List[Tuple[int, int]],
+) -> List[int]:
+    """
+    Parmi les (position, numero) candidats, ceux qui suivent la numerotation.
+
+    `reperes` : les (position, numero) des en-tetes de debut de ligne, surs. Un
+    candidat est garde s'il est plus grand que le dernier numero lu, plus petit
+    que le prochain repere, et a moins de _ECART_MAX_EN_LIGNE du precedent
+    quand il n'a pas de repere apres lui. Le precedent peut etre un candidat
+    garde : six articles de suite peuvent tenir sur une ligne.
+    """
+    gardes: List[int] = []
+    precedent: Optional[int] = None
+    i = 0
+    for position, numero in candidats:
+        while i < len(reperes) and reperes[i][0] < position:
+            precedent = reperes[i][1]
+            i += 1
+        suivant = reperes[i][1] if i < len(reperes) else None
+        if precedent is None and suivant is None:
+            continue
+        if precedent is not None and numero <= precedent:
+            continue
+        if suivant is not None and numero >= suivant:
+            continue
+        if suivant is None and numero - precedent > _ECART_MAX_EN_LIGNE:
+            continue
+        gardes.append(position)
+        precedent = numero
+    return gardes
+
+
+def _separer_en_tetes_en_ligne(text: str) -> str:
+    """Remet a la ligne les en-tetes d'article colles dans un paragraphe."""
+    candidats: List[Tuple[int, int]] = []
+    for m in _EN_TETE_EN_LIGNE.finditer(text):
+        debut_de_ligne = text.rfind("\n", 0, m.start()) + 1
+        fin_de_ligne = text.find("\n", m.end())
+        ligne = text[debut_de_ligne:fin_de_ligne if fin_de_ligne != -1 else len(text)]
+        if "|" in ligne or _AVANT_UN_RENVOI.search(text[debut_de_ligne:m.start()]):
+            continue
+        candidats.append((m.start(), int(m.group("numero"))))
+    if not candidats:
+        return text
+
+    motif = re.compile("|".join(ARTICLE_PATTERNS[:2]), re.IGNORECASE | re.MULTILINE)
+    reperes = [
+        (m.start(), n) for m in motif.finditer(text)
+        if (n := _numero_entier(m)) is not None
+    ]
+    gardes = _en_tetes_a_garder(candidats, reperes)
+
+    morceaux: List[str] = []
+    debut = 0
+    fins = {m.start(): m.end() for m in _EN_TETE_EN_LIGNE.finditer(text)}
+    for position in gardes:
+        morceaux.append(text[debut:position])
+        debut = fins[position]
+    morceaux.append(text[debut:])
+    return "\n".join(morceaux)
 
 
 # Part du meilleur motif au-dela de laquelle un motif secondaire est conserve.
