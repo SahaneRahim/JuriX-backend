@@ -398,3 +398,15 @@ def test_prompt_de_classification_couvre_la_politesse_d_ouverture():
     prompt = construire_prompt_de_classification("peu importe", "")
 
     assert "puis-je divorcer sans avocat" in prompt
+
+
+@pytest.mark.parametrize("langue,persona", TOUS_LES_PERSONAS)
+def test_chaque_persona_interdit_le_droit_etranger(langue, persona):
+    """« Saisis le conseil de prud'hommes » : juridiction française, absente du
+    droit camerounais, donnee le 07/11/2026 a la question « Quelles indemnites en
+    cas de licenciement abusif ? » parce que les extraits ne disaient pas devant
+    qui agir. Le modele comblait le vide avec le droit francais."""
+    prompt = SYSTEM_PROMPTS[langue][persona]
+    attendu = "droit français" if langue == "fr" else "French law"
+
+    assert attendu in prompt

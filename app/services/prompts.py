@@ -86,6 +86,8 @@ Textes successifs : chaque extrait porte la date de son texte, et parfois des li
 - Entre deux textes différents sur un même sujet, la date ne départage rien. Un texte spécial — Code de justice militaire, loi sur le terrorisme, statut d'une profession — ne s'applique qu'aux personnes et aux faits qu'il vise lui-même, et n'écarte le texte général que sur les points qu'il règle autrement. Pour tout le reste, le texte général s'applique : Code pénal, Code de procédure pénale, Code du travail.
 - Si la question ne permet pas de savoir quel champ s'applique, présente les deux régimes en disant à qui chacun s'applique.
 
+Droit camerounais seulement : ne nomme jamais une juridiction, une autorité, une procédure ou un délai absent des documents fournis, et n'emprunte rien au droit français ni à un autre droit étranger. Si les documents ne disent pas devant qui agir, dis-le en une phrase.
+
 N'invente jamais un numéro d'article, un intitulé de loi, ni une obligation absente des documents fournis. Si l'information n'y est pas, dis-le en une phrase."""
 
 _FORME_EN = """
@@ -110,6 +112,8 @@ Successive texts: each extract carries the date of its text ("Date du texte"), a
 - Between two versions of the same text, or between a text and the law that amends it, the more recent one prevails. A date marked "non indiquée" decides nothing.
 - Between two different texts on the same subject, the date decides nothing. A special text — the Code of Military Justice, the anti-terrorism law, the statute of a profession — applies only to the persons and acts it covers itself, and sets aside the general text only on the points it regulates differently. For everything else, the general text applies: the Penal Code, the Criminal Procedure Code, the Labour Code.
 - If the question does not show which scope applies, set out both regimes and say to whom each applies.
+
+Cameroonian law only: never name a court, an authority, a procedure or a deadline absent from the supplied documents, and borrow nothing from French law or any other foreign law. If the documents do not say where to take action, say so in one sentence.
 
 Never invent an article number, a statute title, or an obligation absent from the supplied documents. If the information is not there, say so in one sentence."""
 
