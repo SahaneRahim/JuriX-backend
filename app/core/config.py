@@ -123,6 +123,24 @@ class Settings(BaseSettings):
     # envoye au modele avant l'echeance.
     GROQ_ATTENTE_MAX_429_S: float = 120.0
 
+    # Redaction des reponses du chat par Groq, dans cet ordre, avant le
+    # fournisseur de LLM_PROVIDER. Mesure du 07/11/2026 (24 questions en
+    # francais, 12 en anglais, juge a l'aveugle mistral-large-4) : justesse
+    # 4,25 et 5,00 sur 5 pour qwen3.8-27b, 2,44 et 3,00 pour ministral-14b, qui
+    # niait par exemple la SARL unipersonnelle de l'article 309 de l'AUSCGIE.
+    # Palier gratuit : un prompt trop long pour la minute, un 429 ou un quota
+    # epuise font passer au modele suivant, puis a LLM_PROVIDER. Vide : le
+    # chat redige avec LLM_PROVIDER seul, comme avant.
+    CHAT_GROQ_MODELES: str = "qwen/qwen3.8-27b,openai/gpt-oss-120b"
+    # Budget de sortie, reflexion comprise. Groq le compte dans les jetons par
+    # minute AVANT d'envoyer : 8 192, le budget de Mistral, depasserait seul
+    # le plafond de 8 000 et chaque question serait refusee (HTTP 413).
+    CHAT_GROQ_MAX_JETONS: int = 2_000
+    # Attente acceptee avant de passer au modele suivant : au-dela, un modele
+    # moins bon tout de suite vaut mieux qu'un lecteur qui attend.
+    CHAT_GROQ_ATTENTE_MAX_S: float = 3.0
+    CHAT_GROQ_TIMEOUT_S: float = 30.0
+
     # Gemini API (optionnel désormais)
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-3-flash-preview"

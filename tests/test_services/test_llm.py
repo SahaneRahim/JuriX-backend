@@ -73,7 +73,10 @@ def test_les_trois_services_se_construisent_sans_doublure(fournisseur, nom, serv
 
     instance = service(MagicMock())
 
-    assert instance.llm is get_llm_service()
+    # Le chat redige d'abord avec Groq (app/services/chat_groq.py) quand une
+    # cle Groq est configuree : son service de repli reste celui-ci.
+    llm = getattr(instance.llm, "repli", instance.llm)
+    assert llm is get_llm_service()
 
 
 @pytest.mark.parametrize(

@@ -50,6 +50,7 @@ from app.schemas.rag import (
 )
 from app.schemas.search import ChunkResult, SearchFilters, SearchRequest
 from app.services.article_reference import normalize_number, parse_reference
+from app.services.chat_groq import service_du_chat
 from app.services.intent_classifier import (
     INTENT_JURIDIQUE,
     IntentResult,
@@ -1541,7 +1542,8 @@ class RAGService:
         """
         self.db = db
         self.user_id = user_id
-        self.llm = get_llm_service()
+        # Groq d'abord pour rediger, puis LLM_PROVIDER (app/services/chat_groq.py).
+        self.llm = service_du_chat(get_llm_service())
         # Recherche semantique EXACTE pour le chat : il fait rediger une
         # reponse juridique sur ce qu'il trouve, et un index approche peut
         # perdre son rappel sans rien dire (incident du 29/10/2026, voir
