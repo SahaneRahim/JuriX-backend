@@ -55,7 +55,7 @@ LE CODE DE LA ROUTE : QUESTIONS GARANTIES ET FAIBLESSES CONNUES (revue du
 tour 5, 30/10/2026). Chaque question de reference est GARANTIE, ou FAIBLESSE
 CONNUE : l'une des questions que la recuperation fait echouer aujourd'hui, a
 raison, ses attendus etant justes (questions_de_reference.FAIBLESSES_CONNUES,
-avec leur diagnostic ; 6 le 30/10/2026). Le rapport est « echec », et la
+avec leur diagnostic ; 6 le 30/10/2026, 3 le 07/11/2026 : redecoupage du corpus et lecture de l'article renvoye). Le rapport est « echec », et la
 route rend 503, si :
 - une question GARANTIE echoue, quelle qu'en soit la raison ;
 - la sonde du fournisseur echoue (6), la recherche exacte est en repli pour
@@ -859,9 +859,10 @@ def juger(
             (i for i, (_, ref) in enumerate(contexte.voisins or [], start=1) if ref in admises),
             None,
         )
-        if verdict.rang_semantique is None or verdict.rang_semantique > VOISINS_SEMANTIQUES:
+        voisins_admis = verdict.question.voisins or VOISINS_SEMANTIQUES
+        if verdict.rang_semantique is None or verdict.rang_semantique > voisins_admis:
             verdict.raisons.append(
-                f"aucun texte attendu parmi les {VOISINS_SEMANTIQUES} premiers voisins "
+                f"aucun texte attendu parmi les {voisins_admis} premiers voisins "
                 "du volet semantique"
             )
 

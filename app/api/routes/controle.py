@@ -84,18 +84,14 @@ async def controle_du_chat(controle: ControleEnCache = Depends(controle_en_cache
     503. LA LISTE (questions_de_reference.FAIBLESSES_CONNUES, ou est le
     diagnostic de chacune ; elle ne s'allonge jamais pour faire passer un
     envoi) :
-    - « Quelle peine encourt l’auteur d’un vol ? » : l'art. 318 au rang 7,
-      apres le Code de justice militaire ;
-    - « What penalty does the Penal Code provide for theft? » : l'art. 318
-      jamais lu ;
     - « Quel est le montant de l'amende prévue pour le vol ? » : l'art. 318
       jamais lu ;
     - « Quel est le délai de préavis en cas de licenciement ? » : l'art. 34 au
-      rang 6, apres le preavis d'un agent commercial ;
-    - « How does the law punish unauthorised access to a computer system? » :
-      la peine de l'art. 65 al. 1 au rang 5 ;
+      rang 6, apres l'AUPCAP et le preavis d'un agent commercial ;
     - « How much compensation is allocated for unfair dismissal? » : le
-      morceau 35.1 jamais lu, l'indemnite du fonctionnaire en tete.
+      l'art. 39 au rang 4, apres l'indemnite du fonctionnaire.
+    Le vol (fr, en) et l'acces non autorise (en) tiennent depuis le 07/11/2026
+    (redecoupage du corpus, lecture de l'article renvoye).
 
     SANS DANGER EN ACCES PUBLIC : un calcul au plus par 30 minutes, quels que
     soient les appels, qui lisent sinon le dernier rapport (`age_s`) ; calcul
@@ -105,8 +101,8 @@ async def controle_du_chat(controle: ControleEnCache = Depends(controle_en_cache
     nommee que par sa classe), seulement des questions, des references de
     textes et des mesures.
 
-    ETAT AU 30/10/2026 : 200, les 45 questions garanties tiennent, et les 6
-    faiblesses connues echouent (`faiblesses_en_echec` : 6). Un 503 dit donc
+    ETAT AU 07/11/2026 (copie reparee) : 200, les 48 questions garanties
+    tiennent, et les 3 faiblesses connues echouent (`faiblesses_en_echec` : 3). Un 503 dit donc
     une panne nouvelle. Lire `faiblesses` chaque semaine : c'est a la
     recuperation de les corriger, et `faiblesses_resolues` dit celles qui
     tiennent, a retirer de la liste. UNE GARANTIE FRAGILE : la question du

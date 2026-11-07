@@ -1198,6 +1198,54 @@ _SQL_ARTICLES_STRICTS = text("""
 """)
 
 
+# « LIRE AUSSI L'ARTICLE RENVOYE ». Un article qui ne dit sa peine que par renvoi
+# (« Les peines de l'article 318 ci-dessus sont doublées », Code penal art. 320 ;
+# « Est puni des peines prévues à l'alinéa 1 », cybersecurite art. 65.2) arrive en
+# tete sans la regle : le modele lisait le renvoi, puis le vol d'effets militaires
+# d'un autre texte, jamais l'art. 318. L'article vise est lu juste apres celui qui
+# le vise. Borne : les RANGS_DES_RENVOIS premiers extraits, RENVOIS_MAX lectures
+# (une requete, aucun appel au modele), le MEME texte, les seules peines : un
+# renvoi ordinaire (« dans les conditions de l'article 12 ») ne deplace rien.
+RANGS_DES_RENVOIS = 4
+RENVOIS_MAX = 2
+SOURCE_ARTICLE_RENVOYE = "article_renvoye"
+_RENVOI_A_UN_ARTICLE = re.compile(
+    r"\bpeines?\b[^.;:\n]{0,40}?\bl[’']article\s+(\d+)(?![\d-])", re.IGNORECASE
+)
+_RENVOI_A_UN_ALINEA = re.compile(
+    r"\bpeines?\s+pr[ée]vues?\s+(?:à|a|par)\s+l[’']alin[ée]a\s+(?:\(?(\d+)\)?|premier)"
+    r"(?!\s+de\s+l)", re.IGNORECASE,
+)
+_SQL_ARTICLE_RENVOYE = text("""
+    SELECT a.id AS article_id, a.number, a.title AS article_title, a.section,
+           a.page_number, a.content, a.law_id, l.reference, l.title AS law_title,
+           l.type, l.language, l.status, l.category_id, l.publication_date
+    FROM articles a
+    JOIN laws l ON l.id = a.law_id
+    WHERE a.law_id = :law_id AND a.number = :numero AND l.status = 'published'
+    ORDER BY a."order"
+    LIMIT 1
+""")
+
+
+def numero_renvoye(extrait: ChunkResult) -> Optional[str]:
+    """
+    Le numero que cet extrait vise pour sa peine, tel qu'il est en base ; None
+    sans renvoi, ou s'il vise son propre article. Un alinea vise le morceau de
+    meme rang du meme article : « alinéa 1 » de 65.2 est 65.1.
+    """
+    numero = str(extrait.number or "")
+    contenu = extrait.content or ""
+    alinea = _RENVOI_A_UN_ALINEA.search(contenu)
+    if alinea and re.fullmatch(r"\d+\.\d+", numero):
+        vise = f"{numero.split('.')[0]}.{alinea.group(1) or 1}"
+        return vise if vise != numero else None
+    article = _RENVOI_A_UN_ARTICLE.search(contenu)
+    if article and article.group(1) != numero.split(".")[0]:
+        return article.group(1)
+    return None
+
+
 def _sans_doublons(extraits: List[ChunkResult]) -> List[ChunkResult]:
     """Les extraits dans leur ordre, chacun une fois (cle de fusion)."""
     vus: Set[tuple] = set()
@@ -2827,7 +2875,7 @@ class RAGService:
                 f"{similarite} >= {seuil} ({langue}) : {len(chunks)} extraits de la recherche"
                 + (f", article nomme en tete : {etat.article_nomme}" if nommes else "")
             )
-            return contexte
+            return await self._avec_les_renvois(contexte)
 
         etat.mode = "faible"
         confirmes = await self._textes_confirmes(mots_cles, contexte, nommes, volets)
@@ -2868,6 +2916,35 @@ class RAGService:
             + ", ".join(f"{c.reference} art. {c.number}" for c in confirmes)
         )
         return confirmes
+
+    async def _avec_les_renvois(self, extraits: List[ChunkResult]) -> List[ChunkResult]:
+        """L'article vise par une peine, lu juste apres l'extrait qui le vise."""
+        resultat = list(extraits)
+        lus = 0
+        for extrait in extraits[:RANGS_DES_RENVOIS]:
+            numero = numero_renvoye(extrait)
+            if numero is None or lus >= RENVOIS_MAX:
+                continue
+            place = next(
+                i for i, c in enumerate(resultat) if c.fusion_key == extrait.fusion_key
+            ) + 1
+            deja = next(
+                (c for c in resultat if c.law_id == extrait.law_id and str(c.number) == numero),
+                None,
+            )
+            if deja is not None:
+                if resultat.index(deja) > place:
+                    resultat.remove(deja)
+                    resultat.insert(place, deja)
+                continue
+            ligne = (await self.db.execute(
+                _SQL_ARTICLE_RENVOYE, {"law_id": extrait.law_id, "numero": numero}
+            )).first()
+            lus += 1
+            if ligne is not None:
+                vise = self._chunk_de_l_article_nomme(ligne)
+                resultat.insert(place, vise.model_copy(update={"source": SOURCE_ARTICLE_RENVOYE}))
+        return resultat
 
     def seuil_de_similarite(self, langue: Optional[str]) -> float:
         """Le seuil de SEUILS_DE_SIMILARITE pour la langue de la question (incertaine : anglais)."""

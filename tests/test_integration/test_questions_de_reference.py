@@ -325,14 +325,13 @@ async def test_le_corpus_porte_chaque_texte_et_chaque_article_attendus(corpus):
     assert [m.number for m in morceaux if m.reference == "PRC-4722"
             and porte_la_regle(m, peine_du_vol)] == ["318"]
 
-    # Le decoupage que supposent les articles attendus (porte_l_article) :
-    # 35.2 commence par l'alinea 6 de l'article 39 et ne porte rien de l'article
-    # 35 ; 65.2 est l'alinea 2 de l'article 65, l'acces non autorise.
+    # Le decoupage que supposent les articles attendus : depuis la reparation du
+    # 07/11/2026, chaque article du Code du travail a son morceau, et l'art. 65
+    # de la loi sur la cybersecurite porte ses deux alineas.
     morceau = {(m.reference, m.number): m for m in morceaux}
-    suite_35 = morceau[("LOI-1992-007", "35.2")]
-    assert suite_35.content.lstrip().startswith("(6) Le salaire"), suite_35.content[:80]
-    assert not any(porte_l_article(suite_35, "LOI-1992-007", n) for n in ("35", "36", "37", "39"))
-    assert "tout accès non autorisé" in morceau[("LOI-2010-012", "65.2")].content
+    assert "ne peut être inférieur à trois (3) mois" in morceau[("LOI-1992-007", "39")].content
+    assert ("LOI-1992-007", "35.2") not in morceau
+    assert "tout accès non autorisé" in morceau[("LOI-2010-012", "65")].content
 
     # Un morceau tolere qu'une reingestion renumerote ne serait plus reconnu :
     # sa question echouerait sans que rien n'ait change pour le modele.
@@ -568,8 +567,8 @@ async def test_le_controle_voit_la_perte_du_morceau_qui_repond(
 
 
 async def _sans_le_morceau_35_1(corpus):
-    """L'identifiant du morceau 35.1 du Code du travail (en-tetes des art. 36 a 39)."""
-    return await _le_morceau(corpus, "LOI-1992-007", "35.1")
+    """L'identifiant du morceau de l'art. 39 du Code du travail (autrefois 35.1)."""
+    return await _le_morceau(corpus, "LOI-1992-007", "39")
 
 
 async def _le_morceau(corpus, reference: str, numero: str):
@@ -585,9 +584,10 @@ async def _le_morceau(corpus, reference: str, numero: str):
 
 
 @pytest.mark.parametrize("question, reference, numero", [
-    ("Quelle est la peine prévue pour l’escroquerie ?", "PRC-4722", "318"),
-    ("What is the notice period for dismissing an employee?", "LOI-1992-007", "33"),
-], ids=["escroquerie-sans-318", "preavis-en-sans-33"])
+    # Plus l'escroquerie sans 318 : l'art. 321 qui y renvoie le fait lire
+    # (RAGService._avec_les_renvois), la question tient sans le perdre.
+    ("What is the notice period for dismissing an employee?", "LOI-1992-007", "34"),
+], ids=["preavis-en-sans-33"])
 async def test_le_controle_voit_la_perte_du_morceau_qui_porte_la_regle(
     question, reference, numero, corpus, vecteurs_enregistres, monkeypatch
 ):
@@ -655,33 +655,6 @@ async def test_le_controle_voit_un_autre_regime_avant_l_article_qui_repond(
     assert "DEC-1994-199 art. 120" in verdict.autres_textes_avant, verdict.lus
     assert any(r.startswith("un autre texte est lu avant l'extrait qui repond")
                for r in verdict.raisons), verdict.raisons
-
-
-async def test_sans_35_1_le_preavis_n_est_pas_repondu_par_35_2(
-    corpus, vecteurs_enregistres, monkeypatch
-):
-    """
-    Revue du tour 3 : « 35.2 » comptait pour l'article 35 a son seul numero,
-    alors qu'il porte la fin de l'article 39 et l'article 40. Le plein texte
-    prive de 35.1, « Quel est le délai de préavis en cas de licenciement ? »
-    restait vert par lui (mesure du 29/10/2026 : 35.2 en tete, puis l'AUPCAP
-    et le preavis d'un agent commercial, avant le morceau 33 qui porte
-    l'article 34). 35.2 est lu, mais il ne repond pas.
-    """
-    item = next(q for q in QUESTIONS_DE_REFERENCE
-                if q.question == "Quel est le délai de préavis en cas de licenciement ?")
-    perdus = await _sans_le_morceau_35_1(corpus)
-    plein_texte = SearchService.text_chunks
-
-    async def sans_le_morceau(self, *args, **kwargs):
-        return [c for c in await plein_texte(self, *args, **kwargs) if c.article_id not in perdus]
-
-    monkeypatch.setattr(SearchService, "text_chunks", sans_le_morceau)
-    verdict = await verifier_une_question(corpus, item)
-
-    assert "LOI-1992-007 art. 35.2" in verdict.lus, verdict.lus
-    repond = verdict.lus[verdict.rang_article - 1] if verdict.rang_article else None
-    assert repond != "LOI-1992-007 art. 35.2", verdict.lus
 
 
 async def test_le_controle_voit_la_lecture_directe_de_l_article_nomme_coupee(
@@ -806,9 +779,9 @@ PANNES_REJOUEES = {
                              "Que risque l’auteur d’une escroquerie sur internet ?"),
     "deux-volets-sans-33": ("What is the notice period for dismissing an employee?",),
 }
-UNE_FAIBLESSE = "Quelle peine encourt l’auteur d’un vol ?"
+UNE_FAIBLESSE = "Quel est le montant de l'amende prévue pour le vol ?"
 _MORCEAUX_PERDUS = {
-    "35-1": ("LOI-1992-007", "35.1"), "318": ("PRC-4722", "318"), "33": ("LOI-1992-007", "33"),
+    "35-1": ("LOI-1992-007", "39"), "318": ("PRC-4722", "318"), "33": ("LOI-1992-007", "34"),
 }
 
 

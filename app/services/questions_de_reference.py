@@ -283,6 +283,8 @@ class QuestionDeReference:
     # la reponse, tel que mesure (FAIBLESSES_CONNUES). None : question
     # GARANTIE, dont l'echec fait rendre 503 a la route.
     faiblesse: Optional[str] = None
+    # Voisins semantiques admis pour CETTE question ; None : VOISINS_SEMANTIQUES.
+    voisins: Optional[int] = None
 
     @property
     def garantie(self) -> bool:
@@ -333,6 +335,7 @@ def _q(
     nomme: Optional[Tuple[str, str]] = None,
     toleres: Tuple[Tuple[str, str], ...] = (),
     rappel: bool = False,
+    voisins: Optional[int] = None,
 ) -> QuestionDeReference:
     """
     `nomme` : l'article que la question nomme, qui est alors celui qui repond.
@@ -357,6 +360,7 @@ def _q(
         toleres_avant=toleres,
         regles=tuple(a for a in (*repondent, *renvoi) if len(a) == 3),
         renvoi=tuple((a[0], a[1]) for a in renvoi),
+        voisins=voisins,
         faiblesse=FAIBLESSES_CONNUES.get(question),
     )
 
@@ -416,6 +420,11 @@ _DROITS_EN_GARDE_A_VUE = (
     _regle(CODE_DE_PROCEDURE_PENALE, "122",
            "doit être immédiatement informé des faits qui lui sont reprochés")
     + _regle(CODE_DE_PROCEDURE_PENALE, "123", "être examinée par un médecin")
+    # Depuis le redecoupage du 07/11/2026, l'art. 37 (toute personne arretee :
+    # famille, conseil, medecin) et l'art. 116 (3) (conseil, silence) sont lus
+    # pour eux-memes : ce sont aussi des droits du suspect.
+    + _regle(CODE_DE_PROCEDURE_PENALE, "37", "de constituer un conseil")
+    + _regle(CODE_DE_PROCEDURE_PENALE, "116", "de son droit de garder silence")
 )
 # L'avocat en garde a vue : l'art. 122 (3), la visite de l'avocat. L'art. 123
 # ne nomme l'avocat que pour demander l'examen medical.
@@ -463,7 +472,7 @@ _EMBAUCHE = (
 # Un morceau « N.2 » ne compte pas pour N a son numero
 # (controle_du_chat.porte_l_article) : 65.2 est attendu par le sien, et 65.1
 # l'est comme premier morceau de l'article 65.
-_ACCES_NON_AUTORISE = _regle(CYBERCRIMINALITE, "65.2", "tout accès non autorisé")
+_ACCES_NON_AUTORISE = _regle(CYBERCRIMINALITE, "65", "tout accès non autorisé")
 _PEINES_DE_L_ALINEA_1 = _regle(
     CYBERCRIMINALITE, "65", "amende de 5.000.000 (cinq millions) à 10.000.000 (dix millions)")
 # La definition du groupement d'interet economique : l'art. 869. Les art. 870
@@ -532,22 +541,11 @@ _JURISPRUDENCE_DE_L_ARTICLE_1384 = ((CODE_CIVIL, "1384.2"),)
 # pour que sa prochaine panne fasse de nouveau rendre 503 a la route. C'est a
 # la recuperation de les corriger.
 FAIBLESSES_CONNUES: Dict[str, str] = {
-    "Quelle peine encourt l’auteur d’un vol ?": (
-        "en tete l'art. 320 (« Les peines de l'article 318 ci-dessus sont doublées », sans "
-        "peine) ; la peine du vol (art. 318) au rang 7, apres le vol et le recel d'effets "
-        "MILITAIRES (PRC-5695 art. 56 et 54, Code de justice militaire) et la surete nucleaire "
-        "(PRC-7769 art. 108 : 10 a 20 ans)"),
-    "What penalty does the Penal Code provide for theft?": (
-        "l'art. 318 jamais lu ; l'art. 320 (peines doublees) au rang 3, et la seule peine de "
-        "vol chiffree lue est celle du Code de justice militaire (PRC-5695 art. 54 et 56)"),
     "Quel est le montant de l'amende prévue pour le vol ?": (
         "l'art. 318 jamais lu ; en tete, le vol d'effets MILITAIRES (PRC-5695 art. 54 et 56)"),
     "Quel est le délai de préavis en cas de licenciement ?": (
         "l'art. 34 (morceau 33) au rang 6, apres l'AUPCAP art. 110, le preavis d'un AGENT "
         "COMMERCIAL (AUDCG art. 228 : un, deux, trois mois) et le Code civil art. 107"),
-    "How does the law punish unauthorised access to a computer system?": (
-        "la peine de l'alinea 1 de l'art. 65 (morceau 65.1) au rang 5, apres 65.2, l'art. 69 "
-        "(10 a 100 millions, l'acces EN VIOLATION des mesures de securite) et les art. 86 et 84"),
     "How much compensation is allocated for unfair dismissal?": (
         "le morceau 35.1 (art. 39) jamais lu ; en tete, l'indemnite du FONCTIONNAIRE licencie "
         "(DEC-1994-199 art. 120)"),
@@ -559,8 +557,11 @@ QUESTIONS_DE_REFERENCE: Tuple[QuestionDeReference, ...] = (
        origine=SUGGESTION, rappel=True, repondent=_INDEMNITES_DU_LICENCIEMENT_ABUSIF,
        articles="art. 39 (dommages-intérêts de la rupture abusive : 3 mois de salaire au "
                 "moins), avec les art. 36 et 37 : morceau 35.1"),
+    # voisins=15 : les lois sur la cybersecurite et les communications,
+    # redecoupees le 07/11/2026, ont plus d'articles proches de « internet » ; le
+    # Code penal passe au rang semantique 13, mais l'art. 318 reste lu au rang 1.
     _q("Que risque l’auteur d’une escroquerie sur internet ?", "fr", CODE_PENAL,
-       origine=SUGGESTION, rappel=True, repondent=_PEINE_DE_L_ARTICLE_318,
+       origine=SUGGESTION, rappel=True, voisins=15, repondent=_PEINE_DE_L_ARTICLE_318,
        articles="Code pénal art. 318 (1) c (escroquerie, cinq à dix ans) ; 321 (peines "
                 "doublées) n'y fait que renvoyer"),
     _q("Quels sont mes droits en garde à vue ?", "fr", CODE_DE_PROCEDURE_PENALE,

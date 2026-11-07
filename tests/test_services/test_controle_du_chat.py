@@ -1,3 +1,5 @@
+import dataclasses
+
 """
 Le controle du chat (app/services/controle_du_chat.py) et ses questions de
 reference (app/services/questions_de_reference.py).
@@ -350,7 +352,7 @@ class TestLesQuestionsDeReference:
 
         assert {q.langue for q in acces} == {"fr", "en"}
         for q in acces:
-            assert q.articles_attendus == (("LOI-2010-012", "65.2"),), q.question
+            assert q.articles_attendus == (("LOI-2010-012", "65"),), q.question
             assert q.renvoi == (("LOI-2010-012", "65"),), q.question
 
     def test_l_aupsrve_n_attend_jamais_son_numero_1(self):
@@ -371,11 +373,8 @@ class TestLesQuestionsDeReference:
     # recuperation finale : la liste est FERMEE, toute entree ou sortie passe
     # par ici, avec sa mesure (questions_de_reference, FAIBLESSES_CONNUES).
     FAIBLESSES_DU_30_10_2026 = {
-        "Quelle peine encourt l’auteur d’un vol ?",
-        "What penalty does the Penal Code provide for theft?",
         "Quel est le montant de l'amende prévue pour le vol ?",
         "Quel est le délai de préavis en cas de licenciement ?",
-        "How does the law punish unauthorised access to a computer system?",
         "How much compensation is allocated for unfair dismissal?",
     }
 
@@ -388,7 +387,7 @@ class TestLesQuestionsDeReference:
         assert set(faibles) == set(FAIBLESSES_CONNUES)
         for question, item in faibles.items():
             assert item.faiblesse == FAIBLESSES_CONNUES[question] and item.faiblesse.strip()
-        assert sum(q.garantie for q in QUESTIONS_DE_REFERENCE) == len(QUESTIONS_DE_REFERENCE) - 6
+        assert sum(q.garantie for q in QUESTIONS_DE_REFERENCE) == len(QUESTIONS_DE_REFERENCE) - 3
 
     def test_les_questions_qui_voient_les_pannes_rejouees_sont_garanties(self):
         """
@@ -1026,7 +1025,15 @@ class TestLeRenvoi:
     QUESTION = "Quelles peines pour l’accès non autorisé à un système d’information ?"
 
     def _juger(self, lus):
-        return juger(_de_reference(self.QUESTION), _contexte(lus, ["LOI-2010-012"]))
+        # Le decoupage d'avant le 07/11/2026 (65.1 et 65.2) : la mecanique du
+        # renvoi d'un morceau a l'autre reste celle du controle.
+        item = dataclasses.replace(
+            _de_reference(self.QUESTION),
+            articles_attendus=(("LOI-2010-012", "65.2"),),
+            regles=(("LOI-2010-012", "65.2", "tout accès non autorisé"),
+                    ("LOI-2010-012", "65", "amende de 5.000.000 (cinq millions) à 10.000.000 (dix millions)")),
+        )
+        return juger(item, _contexte(lus, ["LOI-2010-012"]))
 
     def test_l_alinea_qui_renvoie_lu_seul_ne_repond_pas(self):
         verdict = self._juger([("LOI-2010-012", "65.2", ALINEA_65_2), ("LOI-2010-012", "86")])
@@ -1453,7 +1460,7 @@ class TestLesFaiblessesConnues:
     qu'elle echoue ou qu'elle tienne de nouveau (« faiblesse résolue »).
     """
 
-    VOL = "Quelle peine encourt l’auteur d’un vol ?"
+    VOL = "Quel est le montant de l'amende prévue pour le vol ?"
     # Le contexte mesure du vol en francais (revue du tour 4, tour 5) : la peine
     # de l'art. 318 au rang 7, derriere le Code de justice militaire.
     LUS_DU_VOL = [("PRC-4722", "320", ARTICLE_320), ("PRC-4722", "91"), ("PRC-5695", "56"),
@@ -1473,7 +1480,7 @@ class TestLesFaiblessesConnues:
         return _de_reference(self.VOL), _contexte(lus or self.LUS_DU_VOL, ["PRC-4722"])
 
     @staticmethod
-    def _garantie(lus=(("LOI-1992-007", "35.1", MORCEAU_35_1_REEL),)):
+    def _garantie(lus=(("LOI-1992-007", "39", MORCEAU_35_1_REEL),)):
         """La question de l'incident, garantie, et un contexte (par defaut celui ou elle tient)."""
         return _de_reference(QUESTION_DE_L_INCIDENT), _contexte(list(lus), ["LOI-1992-007"])
 
@@ -1519,8 +1526,8 @@ class TestLesFaiblessesConnues:
         assert "faiblesse_connue" not in resumes[QUESTION_DE_L_INCIDENT]
 
     async def test_une_faiblesse_jamais_lue_donne_tout_ce_que_le_modele_lit(self, monkeypatch):
-        """« What penalty does the Penal Code provide for theft? » : l'art. 318 jamais lu."""
-        theft = _de_reference("What penalty does the Penal Code provide for theft?")
+        """« Quel est le montant de l'amende prévue pour le vol ? » : l'art. 318 jamais lu."""
+        theft = _de_reference("Quel est le montant de l'amende prévue pour le vol ?")
         lus = [("PRC-4722", "139"), ("PRC-4722", "320", ARTICLE_320), ("PRC-5695", "54")]
 
         code, rapport = await self._controler(
