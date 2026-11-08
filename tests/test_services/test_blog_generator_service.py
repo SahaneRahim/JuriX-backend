@@ -1665,7 +1665,9 @@ class TestLePlafondDePhrases:
         ).rediger(SUJET)
 
         from app.services.controle_du_billet import (
-            PHRASES_AU_PLUS, ContenuDuBillet, phrases_du_billet,
+            PHRASES_AU_PLUS,
+            ContenuDuBillet,
+            phrases_du_billet,
         )
         assert article.summary == resume  # jamais coupé
         assert article.suggested_question == ""

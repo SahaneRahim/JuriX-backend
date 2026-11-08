@@ -2126,7 +2126,9 @@ def _tenir_le_plafond(
     """Les points clés et la question, réduits sous PHRASES_AU_PLUS, ou ReponseInvalideError."""
     # Import tardif : controle_du_billet importe ce module.
     from app.services.controle_du_billet import (
-        PHRASES_AU_PLUS, ContenuDuBillet, phrases_du_billet,
+        PHRASES_AU_PLUS,
+        ContenuDuBillet,
+        phrases_du_billet,
     )
 
     def compte(points: List[str], question: str) -> int:
