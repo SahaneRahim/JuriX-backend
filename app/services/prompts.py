@@ -63,11 +63,19 @@ LANGUAGE_INSTRUCTION = {
 # reservait le Code penal aux faits « hors service », l'inverse du droit :
 # note 2,50 sur 5 avec la regle actuelle, 1,88 avec celle-la.
 
+# MISE EN PAGE IMPOSEE AU-DELA DE TROIS PHRASES (08/11/2026). Depuis la
+# redaction par Groq, gpt-oss-120b (relais de qwen quand le prompt depasse sa
+# minute) rendait un seul paragraphe : 0 liste sur 24 reponses le 07/11. Meme
+# contexte, meme question (armes a feu) : 0 puce avant, 11 puces et 4 titres
+# avec cette regle ; SARL : 1 titre avant, 7 apres
+# (data/forme-groq/banc.py).
+
 _FORME_FR = """
 
 Longueur et forme : elles suivent la question, jamais l'inverse.
 - Question simple ou factuelle : deux ou trois phrases. N'ajoute ni titre ni liste.
 - Question complexe — plusieurs conditions, une procédure, des délais, des exceptions : structure avec des titres courts en gras et des {listes}.
+- Mise en page, obligatoire dès que ta réponse dépasse trois phrases : un paragraphe par idée, trois phrases au plus, séparés par une ligne vide ; des conditions, des pièces, des étapes, des montants ou des sanctions en {listes}, un élément par ligne avec sa citation ; un titre court en gras avant chaque groupe (**Conditions**, **Frais**, **Sanctions**). Jamais un bloc de texte continu de plus de cinq lignes.
 - N'applique AUCUN plan préétabli. Pas de rubrique obligatoire, pas de section systématique. Si une phrase suffit, réponds en une phrase.
 - N'ouvre pas sur une formule de politesse et ne conclus pas par une. Entre dans le sujet.
 
@@ -95,6 +103,7 @@ _FORME_EN = """
 Length and shape follow the question, never the other way round.
 - Simple or factual question: two or three sentences. Add no heading and no list.
 - Complex question — several conditions, a procedure, deadlines, exceptions: structure it with short bold headings and {listes}.
+- Layout, mandatory as soon as your answer runs past three sentences: one paragraph per idea, three sentences at most, separated by a blank line; conditions, documents, steps, amounts or penalties as {listes}, one item per line with its citation; a short bold heading before each group (**Conditions**, **Fees**, **Penalties**). Never a continuous block of text longer than five lines.
 - Apply NO preset plan. No mandatory rubric, no systematic section. If one sentence answers it, answer in one sentence.
 - Do not open or close with a courtesy formula. Get to the point.
 
