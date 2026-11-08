@@ -569,7 +569,7 @@ RYTHMES = {"travail": (381, 51.2 / 21), "bail": (466, 78.7 / 23)}
 # (large4-low.log), remplacées par l'appel coupé de l'essai réel du 06/11, 12 000 jetons
 # en 105 s ; « plafond », ce que le plan prévoit au pire ; « lot-de-12 », un lot de 12 phrases de l'essai réel du tour 6 ;
 # « vite », le plus court de ses appels (11 phrases).
-APPELS_MESURES = {"pire": (12_000, 105.0), "plafond": (14_000, 125.0), "lot-de-12": (10_462, 76.0), "vite": (5_951, 40.5)}
+APPELS_MESURES = {"pire": (12_000, 105.0), "plafond": (15_500, 140.0), "lot-de-12": (10_462, 76.0), "vite": (5_951, 40.5)}
 CARACTERES_PAR_JETON_MESURES = 3.97
 
 

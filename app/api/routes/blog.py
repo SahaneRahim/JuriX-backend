@@ -156,14 +156,14 @@ AVENANT DU TOUR 6 (le modèle du contrôle, décision du 04/11) :
   lancé pendant un autre l'attend 20 s au plus, puis 503 `saturation` avec
   Retry-After (60) ; un 429 du fournisseur, ou le budget de jetons épuisé :
   503 `saturation` avec le délai connu en Retry-After. Rien n'est enregistré ;
-- 25 phrases au plus (un appel, 125 s au pire, pour 165 s) : au-delà, 422
+- 25 phrases au plus (un appel, 140 s au pire, pour 180 s) : au-delà, 422
   `entree_invalide` (« raccourcissez-le »).
 
 REVUE DU TOUR 6 (le budget de jetons de mistral-large-4) :
 - le contrôle se PLANIFIE avant son premier lot : attente d'un autre
   contrôle, attentes du budget de jetons entre ses lots et durée de ses lots
   au pire mesuré, comptées ensemble depuis l'entrée dans la route (le délai
-  de la route, 165 s, ou ce que /generate laisse). Un plan qui ne finit pas
+  de la route, 180 s, ou ce que /generate laisse). Un plan qui ne finit pas
   10 s avant l'échéance est refusé AVANT tout envoi : 503 `saturation`, un
   message sur le budget de jetons de l'article, et Retry-After = quand il
   tiendra (pas de Retry-After si une relance tient tout de suite) ; relancé
@@ -178,11 +178,11 @@ REVUE DU TOUR 6 (le budget de jetons de mistral-large-4) :
 AVENANT DU TOUR 7 (des deux côtés ; essai réel du 04/11 et décision du
 propriétaire, « Confirmer phrase par phrase ») :
 - UN APPEL PAR ARTICLE pour le modèle du contrôle (budget de jetons) : 25
-  phrases au plus, en un appel ; le plan compte un appel au pire mesuré (125 s,
+  phrases au plus, en un appel ; le plan compte un appel au pire mesuré (140 s,
   plus 10 s de marge), et refuse avant tout envoi ce qui ne tient pas (503
   `saturation` et Retry-After, comme au tour 6 ; au-delà de 25 phrases, 422
   `entree_invalide`). Délais : POST /{id}/controle répond en DELAI_CONTROLE_S
-  (165 s) au plus ; POST /generate en DELAI_DE_LA_REDACTION_S (190 s) au plus
+  (180 s) au plus ; POST /generate en DELAI_DE_LA_REDACTION_S (205 s) au plus
   quand le contrôle suit (génération et contrôle), ou 504 à DELAI_GENERATION_S
   (150 s) de génération ;
 - `controle_ia.phrases[].nature` : « regle » ou « autre » ;
@@ -609,15 +609,16 @@ class BlogPostUpdate(_Entree):
 # ==================== OUTILS ====================
 
 # La génération et le contrôle qui la suit, ensemble, quand c'est possible
-# (le front abandonne à 200 s) ; le contrôle garde au moins de quoi juger un
+# (le front abandonne à 215 s) ; le contrôle garde au moins de quoi juger un
 # article court. TOUR 7 (mistral-large-4, UN appel) : une génération de 15 à
 # 20 s (essai réel du 04/11 : brouillon enregistré 18,0 et 20,7 s après le
 # clic) laisse au contrôle tout DELAI_CONTROLE_S, soit son appel au pire
-# mesuré et sa marge (135 s) et 30 s d'attente ; une génération de plus de 55 s
-# lui en laisse moins de 135 : le plan le refuse avant tout envoi, et le
+# mesuré et sa marge (150 s) et 30 s d'attente ; une génération de plus de 55 s
+# lui en laisse moins de 150 (plafond relevé à 15 500 jetons le 08/11 :
+# 180 + 25 s ; sous les 300 s d'inactivité de Railway, avec 85 s de marge) : le plan le refuse avant tout envoi, et le
 # brouillon reste à contrôler (rien n'est payé pour rien). Le minimum de 30 s
 # ne vaut que pour un modèle sans plan (doublure, Gemini, ministral).
-DELAI_DE_LA_REDACTION_S = 190
+DELAI_DE_LA_REDACTION_S = 205
 DELAI_CONTROLE_APRES_GENERATION_AU_MOINS_S = 30
 
 
@@ -1224,7 +1225,7 @@ async def generate_blog_post(
     )
     logger.info(f"📝 Blog : brouillon {post.id} « {post.slug} » enregistré")
     # Génération et contrôle tiennent ensemble dans DELAI_DE_LA_REDACTION_S
-    # quand c'est possible : le front abandonne à 200 s (revue du tour 3 : 150
+    # quand c'est possible : le front abandonne à 215 s (revue du tour 3 : 150
     # puis 120 s côté serveur). Un contrôle trop court échoue sans rien
     # perdre : le brouillon reste, à contrôler.
     delai = delai_du_controle_apres_la_generation(time.monotonic() - debut)

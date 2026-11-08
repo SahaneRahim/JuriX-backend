@@ -160,23 +160,27 @@ logger = logging.getLogger(__name__)
 # ==================== RÉGLAGES ====================
 
 # Délai du contrôle (route POST /{id}/controle, et au plus après la génération).
-# POURQUOI 165 s (essai réel du 06/11) : UN appel au pire, marge comprise
-# (DUREE_D_UN_APPEL_AU_PIRE_S + MARGE_DU_PLAN_S = 135 s), et 30 s pour attendre
+# POURQUOI 180 s (essais réels du 06/11 et du 08/11) : UN appel au pire, marge
+# comprise (DUREE_D_UN_APPEL_AU_PIRE_S + MARGE_DU_PLAN_S = 150 s), et 30 s pour attendre
 # un autre contrôle ou que le budget de jetons se refasse. Au-delà, le plan
 # refuse avant tout envoi (503 et Retry-After) : une attente plus longue tient
 # l'administrateur devant un sablier sans rien juger, quand une relance au
 # Retry-After juge en 40 à 105 s (essais réels du 04/11 et du 06/11).
-DELAI_CONTROLE_S = 165
+DELAI_CONTROLE_S = 180
 # Le contrôle n'invente rien : il juge.
 CONTROLE_TEMPERATURE = 0.0
-# La sortie d'un appel, réflexion comprise. POURQUOI 14 000 : l'essai réel du
-# 06/11 a buté sur l'ancien plafond (fin=MAX_TOKENS, 4 093 + 12 000 jetons en
-# 105 s, donc aucun verdict) ; le plus mesuré jusque-là était 10 720 (le bail).
-# Pas davantage : la plus grosse entrée mesurée (5 582 jetons) et ce plafond
-# tiennent encore ensemble dans les 20 000 jetons par minute de la clé, et chaque
-# millier de jetons coûte ~9 s de plus au pire. Le besoin réel de l'appel coupé
-# reste inconnu : s'il dépasse 14 000, il échoue sans verdict, comme avant.
-CONTROLE_MAX_TOKENS = 14_000
+# La sortie d'un appel, réflexion comprise. POURQUOI 15 500 (décision du
+# propriétaire, essais réels du 08/11) : le 06/11, l'appel a buté sur 12 000
+# (fin=MAX_TOKENS, 4 093 + 12 000 jetons en 105 s) ; le 08/11, le premier
+# contrôle a buté DEUX FOIS sur 14 000, puis une relance a jugé dans le
+# plafond ; sortie mesurée à 114-124 jetons par seconde. Pas davantage : avec
+# l'entrée d'un article généré (~4 000 jetons, 4 093 le 06/11), entrée et
+# sortie doivent tenir ensemble dans les 20 000 jetons par minute de la clé
+# (4 400 + 15 500 = 19 900). Une entrée plus grosse (5 582 le 04/11, le
+# travail) peut dépasser la minute si l'appel va au plafond. Chaque millier
+# de jetons coûte ~9 s de plus au pire ; au-delà de 15 500, l'appel échoue
+# sans verdict, comme avant.
+CONTROLE_MAX_TOKENS = 15_500
 # LES APPELS (tour 5, défaut D2 de la revue du tour 4 ; tour 6, mistral-large-4).
 # TOUR 7 : pour un modèle à budget de jetons (mistral-large-4), UN SEUL appel
 # par article jusqu'à PHRASES_AU_PLUS (lots_du_controle(…, un_seul_appel=True)) ;
@@ -200,7 +204,7 @@ CONTROLE_MAX_TOKENS = 14_000
 #   par seconde) ;
 # - travail : 21 phrases en 51,2 s, 2,4 s par phrase ; 5 582 + 7 992.
 # Au pire mesuré (3,42 s par phrase), 80 phrases en série prendraient ~274 s,
-# bien au-delà des 165 s de DELAI_CONTROLE_S.
+# bien au-delà des 180 s de DELAI_CONTROLE_S.
 # PHRASES_AU_PLUS = 25, au-dessus des 20 à 24 phrases d'un article généré
 # (essais réels du 04/11). Pour un modèle à budget de jetons, c'est aussi la
 # taille de son UN appel (tour 7). Pour les autres, un article de 21 à 25
@@ -208,8 +212,8 @@ CONTROLE_MAX_TOKENS = 14_000
 # (jamais quatre : deux appels qui se suivent comptent ensemble plus de
 # PHRASES_PAR_APPEL phrases, sinon ils n'en feraient qu'un).
 # LA PREUVE DU PLAFOND (tour 7 ; TestLesLots la refait). Seul, un contrôle est
-# UN appel : DUREE_D_UN_APPEL_AU_PIRE_S + MARGE_DU_PLAN_S = 135 s, quelle que
-# soit sa taille, sous les 165 s de DELAI_CONTROLE_S ; il reste 30 s pour
+# UN appel : DUREE_D_UN_APPEL_AU_PIRE_S + MARGE_DU_PLAN_S = 150 s, quelle que
+# soit sa taille, sous les 180 s de DELAI_CONTROLE_S ; il reste 30 s pour
 # attendre un autre contrôle (le verrou du modèle) ou le budget de jetons. Un
 # contrôle qui devrait attendre plus est refusé AVANT tout envoi, avec le
 # Retry-After où son plan tient ; relancé alors, il finit dans le délai.
@@ -225,18 +229,20 @@ PHRASES_AU_PLUS = 25
 # à 60,3 s pour des lots de 10 ou 11. Le plan à 3,42 s par phrase prévoyait
 # 41 s pour le lot de 12 : il en a pris 76, et le contrôle a fini en 504
 # après deux lots payés.
-# POURQUOI 125 s (essai réel du 06/11) : 80 s ne tenait pas, un appel a pris
-# 105 s pour 12 000 jetons. Au plafond et à cette vitesse, 14 000 jetons
-# prennent ~122,5 s : c'est le plafond qui borne la durée, plus une mesure.
-DUREE_D_UN_APPEL_AU_PIRE_S = 125.0
+# POURQUOI 140 s (essais réels du 06/11 et du 08/11) : 80 s ne tenait pas, un
+# appel a pris 105 s pour 12 000 jetons (114 par seconde, le plus lent mesuré,
+# retrouvé le 08/11). Au plafond et à cette vitesse, 15 500 jetons prennent
+# ~135,6 s : c'est le plafond qui borne la durée, plus une mesure.
+DUREE_D_UN_APPEL_AU_PIRE_S = 140.0
 # La sortie qu'un appel peut prendre au budget de jetons, réflexion comprise :
-# son plafond, CONTROLE_MAX_TOKENS (12 000 atteints le 06/11). Elle ne sert
+# son plafond, CONTROLE_MAX_TOKENS (12 000 atteints le 06/11, 14 000 le 08/11). Elle ne sert
 # qu'à prévoir l'attente du contrôle suivant dans la file.
 JETONS_DE_SORTIE_D_UN_APPEL_AU_PIRE = CONTROLE_MAX_TOKENS
 # La vitesse de sortie la plus lente mesurée : 12 000 jetons en 105 s (114 par
-# seconde, essai réel du 06/11 ; les appels du 04/11, 136 à 169). POURQUOI elle
-# compte : un appel rend au plus CONTROLE_MAX_TOKENS, donc dure au plus ~122,5 s
-# à cette vitesse, sous les 125 s du plan, et les 135 s qu'il garde avec la marge.
+# seconde, essai réel du 06/11 ; 114 à 124 le 08/11 ; les appels du 04/11, 136
+# à 169). POURQUOI elle compte : un appel rend au plus CONTROLE_MAX_TOKENS, donc
+# dure au plus ~135,6 s à cette vitesse, sous les 140 s du plan, et les 150 s
+# qu'il garde avec la marge.
 JETONS_PAR_SECONDE_AU_PIRE = 12_000 / 105
 # POURQUOI une marge : le pire n'est que le pire de quelques mesures ; un
 # contrôle prévu au bord du délai finissait en 504 après des appels payés

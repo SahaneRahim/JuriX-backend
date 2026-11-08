@@ -1429,7 +1429,7 @@ class TestLePlanDuControleParLaRoute:
     délai de la route est refusé avant tout envoi, avec le Retry-After où il tiendra.
     Tour 7 (essai réel du 04/11) : un lot de 11 ou 12 phrases prend 40 à 76 s quelle que soit sa
     taille ; deux lots ont fini en 504 après avoir été payés. UN appel par article, compté au
-    pire d'un appel (125 s, et 10 s de marge).
+    pire d'un appel (140 s, et 10 s de marge).
     """
 
     async def test_un_plan_qui_ne_tient_pas_est_refuse_avant_tout_envoi_puis_aboutit(
@@ -1439,7 +1439,7 @@ class TestLePlanDuControleParLaRoute:
         Le budget de jetons plein (un appel d'ailleurs sur la même clé : le fournisseur dit 0
         jeton restant), un article de 24 phrases ne finirait pas à temps : 503 `saturation`, un
         message sur le budget de jetons de l'article, le Retry-After où son plan tient (60 s
-        d'attente, 125 s d'appel et 10 s de marge pour 165 : 30 s), lisible par le front ; rien
+        d'attente, 140 s d'appel et 10 s de marge pour 180 : 30 s), lisible par le front ; rien
         d'envoyé, rien de perdu. Relancé alors : 200, en UN appel.
         """
         generateur.llm = modele_double(article_du_modele(
@@ -1478,7 +1478,7 @@ class TestLePlanDuControleParLaRoute:
         """
         Le cas de l'essai réel du 04/11 (23 phrases, lots de 12 et 11 : 504 après deux lots payés),
         par les deux routes, au plafond : le prompt porte toutes les phrases, et rien n'y dit
-        qu'il en reste à juger à part ; au pire mesuré d'un appel, sous les 165 s de la route.
+        qu'il en reste à juger à part ; au pire mesuré d'un appel, sous les 180 s de la route.
         """
         generateur.llm = _controle_au_rythme(0, [], _article_de(1, question=3))
         generateur.llm_du_controle = mistral_service.mistral_du_controle()
@@ -1529,10 +1529,10 @@ class TestLePlanDuControleParLaRoute:
         self, admin_client, generateur, controleur, grand_modele, monkeypatch
     ):
         """
-        /generate ne laisse au contrôle que ce qui reste de ses 190 s (30 s au moins) : un plan
+        /generate ne laisse au contrôle que ce qui reste de ses 205 s (30 s au moins) : un plan
         qui n'y tient pas n'envoie rien (avant, ses lots partaient, payés, et l'échéance le
         coupait). Le brouillon est enregistré sans contrôle, l'avertissement dit pourquoi et de
-        relancer ; à la demande (165 s), le contrôle aboutit, en un appel.
+        relancer ; à la demande (180 s), le contrôle aboutit, en un appel.
         """
         monkeypatch.setattr(routes_du_blog, "DELAI_DE_LA_REDACTION_S", 40)
         generateur.llm_du_controle = mistral_service.mistral_du_controle()
@@ -1556,15 +1556,15 @@ class TestLesDelaisDesRoutes:
     """
 
     def test_ils_tiennent_une_generation_et_un_appel_avec_de_la_marge(self):
-        """Mesuré : génération 15 à 20 s (essai réel du 04/11) ; un appel 125 s au pire (06/11), et 10 s de marge."""
+        """Mesuré : génération 15 à 20 s (essai réel du 04/11) ; un appel 140 s au pire (plafond de 15 500 jetons, 08/11), et 10 s de marge."""
         appel = DUREE_D_UN_APPEL_AU_PIRE_S + MARGE_DU_PLAN_S
 
-        assert (routes_du_blog.DELAI_CONTROLE_S, routes_du_blog.DELAI_DE_LA_REDACTION_S) == (165, 190)
+        assert (routes_du_blog.DELAI_CONTROLE_S, routes_du_blog.DELAI_DE_LA_REDACTION_S) == (180, 205)
         assert appel + 30 <= routes_du_blog.DELAI_CONTROLE_S
         assert 20 + appel + 30 <= routes_du_blog.DELAI_DE_LA_REDACTION_S
 
     @pytest.mark.parametrize("ecoule, delai", [
-        (0, 165), (15, 165), (25, 165), (30, 160), (45, 145), (55, 135), (56, 134), (160, 30), (189, 30),
+        (0, 180), (15, 180), (25, 180), (30, 175), (45, 160), (55, 150), (56, 149), (175, 30), (204, 30),
     ])
     def test_la_part_du_controle_dans_generate(self, ecoule, delai):
         """

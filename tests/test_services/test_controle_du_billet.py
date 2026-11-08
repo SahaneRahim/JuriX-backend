@@ -36,7 +36,7 @@ Ce que ces tests protègent, dans l'ordre d'importance :
      lot attend ce que le plan lui laisse, et non les 20 s du chat. Sur
      l'article RÉEL, au coût et au rythme mesurés le 04/11. Tour 7 : UN appel
      par article pour le modèle à budget de jetons, compté au pire mesuré
-     d'un appel (125 s), quelle que soit sa taille.
+     d'un appel (140 s), quelle que soit sa taille.
   7. LES PHRASES À CONFIRMER (tour 7, décision du 04/11) : une phrase de règle
      non trouvée dans les extraits se réécrit ou se confirme une à une avant
      publication ; une confirmation tombe comme une case.
@@ -1760,7 +1760,7 @@ class TestLePrompt:
         # Gemini range les champs par ordre alphabétique : le verdict y reste le dernier.
         assert sorted(ordre)[-1] == "verdict"
         assert CONTROLE_TEMPERATURE == 0.0
-        assert DELAI_CONTROLE_S == 165
+        assert DELAI_CONTROLE_S == 180
 
 
 # ==================== 5 bis. LES APPELS DU CONTRÔLE (TOUR 5, D2) ====================
@@ -1822,9 +1822,9 @@ class TestLesLots:
         Ici, l'article RÉEL du travail porté au plafond (25 phrases), avec ses extraits ou
         jusqu'aux 36 000 caractères du contrôle, au plan de production :
         - UN appel ; seul, il dure DUREE_D_UN_APPEL_AU_PIRE_S (au plafond, à la vitesse la plus
-          lente mesurée) : marge comprise, 135 s, sous les 165 s du délai, et 30 s restent pour attendre ;
+          lente mesurée) : marge comprise, 150 s, sous les 180 s du délai, et 30 s restent pour attendre ;
         - un appel rend au plus CONTROLE_MAX_TOKENS : à la vitesse la plus lente
-          mesurée, il dure au plus ~122,5 s, sous les 125 s du plan ;
+          mesurée, il dure au plus ~135,6 s, sous les 140 s du plan ;
         - lancé à chaque seconde des 20 dernières d'un autre pareil (prévu au pire), il tient
           APRÈS lui : les jetons de l'autre sont sortis de la minute quand il part.
         """
@@ -1851,10 +1851,11 @@ class TestLesLots:
             assert plan.lots[0].depart == pytest.approx(seul.fin)
             assert plan.fin + MARGE_DU_PLAN_S <= arrivee + DELAI_CONTROLE_S + 1e-6
             assert attente >= avant_la_fin
-        # Le plafond dépasse celui qui a coupé l'essai réel du 06/11 (12 000) et tient, avec la
-        # plus grosse entrée mesurée, dans la minute ; le plan le compte entier pour le suivant.
+        # Le plafond dépasse ceux qui ont coupé les essais réels du 06/11 (12 000) et du 08/11
+        # (14 000), et tient, avec l'entrée d'un article généré (~4 000 jetons, marge comprise),
+        # dans la minute ; le plan le compte entier pour le suivant.
         assert JETONS_DE_SORTIE_D_UN_APPEL_AU_PIRE == CONTROLE_MAX_TOKENS
-        assert 12_000 < CONTROLE_MAX_TOKENS <= 20_000 - 5_582
+        assert 14_000 < CONTROLE_MAX_TOKENS <= 20_000 - 4_400
 
     @pytest.mark.parametrize("groupes", [
         (("titre", 0, 1), ("contexte", 0, 3), ("resume", 0, 5), *(("point_cle", i, 2) for i in range(5)),
@@ -2725,13 +2726,13 @@ class TestLePlanDuControle:
         assert double.requetes[-1]["depart"] == pytest.approx(debut + 60.0, abs=0.1)
         assert horloge.t - (debut + refus.value.retry_after) <= DELAI_CONTROLE_S - MARGE_DU_PLAN_S + 1e-6
 
-    @pytest.mark.parametrize("delai, tient", [(40, False), (134, False), (135, True), (165, True)])
+    @pytest.mark.parametrize("delai, tient", [(40, False), (149, False), (150, True), (180, True)])
     async def test_ce_que_generate_laisse_au_controle(self, grand_modele, db_session, delai, tient):
         """
         Après la génération, le contrôle n'a que ce qui reste (routes/blog,
-        delai_du_controle_apres_la_generation). Son appel au pire et sa marge (135 s) y
+        delai_du_controle_apres_la_generation). Son appel au pire et sa marge (150 s) y
         tiennent, ou il est refusé avant tout envoi, au lieu d'un 504 après un appel payé ;
-        relancé à la demande (165 s), il tient tout de suite : pas de Retry-After.
+        relancé à la demande (180 s), il tient tout de suite : pas de Retry-After.
         """
         double = grand_modele.au_rythme("pire")
         post = article_reel(18_000)
@@ -2825,8 +2826,8 @@ class TestLePlanDuControle:
         premier = asyncio.create_task(ControleDuBillet(db_session).controler(post))
         await double.en_pause.wait()
         if en_retard:
-            # Le premier devait finir à 125 s au pire ; il juge encore à 130 s.
-            grand_modele.horloge.t = 130.0
+            # Le premier devait finir à 140 s au pire ; il juge encore à 145 s.
+            grand_modele.horloge.t = 145.0
 
         with pytest.raises(BudgetDuControleError) as refus:
             await ControleDuBillet(db_session).controler(post)
@@ -2839,7 +2840,7 @@ class TestLePlanDuControle:
         if en_retard:
             assert refus.value.retry_after == 60 and "il dure plus que prévu" in message
         else:
-            assert refus.value.retry_after == 65 and "sa fin est prévue dans ~65 s" in message
+            assert refus.value.retry_after == 80 and "sa fin est prévue dans ~80 s" in message
 
     async def test_le_client_attend_ce_que_le_controle_lui_permet(self, grand_modele):
         """
