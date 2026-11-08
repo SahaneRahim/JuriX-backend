@@ -77,6 +77,15 @@ _TYPES = (
     ("instruction", "instruction"),
     ("constitution", "loi"),
     ("loi", "loi"),
+    # Section anglaise de prc.cm. « degree » : coquille du site pour « decree ».
+    # « order n » et non « order » : la recherche dans tout le titre prendrait
+    # « in order to » pour un arrete.
+    ("decree", "décret"),
+    ("degree", "décret"),
+    ("ordinance", "ordonnance"),
+    ("order n", "arrêté"),
+    ("circular", "circulaire"),
+    ("law", "loi"),
     # En DERNIER : la recherche dans tout le titre suit cet ordre, et
     # « Decret portant ratification de l'Acte uniforme… » reste un decret.
     ("acte uniforme", "acte uniforme"),
@@ -230,6 +239,14 @@ def _numero_acte(titre: str) -> Optional[str]:
     return re.sub(r"\s+", "", trouve.group(1)) if trouve else None
 
 
+# Fiches auxquelles prc.cm attache le PDF d'un AUTRE acte : jamais retenues
+# comme porteuses du texte. 9588 (« to appoint the Deputy... ») sert le PDF du
+# decret 9591 (application de la loi 97/012) ; son propre texte n'est pas sur
+# le site. Sans cette liste, le plus petit doc_id gagnait et le texte du 9591
+# paraissait sous le titre du 9588.
+_PDF_D_UN_AUTRE_ACTE = frozenset({"9588"})
+
+
 def _canoniques(documents: List[Document]) -> Dict[str, Optional[Document]]:
     """
     Pour chaque document, le document qui porte son contenu en base.
@@ -249,6 +266,7 @@ def _canoniques(documents: List[Document]) -> Dict[str, Optional[Document]]:
     canoniques: Dict[str, Optional[Document]] = {}
     for groupe in par_sha.values():
         groupe = sorted(groupe, key=lambda d: (
+            d.doc_id in _PDF_D_UN_AUTRE_ACTE,
             _infer_type(d.titre) == "autre" or not re.match(r"\s*[A-Za-zÀ-ÿ]+\s+N", d.titre),
             int(d.doc_id) if d.doc_id.isdigit() else 0,
         ))
@@ -262,7 +280,10 @@ def _noter_doublon(document: Document, canonique: Document) -> None:
     """La ligne du doublon existe, 'refused', et dit pourquoi : visible, jamais indexee."""
     reference = document.cote
     raison = f"Meme PDF que {canonique.cote} : non indexe en double."
-    if _numero_acte(document.titre) != _numero_acte(canonique.titre):
+    if document.doc_id in _PDF_D_UN_AUTRE_ACTE:
+        raison = (f"prc.cm sert sous cette fiche le PDF de {canonique.cote} ; "
+                  "le texte de cet acte n'est pas sur le site.")
+    elif _numero_acte(document.titre) != _numero_acte(canonique.titre):
         raison += " Numeros d'acte differents : l'un des deux titres est faux, a verifier."
     with SyncSessionLocal() as session:
         loi = session.query(Law).filter(Law.reference == reference).first()

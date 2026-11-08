@@ -483,6 +483,16 @@ class TestMetadonnees:
          "décret"),
         ("Traité relatif à l'harmonisation du droit des affaires en Afrique", "autre"),
         ("Loi-cadre N°2011/012 du 06 mai 2011 portant protection du consommateur", "loi"),
+        # Section anglaise de prc.cm
+        ("Decree No.2026/334 of 16 October 2026 to appoint the President", "décret"),
+        ("Degree No.2025/468 of 11 September 2025 to appoint an Inspector", "décret"),
+        ("Law No. 2006/018 of 29 December 2006 to regulate advertising", "loi"),
+        ("Ordinance No. 2020/001 of 1 May 2020 to amend", "ordonnance"),
+        ("Order No. 0590/CAB/PR of 17 August 2026 to appoint", "arrêté"),
+        ("Circular No.001 of 12 October 2026 on the preparation of the State budget",
+         "circulaire"),
+        # « in order to » ne fait pas d'un decret un arrete
+        ("Instrument of Full Powers No. 2020/137 in order to authorize", "autre"),
     ])
     def test_type_lu_sur_le_premier_mot(self, titre, attendu):
         assert ingest_corpus._infer_type(titre) == attendu
@@ -694,3 +704,18 @@ class TestIndexationRobuste:
 
         with pytest.raises(ingest_corpus.PanneDeBase):
             ingest_corpus.indexer([doc], ext, stockage, traiter=traiter, attentes_s=(0, 0))
+
+
+class TestPdfErroneDuSite:
+    """prc.cm sert parfois le PDF d'un acte sous la fiche d'un autre."""
+
+    def test_le_texte_va_sous_la_fiche_de_son_propre_acte(self):
+        # 9588 (« to appoint the Deputy... ») et 9591 servent le meme PDF, qui
+        # est le decret 9591. Le plus petit doc_id ne doit pas l'emporter.
+        a = Document(doc_id="9588", chemin="a.pdf", sha256="x", pages=2,
+                     titre="Decree No.2023/144 of 24 February 2023 to appoint the Deputy")
+        b = Document(doc_id="9591", chemin="b.pdf", sha256="x", pages=2,
+                     titre="Decree No. 2023/147 of 02 March 2023 to lay down the conditions")
+        canoniques = ingest_corpus._canoniques([a, b])
+        assert canoniques["9591"] is None
+        assert canoniques["9588"] is b
