@@ -2808,6 +2808,16 @@ def _resoudre_article(
             debut_du_nom=debut, fin_du_nom=fin_du_nom
         )
     if not nom.lois:
+        # La phrase jusqu'a sa fin, pas le nom coupe a la virgule : « du Décret
+        # habilitant à signer un Accord de Prêt, pour le financement du
+        # Programme Bâtir les Écoles » ne designe pas un autre decret
+        # « habilitant à signer un Accord de prêt ».
+        fin_de_phrase = re.compile(r"[;:!?\n]|\.(?:\s|$)").search(texte, debut)
+        rapproche = _rapprocher(
+            texte[debut:fin_de_phrase.start() if fin_de_phrase else len(texte)], voulu, lecture
+        )
+        if rapproche is not None:
+            return rapproche._replace(natures=nom.natures, debut_du_nom=debut, fin_du_nom=fin_du_nom)
         return _Resolution(
             None, False, "texte_non_consulte", frozenset(), nom.natures, debut, fin_du_nom,
             vague=nom.vague,
@@ -3092,6 +3102,108 @@ def _designe_l_extrait(designation: _Designation, extrait: ChunkResult, voulu: s
     if extrait.law_id not in designation.lois:
         return False
     return extrait.law_id not in designation.cites or _reecrit_l_article(extrait, voulu)
+
+
+# Mots qui ne distinguent aucun texte : natures, liaisons, formules des
+# intitules. Le reste (« travail », « AUSCGIE », « foncier », « OHADA »)
+# designe un texte.
+_MOTS_COMMUNS = frozenset("""
+    loi lois law laws acte actes act acts uniforme uniformes revise code codes
+    decret decrets decree arrete arretes order ordonnance ordonnances
+    decision circulaire instruction traite convention reglement texte textes
+    portant relatif relative relatifs relatives modifiant completant fixant
+    the and of on du de des la le les l d au aux et en sur par pour dans
+    n no nr numero camerounais camerounaise cameroun cameroon republique
+""".split())
+
+
+# Mots des formules d'intitule : presents dans des centaines de textes, ils ne
+# designent aucun d'eux (« Décret portant création », « loi de finances »).
+_MOTS_DE_FORMULE = frozenset("""
+    creation organisation fonctionnement nomination application modalites
+    habilitant ratification autorisant approbation attributions finances
+    exercice general generale generaux statut statuts regime dispositions
+""".split())
+
+
+# Mots de liaison que _enchaine_la_phrase arrete, mais qui continuent un nom
+# (« la loi relative à la lutte contre la corruption », « Accord de Prêt,
+# pour le financement du Programme Bâtir les Écoles »).
+_PREPOSITIONS_DU_NOM = frozenset("""
+    pour contre avec sans sur sous entre par en a à au aux de du des et ou
+    of for on and against with
+""".split())
+
+
+def _nom_sans_la_suite(mention: str) -> str:
+    """La mention jusqu'au mot qui enchaine la phrase (« … AUSCGIE précise »)."""
+    mots = []
+    for mot in _MOT.findall(mention):
+        brut = mot.strip(".,;").casefold()
+        if brut not in _PREPOSITIONS_DU_NOM and _enchaine_la_phrase(brut):
+            break
+        mots.append(mot)
+    return " ".join(mots)
+
+
+def _mots_distinctifs(texte: str) -> Tuple[FrozenSet[str], FrozenSet[str]]:
+    """(mots distinctifs, annees) d'un nom, plie et sans accents (normaliser_le_nom)."""
+    mots = re.findall(r"[a-z0-9]+", normaliser_le_nom(texte))
+    annees = frozenset(m for m in mots if re.fullmatch(r"(1[89]|20)\d\d", m))
+    distinctifs = frozenset(
+        m for m in mots
+        if m not in _MOTS_COMMUNS and m not in _MOTS_DE_FORMULE and m not in annees
+        and not m.isdigit() and len(m) >= 3
+    )
+    return distinctifs, annees
+
+
+def _rapprocher(nom: str, voulu: str, lecture: "_Lecture") -> Optional["_Resolution"]:
+    """
+    Dernier recours avant « texte_non_consulte » : un nom que la lecture ne
+    reconnait pas, mais dont TOUS les mots distinctifs sont dans l'intitule
+    ou la reference d'UN seul texte lu, qui porte cet article. Le modele deforme le nom qu'il recopie (« la Loi
+    OHADA AUSCGIE 2014 », « le Code camerounais du travail de 1992 »,
+    « l'Acte uniforme sur les sociétés ») ; la citation, juste, etait
+    signalee « non retrouvée » (chat du 08/11/2026).
+
+    Jamais quand le nom contredit le texte : une annee absente de sa
+    reference, de son intitule et de sa date, un mot distinctif absent
+    (« l'article 76 du Code du travail » face a la seule loi de finances lue),
+    ou plusieurs textes lus aussi proches.
+    """
+    if lecture.noms_identifies >= _NOMS_LUS_AU_PLUS:
+        return None
+    distinctifs, annees = _mots_distinctifs(_nom_sans_la_suite(nom))
+    if not distinctifs:
+        return None
+    retenus = []
+    for law_id, extrait in lecture.premiers.items():
+        mots_du_texte, annees_du_texte = _mots_distinctifs(
+            f"{extrait.law_title} {re.sub(r'[_-]+', ' ', extrait.reference or '')}"
+        )
+        # L'annee de l'intitule prime : « loi de finances pour l'exercice
+        # 2023 », votee en 2022, n'est pas « la loi de finances 2022 ».
+        # Sans annee dans l'intitule, celles de la reference et de la date.
+        _, annees_du_titre = _mots_distinctifs(extrait.law_title)
+        if annees_du_titre:
+            annees_du_texte = annees_du_titre
+        elif extrait.publication_date:
+            annees_du_texte |= {str(extrait.publication_date.year)}
+        # TOUS les mots distinctifs du nom : un seul mot commun rattachait
+        # « l'Acte uniforme relatif au droit des sociétés commerciales », non
+        # lu, a l'Acte uniforme relatif au droit commercial general, ou « le
+        # Code de procédure civile » au Code de procédure pénale.
+        if not distinctifs <= mots_du_texte or (annees and not annees & annees_du_texte):
+            continue
+        retenus.append((len(distinctifs), law_id))
+    if not retenus:
+        return None
+    retenus.sort(reverse=True)
+    if len(retenus) > 1 and retenus[0][0] == retenus[1][0]:
+        return None
+    resolution = _dans_ces_textes_lus(voulu, lecture, frozenset({retenus[0][1]}))
+    return resolution if resolution.extrait is not None else None
 
 
 def _dans_ces_textes_lus(

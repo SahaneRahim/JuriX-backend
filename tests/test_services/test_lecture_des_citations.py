@@ -3040,3 +3040,44 @@ class TestCoutBorne:
         # La borne laisse de la marge a une machine chargee : la production
         # (d99e23c) prenait jusqu'a 11 s sur ces textes.
         assert time.perf_counter() - debut < 1
+
+
+class TestNomDeformeRapproche:
+    """
+    Dernier recours (_rapprocher) : un nom deforme par le modele est rattache
+    au seul texte lu qui partage un de ses mots distinctifs et porte l'article ;
+    jamais quand le nom contredit les textes lus (chat du 08/11/2026).
+    """
+
+    SOCIETES = ("Acte uniforme révisé relatif au droit des sociétés commerciales "
+                "et du groupement d'intérêt économique")
+
+    @pytest.fixture
+    def lus(self):
+        return [
+            _extrait(1, 2284, "309", self.SOCIETES, "OHADA-AUSCGIE-2014", jour=date(2014, 1, 30)),
+            _extrait(2, 7, "76.37", "Loi de finances de la République du Cameroun pour "
+                     "l'exercice 2023", "LOI-2022-020", jour=date(2022, 12, 23)),
+            _extrait(3, 8, "62", "Loi n° 92/007 du 14 août 1992 portant Code du travail",
+                     "LOI-1992-007"),
+        ]
+
+    @pytest.mark.parametrize("texte, article_id", [
+        ("L'article 309 de la loi AUSCGIE précise.", 1),
+        ("L'article 309 de l'Acte uniforme sur les sociétés commerciales précise.", 1),
+        ("L'article 62 du Code camerounais du travail de 1992 dispose.", 3),
+        ("L'article 62 de la loi sur le travail dispose.", 3),
+    ])
+    def test_nom_deforme_rattache(self, lus, texte, article_id):
+        [occurrence] = lire_les_citations(texte, lus)
+        assert not occurrence.introuvable
+        assert occurrence.extrait.article_id == article_id
+
+    @pytest.mark.parametrize("texte", [
+        "L'article 76 du Code du travail dispose.",  # l'article 76 n'est pas lu
+        "L'article 309 de la loi sur les sociétés de 2010 dispose.",  # autre annee
+        "L'article 309 du Code pénal dispose.",  # aucun mot commun
+    ])
+    def test_nom_qui_contredit_reste_signale(self, lus, texte):
+        [occurrence] = lire_les_citations(texte, lus)
+        assert occurrence.introuvable
