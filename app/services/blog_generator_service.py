@@ -1893,7 +1893,9 @@ Rédige l'article en JSON, avec ces champs :
 - citations : pour chaque extrait utilisé, {{"extrait": son numéro entre 1 et {n}, "objet": ce qu'il établit pour le lecteur, en une phrase}}.
 - citizen_impact : ce que cela change concrètement pour le lecteur, et la démarche à suivre si les extraits la donnent.
 - suggested_question : une question que le lecteur peut poser à l'assistant de JuriX sur son propre cas.
-- tags : trois à six mots-clés courts."""
+- tags : trois à six mots-clés courts.
+
+LONGUEUR : l'article entier (titre, contexte, résumé, points clés, impact, explications des citations et question) tient en {PHRASES_VISEES} phrases au plus ; c'est la limite du contrôle, qui refuse un article plus long. Fais des phrases complètes, jamais des listes coupées en morceaux."""
 
 
     # ------------------------------------------------------------ modèle
@@ -2059,6 +2061,11 @@ Rédige l'article en JSON, avec ces champs :
 
         # La prose relue contre les extraits LUS : ce qu'aucun ne porte vient
         # de la mémoire du modèle.
+        key_points, suggested_question = _tenir_le_plafond(
+            title, context, summary, key_points, citizen_impact, citations,
+            suggested_question, avertissements,
+        )
+
         champs = champs_de_prose(
             title, context, summary, key_points, citizen_impact, suggested_question, [], tags,
         ) + [(f"Citation de l'extrait {n} (explication)", objet) for n, objet in objets.items() if objet]
@@ -2080,6 +2087,85 @@ Rédige l'article en JSON, avec ces champs :
             sources=sources,
             avertissements=avertissements,
         )
+
+
+# LA LONGUEUR DE L'ARTICLE (option 2 du propriétaire, 08/11).
+# POURQUOI : le contrôle refuse (422) un article de plus de PHRASES_AU_PLUS
+# phrases, mais rien n'empêchait le modèle d'en écrire plus : un brouillon de
+# 26 phrases a été enregistré, puis son contrôle refusé, après un appel payé.
+# Deux gardes :
+#   1. le prompt annonce PHRASES_VISEES, un peu SOUS le plafond (le modèle
+#      compte mal ses phrases, et le découpage du contrôle n'est pas le sien) ;
+#   2. après la génération, l'article est compté avec le découpage MÊME du
+#      contrôle (phrases_du_billet). Au-delà du plafond, on retire des
+#      ÉLÉMENTS ENTIERS, les moins utiles d'abord : la question suggérée (une
+#      invitation, pas une règle), puis les points clés du dernier au
+#      quatrième (ils redisent le résumé ; trois restent, le minimum demandé).
+#      Chaque retrait est un avertissement visible à la relecture.
+# Jamais on ne coupe une phrase, le résumé, l'impact ni l'explication d'une
+# citation : couper au milieu changerait le sens d'une règle de droit, et
+# sans le dire. Si l'article reste trop long, aucun brouillon n'est
+# enregistré (ReponseInvalideError) : un brouillon que le contrôle ne peut
+# pas juger ne se publierait jamais. Pourquoi pas une seconde génération :
+# elle doublerait le coût et la durée (DELAI_GENERATION_S), sans garantie
+# d'être plus courte ; l'administrateur peut relancer lui-même.
+PHRASES_VISEES = 22
+POINTS_CLES_AU_MOINS = 3
+
+
+def _tenir_le_plafond(
+    title: str,
+    context: str,
+    summary: str,
+    key_points: List[str],
+    citizen_impact: str,
+    citations: Sequence[Dict[str, Any]],
+    suggested_question: str,
+    avertissements: List[Avertissement],
+) -> Tuple[List[str], str]:
+    """Les points clés et la question, réduits sous PHRASES_AU_PLUS, ou ReponseInvalideError."""
+    # Import tardif : controle_du_billet importe ce module.
+    from app.services.controle_du_billet import (
+        PHRASES_AU_PLUS, ContenuDuBillet, phrases_du_billet,
+    )
+
+    def compte(points: List[str], question: str) -> int:
+        return len(phrases_du_billet(ContenuDuBillet(
+            title=title, context=context, summary=summary, key_points=points,
+            citizen_impact=citizen_impact, citations=list(citations),
+            suggested_question=question,
+        )))
+
+    total = compte(key_points, suggested_question)
+    if total <= PHRASES_AU_PLUS:
+        return key_points, suggested_question
+    depart = total
+    points = list(key_points)
+    if suggested_question and total > PHRASES_AU_PLUS:
+        suggested_question = ""
+        total = compte(points, suggested_question)
+        avertissements.append(Avertissement(
+            "Question suggérée", None,
+            f"Article trop long pour le contrôle ({depart} phrases, {PHRASES_AU_PLUS} au plus) : "
+            "la question suggérée a été retirée ; écrivez-en une courte si besoin.",
+        ))
+    while total > PHRASES_AU_PLUS and len(points) > POINTS_CLES_AU_MOINS:
+        retire = points.pop()
+        total = compte(points, suggested_question)
+        avertissements.append(Avertissement(
+            f"Point clé {len(points) + 1}", None,
+            f"Article trop long pour le contrôle ({depart} phrases, {PHRASES_AU_PLUS} au plus) : "
+            f"le point clé « {couper(retire, 120)} » a été retiré en entier.",
+        ))
+    if total > PHRASES_AU_PLUS:
+        logger.warning(f"⚠️ Blog : article de {depart} phrases, {total} après retraits")
+        raise ReponseInvalideError(
+            f"Le modèle a rédigé un article trop long pour le contrôle ({depart} phrases, "
+            f"{PHRASES_AU_PLUS} au plus) : aucun article n'a été enregistré. Relancez la "
+            "génération."
+        )
+    logger.info(f"📰 Blog : article ramené de {depart} à {total} phrases")
+    return points, suggested_question
 
 
 def sources_des_passages(

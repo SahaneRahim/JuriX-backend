@@ -1623,3 +1623,67 @@ class TestLaProseEstStable:
         assert article.summary == "La violation de domicile est punie."
         for texte in (article.context, article.summary):
             assert prose_publique(texte) == texte
+
+
+class TestLePlafondDePhrases:
+    """Option 2 du 08/11 : un brouillon de 26 phrases était enregistré, puis son contrôle refusé (422)."""
+
+    @staticmethod
+    def _recherche(textes):
+        return RechercheDoublee(extraits_du_sujet(textes), similarites(textes))
+
+    async def test_le_prompt_annonce_la_limite(self, db_session, textes):
+        from app.services.blog_generator_service import PHRASES_VISEES
+        from app.services.controle_du_billet import PHRASES_AU_PLUS
+
+        llm = modele_double()
+        await _service(db_session, self._recherche(textes), llm).rediger(SUJET)
+
+        assert PHRASES_VISEES < PHRASES_AU_PLUS
+        assert f"tient en {PHRASES_VISEES} phrases au plus" in _prompt(llm)
+
+    async def test_un_article_court_n_est_pas_touche(self, db_session, textes):
+        modele = article_du_modele()
+        article = await _service(
+            db_session, self._recherche(textes), modele_double(modele)
+        ).rediger(SUJET)
+
+        assert article.key_points == modele["key_points"]
+        assert article.suggested_question == modele["suggested_question"]
+        assert not any("trop long" in a.message for a in article.avertissements)
+
+    async def test_trop_long_retire_des_elements_entiers_et_le_dit(self, db_session, textes):
+        """Huit points (le maximum gardé) de trois phrases : 34 phrases, puis question et trois points retirés."""
+        points = [f"Point numéro {i}. Il dit une chose. Puis une autre." for i in range(1, 9)]
+        resume = (
+            "S'introduire dans le domicile d'autrui contre son gré est puni par "
+            "l'article 299 du Code Pénal. Une phrase. Deux phrases. Trois phrases."
+        )
+        modele = article_du_modele(key_points=points, summary=resume)
+        article = await _service(
+            db_session, self._recherche(textes), modele_double(modele)
+        ).rediger(SUJET)
+
+        from app.services.controle_du_billet import (
+            PHRASES_AU_PLUS, ContenuDuBillet, phrases_du_billet,
+        )
+        assert article.summary == resume  # jamais coupé
+        assert article.suggested_question == ""
+        assert article.key_points == points[:5]
+        assert 22 < len(phrases_du_billet(ContenuDuBillet(
+            title=article.title, context=article.context, summary=article.summary,
+            key_points=article.key_points, citizen_impact=article.citizen_impact,
+            citations=article.citations, suggested_question=article.suggested_question,
+        ))) <= PHRASES_AU_PLUS
+        messages = [a.message for a in article.avertissements if "trop long" in a.message]
+        assert any("question suggérée" in m for m in messages)
+        assert any("Point numéro 6" in m for m in messages)
+
+    async def test_irreductible_aucun_article(self, db_session, textes):
+        """Le résumé seul dépasse : rien n'est coupé, rien n'est enregistré."""
+        resume = " ".join(f"Phrase de règle numéro {i}." for i in range(30))
+        modele = article_du_modele(summary=resume)
+        with pytest.raises(ReponseInvalideError, match="trop long"):
+            await _service(
+                db_session, self._recherche(textes), modele_double(modele)
+            ).rediger(SUJET)

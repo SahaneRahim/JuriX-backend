@@ -1309,6 +1309,18 @@ def _article_de(phrases_par_partie: int, question: int = 1):
     )
 
 
+async def _allonger(db_session, post_id: int) -> None:
+    """
+    Option 2 du 08/11 : la génération ne rend plus d'article de plus de 25 phrases (elle
+    retire la question suggérée). Le plafond du contrôle se prouve donc sur un article
+    allongé APRÈS coup, comme le ferait une modification : quatre questions, 28 phrases.
+    """
+    await db_session.execute(text(
+        "UPDATE blog_posts SET suggested_question = :q WHERE id = :id"
+    ), {"q": " ".join(f"Question numéro {i} ?" for i in range(4)), "id": post_id})
+    await db_session.commit()
+
+
 class TestLeDelaiDuControle:
     """
     Revue du tour 4 (sondes TestLaDureeDuControle, à l'échelle de 1/100) : 35 et 69 phrases,
@@ -1339,16 +1351,21 @@ class TestLeDelaiDuControle:
         assert all(suivant[0] >= precedent[1] for precedent, suivant in zip(moments, moments[1:]))
         assert [p["id"] for p in relance.json()["controle_ia"]["phrases"]] == [f"P{i}" for i in range(1, 26)]
 
-    async def test_plus_de_vingt_cinq_phrases_dit_de_raccourcir(self, admin_client, generateur, controleur):
+    async def test_plus_de_vingt_cinq_phrases_dit_de_raccourcir(
+        self, admin_client, generateur, controleur, db_session
+    ):
         appels = []
         generateur.llm = _controle_au_rythme(0, appels, _article_de(1, question=4))
 
         corps = await _genere(admin_client)
+        # 29 phrases rendues : la génération retire la question (25) et le dit.
+        assert corps["post"]["suggestedQuestion"] in (None, "")
+        assert any("question suggérée a été retirée" in a for a in corps["avertissements"])
+        appels.clear()
+        controleur.llm.generate.reset_mock()
+        await _allonger(db_session, corps["post"]["id"])
         reponse = await _controle(admin_client, corps["post"]["id"])
 
-        # Généré, enregistré sans contrôle : l'avertissement dit de raccourcir.
-        assert corps["post"]["controle_ia"] is None
-        assert any("26 phrases, 25 au plus" in a and "raccourcissez-le" in a for a in corps["avertissements"])
         assert (reponse.status_code, reponse.json()["code"]) == (422, "entree_invalide")
         assert "raccourcissez-le" in reponse.json()["detail"]
         assert appels == []
@@ -1476,16 +1493,19 @@ class TestLePlanDuControleParLaRoute:
         corps = reponse.json() if reponse is not None else post
         assert corps["controle_ia"]["modele"] == GRAND and len(corps["controle_ia"]["phrases"]) == PHRASES_AU_PLUS
 
-    async def test_au_dela_du_plafond_rien_ne_part(self, admin_client, generateur, controleur, grand_modele):
-        """26 phrases : 422 « raccourcissez-le » par la route, et rien n'est envoyé au modèle."""
+    async def test_au_dela_du_plafond_rien_ne_part(
+        self, admin_client, generateur, controleur, grand_modele, db_session
+    ):
+        """28 phrases : 422 « raccourcissez-le » par la route, et rien n'est envoyé au modèle."""
         generateur.llm = _controle_au_rythme(0, [], _article_de(1, question=4))
         generateur.llm_du_controle = mistral_service.mistral_du_controle()
         controleur.llm = mistral_service.mistral_du_controle()
 
         corps = await _genere(admin_client)
+        await _allonger(db_session, corps["post"]["id"])
+        grand_modele.double.requetes.clear()
         reponse = await _controle(admin_client, corps["post"]["id"])
 
-        assert corps["post"]["controle_ia"] is None
         assert (reponse.status_code, reponse.json()["code"]) == (422, "entree_invalide")
         assert "raccourcissez-le" in reponse.json()["detail"]
         assert grand_modele.double.requetes == []
