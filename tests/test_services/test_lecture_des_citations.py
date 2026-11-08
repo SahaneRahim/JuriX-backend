@@ -1014,6 +1014,25 @@ class TestNomsQueLeNumeroSeulRattachait:
         assert occurrence.extrait.article_id == 2
         assert _cite(texte, occurrence) == "article 1.15 de la Loi PRC-8842"
 
+    def test_la_reference_recopiee_avec_des_espaces(self):
+        """
+        Vrai chat du 08/11/2026 : « l'article 309 de la Loi OHADA AUSCGIE
+        2014 », pour la reference OHADA-AUSCGIE-2014. Les tirets devenus des
+        espaces ne doivent pas faire signaler une citation juste ; une autre
+        annee, si.
+        """
+        titre = ("Acte uniforme révisé relatif au droit des sociétés commerciales "
+                 "et du groupement d'intérêt économique")
+        extraits = [_extrait(1, 1, "309", titre, "OHADA-AUSCGIE-2014", jour=date(2014, 1, 30))]
+        texte = "L'article 309 de la Loi OHADA AUSCGIE 2014 précise."
+
+        [occurrence] = lire_les_citations(texte, extraits)
+        [autre_annee] = lire_les_citations(texte.replace("2014", "2015"), extraits)
+
+        assert occurrence.extrait.article_id == 1
+        assert _cite(texte, occurrence) == "article 309 de la Loi OHADA AUSCGIE 2014"
+        assert autre_annee.extrait is None
+
     def test_un_texte_nomme_par_sa_nature_et_son_annee(self):
         """
         Vraie reponse sur la CCJA : « l'article 31 du Traité de 1993 », les deux

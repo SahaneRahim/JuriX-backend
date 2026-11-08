@@ -779,6 +779,11 @@ def _diverge(titre: str, prefixe: str, suite: str) -> bool:
     return True
 
 
+def _sans_separateurs(texte: str) -> str:
+    """Le texte plie, sans tirets, espaces ni « _ » : pour un premier tri rapide."""
+    return re.sub(r"[\s_-]+", "", texte.casefold())
+
+
 def _reconnaitre_la_reference(
     nom: str, noms: Dict[int, Tuple[str, str]]
 ) -> Tuple[int, Set[int]]:
@@ -789,16 +794,18 @@ def _reconnaitre_la_reference(
     juste, etait rattachee par son seul numero (vraie reponse d'evaluation).
     """
     tete = nom[:etendue_du_nom(nom)]
-    plie = tete.casefold()
+    plie = _sans_separateurs(tete)
     fin, lois = 0, set()
     for law_id, (_, reference) in noms.items():
         # La reference (normalisee) doit au moins etre dans le nom : 22 motifs
         # par nom lu, sinon, pour des noms qui n'en recopient presque jamais.
-        if not reference or reference.casefold() not in plie:
+        if not reference or _sans_separateurs(reference) not in plie:
             continue
-        trouve = re.search(
-            r"(?<![\w-])" + re.escape(reference) + r"(?![\w-])", tete, re.IGNORECASE
-        )
+        # Tirets, espaces et « _ » interchangeables : le modele recopie
+        # « OHADA-AUSCGIE-2014 » en « Loi OHADA AUSCGIE 2014 », et la citation
+        # juste etait signalee « non retrouvee » (chat du 08/11/2026).
+        motif = r"[\s_-]+".join(re.escape(m) for m in re.split(r"[\s_-]+", reference) if m)
+        trouve = re.search(r"(?<![\w-])" + motif + r"(?![\w-])", tete, re.IGNORECASE)
         if trouve:
             fin, lois = max(fin, trouve.end()), lois | {law_id}
     return fin, lois
