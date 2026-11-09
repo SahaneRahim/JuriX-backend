@@ -15,6 +15,7 @@ from starlette.datastructures import MutableHeaders
 from app.api.routes import (
     admin,
     analytics,
+    annuaire,
     articles,
     auth,
     batch_upload,
@@ -388,4 +389,5 @@ app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
 app.include_router(batch_upload.router, prefix="/api/v1/batch-upload", tags=["batch"])
 app.include_router(blog.router, prefix="/api/v1/blog", tags=["blog"])
 app.include_router(controle.router, prefix="/api/v1/controle", tags=["controle"])
+app.include_router(annuaire.router, prefix="/api/v1/annuaire", tags=["annuaire"])
 

@@ -295,6 +295,30 @@ class Progression(BaseModel):
     )
 
 
+class SourceDuContact(BaseModel):
+    titre: str
+    url: str
+    date: str
+
+
+class ContactInstitution(BaseModel):
+    """
+    Fiche de l'annuaire (app/services/annuaire.py) d'une institution vers
+    laquelle la reponse renvoie. Jamais ecrite par le modele.
+    """
+    id: str
+    theme: str
+    nom: str
+    region: Optional[str] = None
+    ville: Optional[str] = None
+    telephones: List[str] = Field(default_factory=list)
+    email: Optional[str] = None
+    site: Optional[str] = None
+    adresse: Optional[str] = None
+    note: Optional[str] = None
+    source: SourceDuContact
+
+
 class RAGResponse(BaseModel):
     """Response schema for RAG ask endpoint."""
 
@@ -327,6 +351,9 @@ class RAGResponse(BaseModel):
     )
     textes_consultes_non_cites: List[TexteConsulte] = Field(
         default_factory=list, description="Textes remis au modele que la reponse ne cite pas"
+    )
+    contacts: List[ContactInstitution] = Field(
+        default_factory=list, description="Institutions vers lesquelles la reponse renvoie (annuaire)"
     )
 
     model_config = {
@@ -413,6 +440,9 @@ class RAGStreamChunk(BaseModel):
     )
     textes_consultes_non_cites: Optional[List[TexteConsulte]] = Field(
         None, description="Textes remis au modele et non cites (only in final chunk)"
+    )
+    contacts: Optional[List[ContactInstitution]] = Field(
+        None, description="Institutions vers lesquelles la reponse renvoie (only in final chunk)"
     )
 
     def en_json(self) -> str:

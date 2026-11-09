@@ -49,6 +49,7 @@ from app.schemas.rag import (
     TexteTrouve,
 )
 from app.schemas.search import ChunkResult, SearchFilters, SearchRequest
+from app.services.annuaire import contacts_pour
 from app.services.article_reference import normalize_number, parse_reference
 from app.services.chat_groq import service_du_chat
 from app.services.intent_classifier import (
@@ -198,7 +199,7 @@ def _sans_citation() -> Dict[str, list]:
     """
     return {
         "citations": [], "citations_introuvables": [],
-        "articles_cites": [], "textes_consultes_non_cites": [],
+        "articles_cites": [], "textes_consultes_non_cites": [], "contacts": [],
     }
 
 
@@ -1954,6 +1955,7 @@ class RAGService:
                     citations_introuvables=reponse.citations_introuvables,
                     articles_cites=reponse.articles_cites,
                     textes_consultes_non_cites=reponse.textes_consultes_non_cites,
+                    contacts=reponse.contacts,
                 ).en_json()
                 return
 
@@ -3971,6 +3973,9 @@ class RAGService:
             "citations_introuvables": introuvables,
             "articles_cites": cites,
             "textes_consultes_non_cites": textes,
+            # Les institutions vers lesquelles la reponse renvoie : leurs
+            # coordonnees viennent de l'annuaire, jamais du modele.
+            "contacts": contacts_pour(answer),
         }
 
     @staticmethod
