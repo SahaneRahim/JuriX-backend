@@ -21,7 +21,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import backref, relationship
 
 from app.core.database import Base
 
@@ -165,7 +165,11 @@ class MessageFeedback(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     # Relationships
-    message = relationship("Message", backref="feedback")
+    # Cascade : sans elle, supprimer un message (donc une conversation) mettait
+    # `message_id` a NULL, refuse par la colonne.
+    message = relationship(
+        "Message", backref=backref("feedback", cascade="all, delete-orphan")
+    )
 
     __table_args__ = (CheckConstraint("rating >= 1 AND rating <= 5", name="ck_rating_range"),)
 
@@ -207,7 +211,12 @@ class PersonaInteraction(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    conversation = relationship("Conversation", backref="persona_interactions")
+    # Cascade : sans elle, supprimer une conversation mettait `conversation_id`
+    # a NULL, refuse par la colonne : la suppression rendait 500 en production
+    # pour toute conversation qui avait eu un echange (08/11/2026).
+    conversation = relationship(
+        "Conversation", backref=backref("persona_interactions", cascade="all, delete-orphan")
+    )
 
     def __repr__(self):
         return (
